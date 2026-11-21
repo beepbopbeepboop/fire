@@ -853,7 +853,7 @@ def _auto_invoke_bound_method_value(gen, bm_val: str) -> tuple[str, str]:
         return ret_type, raw_t
     raw_t = gen._call_expr('int64_t', 'mojo_bound_method_call_0',
                             [('MojoBoundMethod *', bm_val)])
-    if gimple_ctypes.TypeLattice.is_word(ret_type):
+    if ret_type == 'int64_t':
         return 'int64_t', raw_t
     if ret_type == 'void':
         return 'int', gen._new_val('int', '0')
@@ -1106,7 +1106,7 @@ def _lower_maybe_bound_call(gen, fname_raw: str,
     widened = []
     for a in node.args:
         at, av = gen.lower_expr(a)
-        widened.append(av if gimple_ctypes.TypeLattice.is_word(at) else gen._cast('int64_t', av))
+        widened.append(av if at == 'int64_t' else gen._cast('int64_t', av))
     n = len(widened)
     # A call that WRITES KEYWORD ARGUMENTS goes through the `_kw_` twin, which
     # threads the packed MojoDict through to a callee that declares
@@ -1153,7 +1153,7 @@ def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
     widened = []
     for a in node.args:
         at, av = gen.lower_expr(a)
-        widened.append(av if gimple_ctypes.TypeLattice.is_word(at) else gen._cast('int64_t', av))
+        widened.append(av if at == 'int64_t' else gen._cast('int64_t', av))
     n = len(widened)
     # A `double`-returning bound method must go through the `dN` twin
     # (same ABI fix as `mojo_fnptr_call_dN`): calling through the `int64_t`
@@ -1447,7 +1447,7 @@ def _struct_tag_unpack_result(gen, t, codes):
     # A uniform format does not mark, because its answer is the same either
     # way and an ordinary list must keep the plain accessor it always had.
     if len(set(kinds)) > 1:
-        gen._words.mark_slot_kinds(t)
+        gen._maybe_kinds_vals.add(t)
 
 
 def _lower_struct_module_call(gen, node, method_name):
@@ -1501,7 +1501,7 @@ def _lower_struct_module_call(gen, node, method_name):
         buf = _struct_buffer_arg(gen, args[1])
         if method_name == 'unpack_from' and len(args) >= 3:
             ot, ov = gen.lower_expr(args[2])
-            off = gen._cast('int64_t', ov) if not gimple_ctypes.TypeLattice.is_word(ot) else ov
+            off = gen._cast('int64_t', ov) if ot != 'int64_t' else ov
             t = gen._call_expr(_RT['unpack_from'], 'mojo_struct_unpack_from',
                                [('char *', fv), ('MojoBytes *', buf), ('int64_t', off)])
         elif method_name == 'unpack_from':
@@ -1517,7 +1517,7 @@ def _lower_struct_module_call(gen, node, method_name):
     if method_name == 'pack_into':
         buf = _struct_buffer_arg(gen, args[1])
         ot, ov = gen.lower_expr(args[2])
-        off = gen._cast('int64_t', ov) if not gimple_ctypes.TypeLattice.is_word(ot) else ov
+        off = gen._cast('int64_t', ov) if ot != 'int64_t' else ov
         lst = _struct_build_value_list(gen, args[3:], fmt_codes)
         gen._emit_call('void', '', 'mojo_struct_pack_into',
                        [('char *', fv), ('MojoBytes *', buf), ('int64_t', off), ('MojoList *', lst)])
@@ -1546,7 +1546,7 @@ def _lower_struct_instance_method(gen, fmt_val, method, node):
         buf = _struct_buffer_arg(gen, args[0])
         if method == 'unpack_from' and len(args) >= 2:
             ot, ov = gen.lower_expr(args[1])
-            off = gen._cast('int64_t', ov) if not gimple_ctypes.TypeLattice.is_word(ot) else ov
+            off = gen._cast('int64_t', ov) if ot != 'int64_t' else ov
             t = gen._call_expr(rtype, 'mojo_struct_unpack_from_h',
                                [('MojoStructFmt *', fp), ('MojoBytes *', buf), ('int64_t', off)])
         elif method == 'unpack_from':
@@ -1568,7 +1568,7 @@ def _lower_struct_instance_method(gen, fmt_val, method, node):
     if method == 'pack_into':
         buf = _struct_buffer_arg(gen, args[0])
         ot, ov = gen.lower_expr(args[1])
-        off = gen._cast('int64_t', ov) if not gimple_ctypes.TypeLattice.is_word(ot) else ov
+        off = gen._cast('int64_t', ov) if ot != 'int64_t' else ov
         lst = _struct_build_value_list(gen, args[2:], None)
         gen._emit_call('void', '', 'mojo_struct_pack_into_h',
                        [('MojoStructFmt *', fp), ('MojoBytes *', buf), ('int64_t', off), ('MojoList *', lst)])
@@ -1953,15 +1953,15 @@ def _lower_re_dynamic_call(gen, node, recv, method):
     # is the SUBJECT's, known only at run time (a str or a bytes), so it is a
     # pointer word the runtime kinds, like DirEntry.name's.
     if method == 'group':
-        gen._words.mark_dyn(r)
+        gen._dyn_word_vals.add(r)
         return 'int64_t', r
     if method == 'sub':
         if subj_t == 'MojoBytes *':
             return 'MojoBytes *', gen._coerce_to_type('int64_t', 'MojoBytes *', r)
         # A runtime-kinded subject (unknown static type) produces a result whose
         # kind is only known at run time: a word, not a fixed char *.
-        if gimple_ctypes.TypeLattice.is_word(subj_t):
-            gen._words.mark_dyn(r)
+        if subj_t == 'int64_t':
+            gen._dyn_word_vals.add(r)
             return 'int64_t', r
         return 'char *', gen._coerce_to_type('int64_t', 'char *', r)
     if method in ('groups', 'findall', 'split'):
@@ -1973,7 +1973,7 @@ def _lower_re_dynamic_call(gen, node, recv, method):
         lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
         gen._elem_types[lt] = 'int64_t'
         return 'MojoList *', lt
-    gen._words.mark_dyn(r)
+    gen._dyn_word_vals.add(r)
     return 'int64_t', r
 
 
@@ -2001,7 +2001,7 @@ def _lower_re_module_call(gen, node, method):
     else:
         pat_s = gen._cast('char *', pat_word)
         h = gen._call_expr('int64_t', 'mojo_re_compile', [('char *', pat_s), ('int64_t', fl)])
-    gen._words.mark_dyn(h)
+    gen._dyn_word_vals.add(h)
     if method == 'compile':
         return 'int64_t', h
     if len(args) < 2:
@@ -2033,7 +2033,7 @@ def _lower_re_module_call(gen, node, method):
         lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
         gen._elem_types[lt] = 'char *'
         return 'MojoList *', lt
-    gen._words.mark_dyn(r)
+    gen._dyn_word_vals.add(r)
     return 'int64_t', r
 
 
@@ -2419,7 +2419,7 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
                 bt, bv = gen.lower_expr(bytes_arg)
                 # Try to read bytes from list
                 # For simplicity, handle common cases
-                if gimple_ctypes.TypeLattice.is_list(bt) or gimple_ctypes.TypeLattice.is_word(bt):
+                if gimple_ctypes.TypeLattice.is_list(bt) or bt == 'int64_t':
                     # Try to extract bytes
                     result = gen._new_temp(ot)
                     if ot in ('uint16_t', 'int16_t', 'unsigned short', 'short'):
@@ -2610,7 +2610,7 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
             _dynm_args.append(('int64_t', gen._to_int64(_dynm_at, _dynm_av)))
         _dynm_res = gen._call_expr('int64_t',
                                    f'mojo_maybe_bound_call_{len(node.args)}', _dynm_args)
-        gen._words.mark_dyn(_dynm_res)
+        gen._dyn_word_vals.add(_dynm_res)
         return 'int64_t', _dynm_res
     # Other scalar methods: pass the receiver through unchanged
     for ea in node.args[1:]: gen.lower_expr(ea)
@@ -2657,7 +2657,7 @@ def _lmc_word_update(gen, node: gimple_ctypes.CallExpr, ot: str, ov) -> tuple[st
     One arm of `_lower_method_call`, which tests the condition and calls this."""
     ip = gen._new_temp('int64_t')
     ov_local = gen._ensure_local(ot, ov)
-    if gimple_ctypes.TypeLattice.is_word(ot):
+    if ot == 'int64_t':
         gen._copy(ip, f"{ov_local}")
     else:
         gen._cast_into(ip, 'int64_t', ov_local)
@@ -2731,7 +2731,7 @@ def _lmc_word_remove_clear(gen, node: gimple_ctypes.CallExpr, method: str, ot: s
     # removed with the runtime kind registries.
     ip = gen._new_temp('int64_t')
     ov_local = gen._ensure_local(ot, ov)
-    if gimple_ctypes.TypeLattice.is_word(ot):
+    if ot == 'int64_t':
         gen._copy(ip, f"{ov_local}")
     else:
         gen._cast_into(ip, 'int64_t', ov_local)
@@ -2794,7 +2794,7 @@ def _lmc_tagged_word_receiver(gen, node: gimple_ctypes.CallExpr, method: str, ot
     One arm of `_lower_method_call`, which tests the condition and calls this."""
     _tw = gen._new_temp('int64_t')
     _twl = gen._ensure_local(ot, ov)
-    if gimple_ctypes.TypeLattice.is_word(ot):
+    if ot == 'int64_t':
         gen._copy(_tw, _twl)
     else:
         gen._cast_into(_tw, 'int64_t', _twl)
@@ -3137,7 +3137,7 @@ def _lmc_generator_method(gen, node: gimple_ctypes.CallExpr, _gm_api, _recv_ot_r
     # pair below, whose ptr->int64_t coercion is legal C.
     elif (_recv_ot_raw in ('int', 'int64_t')
           and _gm_api.get('params')
-          and gimple_ctypes.TypeLattice.is_word(_gm_api['params'][0])):
+          and _gm_api['params'][0] == 'int64_t'):
         all_args = [('int64_t', _recv_ov_raw)] + arg_pairs
     else:
         all_args = [(ot, ov)] + arg_pairs
@@ -4259,7 +4259,7 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
                 t = gen._call_expr('int64_t', 'mojo_os_path_basename_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
                 # A str or bytes result by the argument's kind: a word the
                 # runtime answers for (truthiness, len), not a plain int.
-                gen._words.mark_dyn(t)
+                gen._dyn_word_vals.add(t)
             else:
                 t = gen._call_expr('char *', 'int64_t_basename', [(arg_type, arg_val)])
             return ('int64_t' if arg_type in ('int64_t', 'MojoBytes *') else 'char *'), t
@@ -4298,7 +4298,7 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
             # (usually out of range). Found via Tools/unicode/
             # gencodec.py's convertdir(): `name = os.path.split(mapname)[1]`.
             arg_type, arg_val = gen.lower_expr(node.args[0])
-            if gimple_ctypes.TypeLattice.is_word(arg_type) or arg_type == 'MojoBytes *':
+            if arg_type == 'int64_t' or arg_type == 'MojoBytes *':
                 if arg_type == 'MojoBytes *':
                     t = gen._call_expr('MojoList *', 'mojo_os_path_split_w',
                                         [('int64_t', f'(int64_t)(intptr_t){arg_val}')])
@@ -4381,7 +4381,7 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
             arg_type, arg_val = gen.lower_expr(node.args[0])
             if arg_type in ('int64_t', 'MojoBytes *'):
                 t = gen._call_expr('int64_t', 'mojo_os_path_dirname_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
-                gen._words.mark_dyn(t)   # str or bytes, by the argument's kind
+                gen._dyn_word_vals.add(t)   # str or bytes, by the argument's kind
                 return 'int64_t', t
             t = gen._call_expr('int64_t', 'int_dirname', [('int64_t', '0'), (arg_type, arg_val)])
             cast = gen._cast('char *', t)
@@ -4392,13 +4392,13 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
                 isinstance(_ja, UnaryOp) and _ja.op == '*'
                 for _ja in node.args)
             if len(node.args) == 0:
-                gen._cast_into(t, 'int64_t', '0')
+                gen._emit(f'  {t} = (int64_t)0;')
             elif len(node.args) == 1 and not _join_has_spread:
                 # os.path.join(*list) — single arg is a MojoList*
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 if gimple_ctypes.TypeLattice.is_list(arg_type):
                     gen._emit_call('int64_t', t, 'int_join_list', [('int64_t', '0'), (arg_type, arg_val)])
-                elif gimple_ctypes.TypeLattice.is_word(arg_type):
+                elif arg_type == 'int64_t':
                     # might be word; try word join if unsure
                     gen._emit_call('int64_t', t, 'mojo_os_path_join_w', [('int64_t', '0'), (arg_type, arg_val), ('int64_t', '0')])
                 else:
@@ -4440,7 +4440,7 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
                 # os.path.join(a, b) — two path args
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 arg2_type, arg2_val = gen.lower_expr(node.args[1])
-                if gimple_ctypes.TypeLattice.is_word(arg_type) or gimple_ctypes.TypeLattice.is_word(arg2_type) or arg_type == 'MojoBytes *' or arg2_type == 'MojoBytes *':
+                if arg_type == 'int64_t' or arg2_type == 'int64_t' or arg_type == 'MojoBytes *' or arg2_type == 'MojoBytes *':
                     # Each operand through `_to_int64`, which lands it in a
                     # temp: a bare `(int64_t)(intptr_t)<val>` is not a GIMPLE
                     # call operand ("invalid argument to gimple call"), which
@@ -4496,7 +4496,7 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
             gen._cast_into(t, 'int', eq)
             gen._goto(bb_merge)
             gen._emit_label(bb_false)
-            gen._cast_into(t, 'int', '0')
+            gen._emit(f'  {t} = (int)0;')
             gen._emit_label(bb_merge)
             return 'int', t
         elif outer_member == 'normpath' and len(node.args) == 1:
@@ -5314,7 +5314,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return at, av
         vp = gen._ensure_local(at, av)
         w = gen._call_expr('int64_t', '_mojo_dispatch_shallow_copy', [(at, vp)])
-        if gimple_ctypes.TypeLattice.is_word(at):
+        if at == 'int64_t':
             return 'int64_t', w
         return at, gen._coerce_to_type('int64_t', at, w)
     if (gimple_ctypes._is_dataclasses_module_ref(func.obj)
@@ -5454,7 +5454,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                               ('char *', gen._intern_string(_as_str(func.member))),
                               ('int64_t', gen._cast('int64_t', f"{len(node.args)}"))]
                              + [('int64_t', w) for w in words])
-        gen._words.mark_dyn(res)
+        gen._dyn_word_vals.add(res)
         return 'int64_t', res
     # The receiver's RAW lowered pair, before the resolution blocks below
     # may retag `ot` (the classmethod-receiver block can retag an
@@ -5468,7 +5468,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # (a compiled pattern held in a local, `re.compile(...)`'s result) the run time
     # picks (`mojo_split_dyn`).
     if (_as_str(func.member) == 'split' and ot in ('int64_t', 'int')
-            and (gen._words.is_dyn(ov)
+            and (ov in gen._dyn_word_vals
                  or (isinstance(func.obj, gimple_ctypes.IdentExpr)
                      and _as_str(func.obj.name) in gen._dyn_word_locals))
             and len(node.args) <= 1 and not getattr(node, 'kwargs', None)):
@@ -5667,7 +5667,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # emit an explicit cast so ov is a properly-typed local — otherwise _emit_call will
     # see matching types and skip the coercion, leaving GCC with an int64_t where a
     # pointer is expected.
-    if ot != ot_orig and gimple_ctypes.TypeLattice.ends_in_star(ot) and gimple_ctypes.TypeLattice.is_word(ot_orig):
+    if ot != ot_orig and gimple_ctypes.TypeLattice.ends_in_star(ot) and ot_orig == 'int64_t':
         ov_local = gen._ensure_local('int64_t', ov)
         ip_cast = gen._new_temp('int64_t')
         np_cast = gen._new_temp(ot)
@@ -5841,7 +5841,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # str arm, and any other kind raises instead of reading the box as a
     # container (CPython raises AttributeError; this runtime has one raiser
     # for a bad receiver, and the text is exact about the fact).
-    if ot in ('int', 'int64_t') and gen._words.is_tagged(ov):
+    if ot in ('int', 'int64_t') and ov in getattr(gen, '_tagged_word_vals', ()):
         _arm_r = _lmc_tagged_word_receiver(gen, node, method, ot, ov)
         if _arm_r is not None:
             return _arm_r
@@ -5895,7 +5895,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     ):
         ip = gen._new_temp('int64_t')
         ov_local = gen._ensure_local(ot, ov)
-        if gimple_ctypes.TypeLattice.is_word(ot):
+        if ot == 'int64_t':
             gen._copy(ip, f"{ov_local}")  # same type, no cast
         else:
             gen._cast_into(ip, 'int64_t', ov_local)
@@ -6061,7 +6061,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _cf_args.append(('int64_t', gen._to_int64(_cf_at, _cf_av)))
         _cf_res = gen._call_expr('int64_t', f'mojo_maybe_bound_call_{len(node.args)}', _cf_args)
         # Whatever the callable returns is a word of unknown kind.
-        gen._words.mark_dyn(_cf_res)
+        gen._dyn_word_vals.add(_cf_res)
         return 'int64_t', _cf_res
 
     # A str-only method on a word of unknown kind (a key from the dict arm
@@ -6707,8 +6707,8 @@ def _ldm_get(gen, ov: str, args: list) -> tuple:
         # the runtime -- `not sym_info.get('c_parameters')` called an
         # empty list true. Only the MERGED result is marked: the presence
         # test above is on the raw word, where 0 means absent.
-        if gimple_ctypes.TypeLattice.is_word(result_type) and not gen._dict_val_is_known(ov):
-            gen._words.mark_dyn(t)
+        if result_type == 'int64_t' and not gen._dict_val_is_known(ov):
+            gen._dyn_word_vals.add(t)
         return result_type, t
     if gimple_ctypes.TypeLattice.is_cstr(val_type):
         return 'char *', raw
@@ -6725,7 +6725,7 @@ def _ldm_get(gen, ov: str, args: list) -> tuple:
         return val_type, t
     else:
         if not gen._dict_val_is_known(ov):
-            gen._words.mark_dyn(raw)
+            gen._dyn_word_vals.add(raw)
         return 'int64_t', raw
 
 
@@ -6796,7 +6796,7 @@ def _ldm_values(gen, ov: str) -> tuple:
     # comprehension-built dict, and without it `print(d.values())` renders
     # each element with `mojo_repr_int`, i.e. the struct's own pointer as a
     # decimal.
-    if not (gimple_ctypes.TypeLattice.is_word(_vt) and gen._dict_val_repr.get(ov)) and _vt:
+    if not (_vt == 'int64_t' and gen._dict_val_repr.get(ov)) and _vt:
         gen._elem_types[t] = _vt
     return 'MojoList *', t
 
@@ -6823,7 +6823,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         # int word (True printed as 1, None as 0). Pairs are container slots,
         # so the pair ITSELF still reads raw (a container is never boxed by
         # mojo_list_get_boxed).
-        gen._words.mark_slot_kinds(t)
+        gen._maybe_kinds_vals.add(t)
         return 'MojoList *', t
     if method == 'fromkeys' and args:
         return _ldm_fromkeys(gen, ov, args)
@@ -7007,7 +7007,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                 gen._elem_types.get(ov) or 'int64_t')
             gen._emit_call('void', '', 'mojo_list_append_double_kinded',
                            [('MojoList *', ov), ('double', av), ('char', "'" + _prior + "'")])
-            gen._words.mark_slot_kinds(ov)
+            gen._maybe_kinds_vals.add(ov)
         else:
             # Coerce a bare `int`/`_Bool` literal to `int64_t` HERE rather
             # than leaving it to `_emit_call`'s param-type lookup: in the
@@ -7017,7 +7017,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             # instead of the `(int64_t)4` temp the Python reference builds
             # (byte-parity drift on `list_append`). `mojo_list_append_int`'s
             # 2nd param is always int64_t, so this is unconditionally correct.
-            if gimple_ctypes.TypeLattice.is_word(at) and gen._words.may_be_box(av):
+            if at == 'int64_t' and av in gen._boxed_vals:
                 # A TAGGED word -- the loop variable of a generator whose yields
                 # are mixed kinds (`for v in g(): out.append(v)`). Append it under
                 # the kind it carries (a None box as a None slot, a float as a
@@ -7026,7 +7026,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                 # iteration sites use (`mojo_list_append_word`).
                 gen._emit_call('void', '', 'mojo_list_append_word',
                                [('MojoList *', ov), ('int64_t', av)])
-                gen._words.mark_slot_kinds(ov)
+                gen._maybe_kinds_vals.add(ov)
             else:
                 if at in ('int', '_Bool'):
                     av = gen._coerce_to_type(at, 'int64_t', av)
@@ -7052,7 +7052,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             # narrowed type holds in the branch, not in the container.
             _arg_narrowed = (gen._narrow_key_for_expr(args[0])
                              in getattr(gen, '_narrowed_exprs', {}))
-            if (not _arg_narrowed) and (gimple_ctypes.TypeLattice.ends_in_star(at) or (gimple_ctypes.TypeLattice.is_word(at) and av in gen._actual_types and gimple_ctypes.TypeLattice.ends_in_star(gen._actual_types[av]))):
+            if (not _arg_narrowed) and (gimple_ctypes.TypeLattice.ends_in_star(at) or (at == 'int64_t' and av in gen._actual_types and gimple_ctypes.TypeLattice.ends_in_star(gen._actual_types[av]))):
                 actual_elem = gen._actual_types.get(_gmm_as_str(av), at)
                 gen._elem_types[ov] = actual_elem
                 if gimple_ctypes.TypeLattice.is_list(actual_elem) and av in gen._elem_types:
@@ -7133,7 +7133,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
         # table and its own discriminator before deciding.
         _skind = '0'
         _elem = gen._elem_of(ov)
-        if not gimple_ctypes.TypeLattice.is_word(_elem) or gen._elem_types.get(ov):
+        if _elem != 'int64_t' or gen._elem_types.get(ov):
             # A recorded element type — including a recorded `int64_t`, which
             # is a real answer for a list of ints. `TypeLattice.slot_kind_byte`
             # is the shared element-type -> alphabet-byte mapping (the same one
@@ -7333,7 +7333,7 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
         at, av = _set_str_elem_arg(gen, ov, at, av)
         if gimple_ctypes.TypeLattice.is_cstr(at):
             return gen._void_call('mojo_set_add_str', [('MojoSet *', ov), ('char *', av)])
-        if gimple_ctypes.TypeLattice.is_word(at) and not gen._words.is_int_word(av):
+        if at == 'int64_t' and av not in gen._int_word_vals:
             # A word of unknown kind: see mojo_set_add_word.
             return gen._void_call('mojo_set_add_word', [('MojoSet *', ov), ('int64_t', av)])
         av64 = gen._to_int64(at, av)
@@ -7343,7 +7343,7 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
         at, av = _set_str_elem_arg(gen, ov, at, av)
         if gimple_ctypes.TypeLattice.is_cstr(at):
             return gen._void_call('mojo_set_discard_str', [('MojoSet *', ov), (at, av)])
-        if gimple_ctypes.TypeLattice.is_word(at) and not gen._words.is_int_word(av):
+        if at == 'int64_t' and av not in gen._int_word_vals:
             return gen._void_call('mojo_set_discard_word', [('MojoSet *', ov), ('int64_t', av)])
         av64 = gen._to_int64(at, av)
         return gen._void_call('mojo_set_discard_int', [('MojoSet *', ov), ('int64_t', av64)])
@@ -7365,7 +7365,7 @@ def _set_str_elem_arg(gen, ov: str, at: str, av: str) -> tuple:
     compiler's `_extra_no_mangle.add(m['body_name'])` (coro.register) lost
     every generator body that way, and each one was then overload-mangled
     under a name its trampoline does not call."""
-    if gimple_ctypes.TypeLattice.is_word(at) and gen._elem_of(ov) == 'char *':
+    if at == 'int64_t' and gen._elem_of(ov) == 'char *':
         return 'char *', gen._cast('char *', av)
     return at, av
 
@@ -7485,9 +7485,9 @@ def _lower_str_format_call(gen, tmpl: str, arg_pairs: list, kwargs,
         _fav = _as_str(_fa[1])
         _an = _nodes[_ai] if _ai < len(_nodes) else None
         if (isinstance(_an, gimple_ctypes.UnaryOp) and _an.op == '*'
-                and (gimple_ctypes.TypeLattice.is_list(_fat) or gimple_ctypes.TypeLattice.is_word(_fat))):
+                and (gimple_ctypes.TypeLattice.is_list(_fat) or _fat == 'int64_t')):
             _src = _fav
-            if gimple_ctypes.TypeLattice.is_word(_fat):
+            if _fat == 'int64_t':
                 _src = _as_str(gen._materialize_as_list('int64_t', _fav))
             gen._emit_call('void', '', 'mojo_format_words_extend',
                            [('MojoList *', lst), ('MojoList *', _src)])
@@ -7523,7 +7523,7 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         loaded_args.append(av)
     arg_vals = loaded_args
     stored_type = gen.var_types.get(ov, 'char *')
-    if gimple_ctypes.TypeLattice.is_word(stored_type):
+    if stored_type == 'int64_t':
         cstr_ov = gen._cast('char *', ov)
     else:
         cstr_ov = ov
@@ -8005,7 +8005,7 @@ def _opt_arg(gen, args, kwargs, name, want, default):
     for k, v in (kwargs or []):
         if k == name:
             return gen.lower_expr(v)[1]
-    if gimple_ctypes.TypeLattice.is_word(want):
+    if want == 'int64_t':
         lo, hi = _OPT_SLOTS.get(name, (None, None))
         if lo is not None and len(args) > lo:
             return gen._to_int64(*gen.lower_expr(args[lo]))
@@ -8795,8 +8795,10 @@ def _lsmc_pad_defaults(gen, _is_cls_receiver: bool, _method_dflts: list, arg_pai
     # static method reached through an instance, and `arg_pairs` does
     # not — so a padded slot's declared type is read at `_pos + shift`.
     _recv_shift = 0 if (is_class_ref and not _is_cls_receiver) else 1
-    _pos = len(arg_pairs)
     while len(arg_pairs) < expected_non_self:
+        _pos = len(arg_pairs)
+        _dv = (_method_dflts[_pos - _first_dflt][1]
+               if 0 <= _pos - _first_dflt < len(_method_dflts) else None)
         # "No value" for a POINTER parameter is a typed NULL, not the
         # integer 0: 0 coerced into a `char *` parameter becomes the
         # one-character string "0" (via `mojo_cstr_or_int_str`), which
@@ -8806,18 +8808,6 @@ def _lsmc_pad_defaults(gen, _is_cls_receiver: bool, _method_dflts: list, arg_pai
         # = None)` delivered "0" and refused every file).
         _pct = (full_param_list[_pos + _recv_shift]
                 if 0 <= _pos + _recv_shift < len(full_param_list) else None)
-        # A `'...'` packing sentinel is not a fillable parameter — see
-        # `_lnc_pad_args`'s identical skip: the vararg packing pass emits
-        # the `MojoList *` pair for this slot, and padding it with 0 made
-        # a method with `*args` see a PHANTOM element when no extra
-        # argument was passed (bugs/CODEGEN_varargs_count_wrong_and_
-        # star_elements_unboxed). Skip the slot and keep padding the
-        # trailing params that follow it.
-        if _as_str(_pct) == '...':
-            _pos += 1
-            continue
-        _dv = (_method_dflts[_pos - _first_dflt][1]
-               if 0 <= _pos - _first_dflt < len(_method_dflts) else None)
         if _dv is not None:
             arg_pairs.append(ggc._default_expr_to_pair(gen, _dv,
                                                        param_ctype=_pct))
@@ -8825,7 +8815,6 @@ def _lsmc_pad_defaults(gen, _is_cls_receiver: bool, _method_dflts: list, arg_pai
             arg_pairs.append((_pct, '0'))
         else:
             arg_pairs.append(('int', '0'))
-        _pos += 1
     return None
 
 
@@ -8922,7 +8911,7 @@ def _virt_dispatch_plan(gen, struct_name, method, overload_id):
             # itertools.chain lowering uses — an int64_t word is vkind 0,
             # which the runtime reclassifies per element, the case for a
             # struct-pointer yield like parsing.py's tokens()).
-            if not gimple_ctypes.TypeLattice.is_word(base_ret):
+            if base_ret != 'int64_t':
                 continue
             _vkt = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}
             _vk = _vkt.get(_gmm_as_str(_api.get('value_ctype') or ''))
@@ -9117,7 +9106,7 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
                 _dw_args.append(('int64_t', gen._to_int64(_dw_at, _dw_av)))
             _dw_t = gen._call_expr('int64_t',
                                    f'mojo_maybe_bound_call_{1 + len(node.args)}', _dw_args)
-            gen._words.mark_dyn(_dw_t)
+            gen._dyn_word_vals.add(_dw_t)
             return 'int64_t', _dw_t
     # Same-file overload resolution: if this method's overloads were
     # registered from the CURRENT file's own AST (Pass 2b-bis), pick the

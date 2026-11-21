@@ -1995,10 +1995,155 @@ def param_annotation_conflicts(gen, pname: str, ann_ctype, body) -> str | None:
     return _param_annotation_cached(gen, pname, ann_ctype, body)
 
 
+# The value kind an `isinstance(p, T)` type argument names, by the BUILTIN
+# name `T` carries (a tuple of names is read as all of them). The same
+# container-vs-scalar split the annotation twin draws, so `selected =
+# [selected]` beside `isinstance(selected, str)` is the method-free spelling
+# of the annotation lie the detector exists for.
+_PARAM_ISINSTANCE_KIND = {
+    'str': 'str',
+    'bytes': 'bytes', 'bytearray': 'bytes',
+    'int': 'int', 'bool': 'bool', 'float': 'float',
+    'list': 'list', 'tuple': 'list',
+    'dict': 'dict', 'frozendict': 'dict',
+    'set': 'set', 'frozenset': 'set',
+}
+
+# The one-argument reads of a parameter that name a kind: the string-only
+# method set is `mojo.middle.types`' own (`is_string_only_method`, shared
+# with the method dispatch on an unknown-kind receiver), and `decode`/`hex`
+# are `_infer_param_types`'s BYTES_ONLY_METHODS — the only member calls
+# that exist on exactly one builtin kind, so `p.strip()` beside `p = [p]`
+# is the method-call spelling of the `isinstance` read above.
+_PARAM_BYTES_ONLY_METHODS = ('decode', 'hex')
+
+
+def _untyped_param_mixed_kinds(gen, pname: str, body) -> str | None:
+    """The category of disagreement an UNANNOTATED parameter's OWN body use
+    proves between the kinds it holds, or None.
+
+    The annotation-less twin of `_param_annotation_conflict`. That rule
+    compares the annotation's kind against the body's provable bindings;
+    with no annotation there is nothing to contradict, so BOTH sides come
+    from the body: a BINDING of the parameter to a kind (`selected =
+    [selected]` — the container the body stores through the slot) beside a
+    READ of it as a named kind (`isinstance(selected, str)`, a string-only
+    or bytes-only method call). Two kinds that do not agree is the same
+    "no single C type" shape the annotation rule covers, and the tagged
+    `int64_t` word is the same answer, with the same categories, so the
+    declaration (`funcs_shared._param_ctype`), the body's stores and reads
+    (`emit_infra.boxed_param_names`) and the call sites (`param_boxed_names`)
+    apply one rule instead of two.
+
+    Kind-neutral uses contribute nothing: a membership test, truthiness, an
+    iterable-consuming builtin (`frozenset(selected)` accepts a str and a
+    list alike) and a bare `print` each say which KINDS are possible, not
+    which one the value is. `None` means no provable disagreement: fewer
+    than two kinds, a same-family numeric pair (`True` beside `5`), or a
+    container beside a container (both arms are already bare words).
+    """
+    _pn = _as_str(pname)
+    _kinds: set = set()
+    for n in _each_binding(body or []):
+        value = None
+        if isinstance(n, gimple_ctypes.AssignStmt):
+            if isinstance(n.target, gimple_ctypes.IdentExpr) \
+                    and _as_str(n.target.name) == _pn:
+                value = n.value
+        elif isinstance(n, gimple_ctypes.VarDecl):
+            if _as_str(getattr(n, 'name', '')) == _pn:
+                value = n.value
+        else:
+            continue
+        _k = _param_value_binding_kind(gen, value)
+        if _k is not None and _k != 'none':
+            _kinds.add(_k)
+    # `_walk_ast`, not a hand walk: it is the one whole-node traversal this
+    # file already trusts for pre-pass scans (`_seed_addressed_locals`), it
+    # is memoized per node, and descending into a nested def is right, not
+    # an overreach — a closure that reads the parameter names a real use.
+    for n in gimple_exprtypes._walk_ast(body or []):
+        if not isinstance(n, gimple_ctypes.CallExpr):
+            continue
+        _fn = n.func
+        if isinstance(_fn, gimple_ctypes.IdentExpr) \
+                and _as_str(_fn.name) == 'isinstance' \
+                and len(n.args or []) == 2:
+            _arg0 = n.args[0]
+            if isinstance(_arg0, gimple_ctypes.IdentExpr) \
+                    and _as_str(_arg0.name) == _pn:
+                _targ = n.args[1]
+                _tnames = []
+                if isinstance(_targ, gimple_ctypes.TupleExpr):
+                    _tnames = list(_targ.elements or [])
+                else:
+                    _tnames = [_targ]
+                for _t in _tnames:
+                    if isinstance(_t, gimple_ctypes.IdentExpr):
+                        _tk = _PARAM_ISINSTANCE_KIND.get(_as_str(_t.name))
+                        if _tk is not None:
+                            _kinds.add(_tk)
+        elif isinstance(_fn, gimple_ctypes.MemberExpr):
+            _obj = _fn.obj
+            if isinstance(_obj, gimple_ctypes.IdentExpr) \
+                    and _as_str(_obj.name) == _pn:
+                _m = _as_str(_fn.member)
+                if gimple_ctypes.is_string_only_method(_m):
+                    _kinds.add('str')
+                elif _m in _PARAM_BYTES_ONLY_METHODS:
+                    _kinds.add('bytes')
+    if len(_kinds) < 2:
+        return None
+    _scalars = {k for k in _kinds if not _param_kind_is_container(k)}
+    _has_container = any(_param_kind_is_container(k) for k in _kinds)
+    if _has_container and _scalars:
+        return 'value'
+    if not _has_container:
+        # All scalar. Collapse the numeric family the annotation twin does:
+        # `True` beside `5` is one kind, not a disagreement.
+        _distinct = {('num' if k in ('int', 'bool') else k) for k in _scalars}
+        if len(_distinct) > 1:
+            return 'scalar'
+    return None
+
+
+def _untyped_param_mixed_kinds_cached(gen, pname: str, body) -> str | None:
+    """`_untyped_param_mixed_kinds`, memoized per (body identity, name).
+
+    The signature, the forward declaration, the return-type seeds and the
+    call-site registry all ask this same question for the same parameter
+    (`_param_ctype` is reached from every one of them), and a large
+    function's body walk is not free. Cached on the generator the way
+    `_param_annotation_cached` is, with the same key: one compile keeps
+    every body list alive, so identity cannot be recycled underneath it,
+    and a fresh compile is a fresh generator."""
+    cache = getattr(gen, '_untyped_param_conflict_cache', None)
+    if cache is None:
+        cache = {}
+        gen._untyped_param_conflict_cache = cache
+    key = (id(body) if body is not None else None, _as_str(pname))
+    got = cache.get(key)
+    if got is not None:
+        return got if got != '<none>' else None
+    ans = _untyped_param_mixed_kinds(gen, pname, body or [])
+    cache[key] = '<none>' if ans is None else ans
+    return ans
+
+
+def untyped_param_mixed_kinds(gen, pname: str, body) -> str | None:
+    """Public spelling of `_untyped_param_mixed_kinds_cached` for the
+    codegen's parameter-type resolver and boxed-name scans (the middle tier
+    owns the rule; the backend only consumes its answer, so the
+    binding/read classification cannot drift between the two)."""
+    return _untyped_param_mixed_kinds_cached(gen, pname, body)
+
+
 def param_boxed_names(gen, func) -> set:
-    """The parameter names of `func` whose annotation the body contradicts
-    in a way that needs the tagged word (a scalar beside a container, or two
-    different scalar kinds).
+    """The parameter names of `func` that need the tagged word: an
+    ANNOTATION the body contradicts (a scalar beside a container, or two
+    different scalar kinds), or NO annotation whose own body use proves the
+    same mixed kind (`untyped_param_mixed_kinds`, the annotation-less twin —
+    the usage inference picks one kind and the body disproves it).
 
     Used by the call site to box the argument by its own kind, so the callee
     receives a word that still says what it is. A container-vs-container
@@ -2008,14 +2153,20 @@ def param_boxed_names(gen, func) -> set:
     body = getattr(func, 'body', None) or []
     for _p in (getattr(func, 'params', None) or []):
         _pn = _as_str(_p[0] if isinstance(_p, (tuple, list)) else _p)
+        if _pn.startswith('*'):
+            continue
         _ann = _p[1] if isinstance(_p, (tuple, list)) and len(_p) > 1 else None
-        if _ann is None or _pn.startswith('*'):
-            continue
-        try:
-            _ann_ct = gen._resolve_type(_ann)
-        except Exception:
-            continue
-        _conf = _param_annotation_conflict(gen, _pn, _ann_ct, body)
+        if _ann is None:
+            try:
+                _conf = untyped_param_mixed_kinds(gen, _pn, body)
+            except Exception:
+                _conf = None
+        else:
+            try:
+                _ann_ct = gen._resolve_type(_ann)
+            except Exception:
+                continue
+            _conf = _param_annotation_conflict(gen, _pn, _ann_ct, body)
         if _conf == 'value' or _conf == 'scalar':
             out.add(_pn)
     return out
@@ -3142,7 +3293,7 @@ def _dict_value_locals(gen, body: list) -> tuple[dict, dict]:
         if name in out_vt:
             return                       # first store wins
         vt = gen._quick_type(n.value)
-        if gimple_ctypes.TypeLattice.is_word(vt):
+        if vt == 'int64_t':
             lit = _container_literal_ctype(n.value)
             if lit is not None:
                 vt = lit
@@ -3243,7 +3394,7 @@ def _lambda_call_ret_locals(gen, body: list) -> dict:
         if not isinstance(lam, gimple_ctypes.LambdaExpr):
             return
         bt = gen._quick_type(lam.body)
-        if bt and not gimple_ctypes.TypeLattice.is_word(bt):
+        if bt and bt != 'int64_t':
             out[name] = bt
 
     def note_def(fd):
@@ -3251,7 +3402,7 @@ def _lambda_call_ret_locals(gen, body: list) -> dict:
         if not name or name in out:
             return
         bt = _infer_return_type(gen, fd.body)
-        if bt and not gimple_ctypes.TypeLattice.is_word(bt):
+        if bt and bt != 'int64_t':
             out[name] = bt
 
     for n in _each_binding(body):
@@ -3324,7 +3475,7 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     _scratch_mark_ml: int = gen._scan_scratch_top
     _merged: dict = gen._scratch_dict_copy(_saved)
     for _n, _t in _locals.items():
-        if _n not in _merged or gimple_ctypes.TypeLattice.is_word(_t):
+        if _n not in _merged or _t == 'int64_t':
             _merged[_n] = _t
     gen.var_types = _merged
     # Same window, second table: `_quick_type`'s SubscriptExpr case reads
@@ -3565,7 +3716,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
         # sentinel check) via this pre-pass's seeded entry, even though
         # _lower_list_literal's own (later) codegen-time assignment
         # correctly left it unset.
-        if not (gimple_ctypes.TypeLattice.is_word(_e) and gen._literal_elements_include_none(lit.elements)):
+        if not (_e == 'int64_t' and gen._literal_elements_include_none(lit.elements)):
             elem[v] = _e
         if lit.elements and isinstance(lit.elements[0], gimple_ctypes.ListExpr):
             elem[v] = 'MojoList *'
@@ -3640,7 +3791,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                         inner = rest.rstrip(']').strip()
                         if inner:  # Only if there's an inner type
                             _ct = gen._resolve_type(inner)
-                            if _ct and not gimple_ctypes.TypeLattice.is_word(_ct):
+                            if _ct and _ct != 'int64_t':
                                 elem[_v] = _ct
                 elif _ann is not None and isinstance(_val, gimple_ctypes.SetExpr):
                     _ann_str = _as_str(_ann)
@@ -3649,7 +3800,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                         inner = rest.rstrip(']').strip()
                         if inner:
                             _ct = gen._resolve_type(inner)
-                            if _ct and not gimple_ctypes.TypeLattice.is_word(_ct):
+                            if _ct and _ct != 'int64_t':
                                 elem[_v] = _ct
                 continue
             if isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr):
@@ -3723,7 +3874,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                         inner = rest.rstrip(']').strip()
                         if inner:  # Only if there's an inner type
                             _ct = gen._resolve_type(inner)
-                            if _ct and not gimple_ctypes.TypeLattice.is_word(_ct):
+                            if _ct and _ct != 'int64_t':
                                 elem[v] = _ct
             elif (isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.SubscriptExpr)
                     and isinstance(n.target.obj, gimple_ctypes.IdentExpr)):

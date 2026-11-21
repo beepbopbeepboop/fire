@@ -252,12 +252,11 @@ that is meant to be behaviour-preserving:
   `__init__` leaks under the self-hosted compiler), so do not "simplify" it.
   Plan, in order, each step byte-identical C on `tools/pydiff_corpus` (hash
   `compile_to_gimple_with_cpp` output before and after):
-  1. (LANDED 2026-11-20, byte-identical on 284 programs) A plain class `WordFacts` (new `mojo/middle/valueinfo.py`) that OWNS the
+  1. A plain class `WordFacts` (new `mojo/middle/valueinfo.py`) that OWNS the
      six sets and has `save()` / `restore(saved)`; `FuncState` keeps ONE
      `fs_words` instead of twelve fields; the six `gen._x_vals` names stay
      bound to the same set objects (assigned once at construction, `.clear()`
      per function), so no reader changes.
-  (Steps 2 and 3 LANDED 2026-11-20: 100 readers and 148 writers go through `gen._words`; `test_type_string_ratchet.py` counts the direct spelling, baseline 10 = the six `bind` lines and docs. `== 'int64_t'` also moved to `TypeLattice.is_word`, 405 -> 101.)
   2. Add read predicates on it (`words.may_be_box(name)`, `words.is_tagged(name)`,
      `words.is_dyn(name)`, `words.is_int_word(name)`) and move the ~200 readers
      (`x in gen._boxed_vals`) onto them by codemod, as the type-string codemods

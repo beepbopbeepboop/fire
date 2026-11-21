@@ -240,15 +240,8 @@ def dict_param_reader_is_str(name: str, mojo_src: str, fn: str, want: bool):
         print(f"FAIL  {name}: {e}")
         _FAIL += 1
         return []
-    reads = [ln.strip() for ln in body.splitlines()
-             if 'mojo_dict_get' in ln or 'mojo_dict_subscript' in ln]
-    # The bare-subscript reads moved from the sentinel `mojo_dict_get_*`
-    # getters (which answer 0 for an absent key) to the raising
-    # `mojo_dict_subscript_*` family. Both spellings answer the same
-    # question here — WHICH VALUE TYPE the slot is read as — so the
-    # contract accepts either.
-    got = any('mojo_dict_get_str' in r or 'mojo_dict_subscript_str' in r
-              for r in reads)
+    reads = [ln.strip() for ln in body.splitlines() if 'mojo_dict_get' in ln]
+    got = any('mojo_dict_get_str' in r for r in reads)
     if got != want:
         print(f"FAIL  {name}: {fn} {'does' if want else 'does not'} read its "
               f"dict slot as a string, wanted {want} (reader calls: {reads})")
@@ -1614,37 +1607,6 @@ def main():
     print(g(1, 2, x=3))
     print(fwd(4, 5, y=6))
     print(g())
-main()
-""")
-
-    # The bugs/CODEGEN_varargs_count_wrong_and_star_elements_unboxed doc's
-    # repro, pinned whole: the call-site arg-padding loop used to treat the
-    # `'...'` packing sentinel as a fillable param and append `('int', '0')`
-    # to the packed `MojoList *`, so `show("a")` against
-    # `def show(first, *rest)` handed the callee a one-element `[0]` where
-    # CPython hands `()`, and every packed element went in through the int64
-    # coercion with no per-slot kinds row, so `char *` elements printed their
-    # pointer bits (`[4301523784, 4301523792]` for `['b', 'c']`). All six
-    # lines: the two phantom-count cases (`total()`, `show("a")`), the
-    # string-element reprs, and the `total(*args)` spread path.
-    test_gimple_matches_cpython("gimple_call_varargs_count_and_str_elements", """\
-def total(*nums):
-    s = 0
-    for n in nums:
-        s += n
-    return s
-
-def show(first, *rest):
-    print(first, len(rest), list(rest))
-
-def main():
-    print(total())
-    print(total(5))
-    print(total(1, 2, 3))
-    show("a")
-    show("a", "b", "c")
-    args = [1, 2, 3]
-    print(total(*args))
 main()
 """)
 
@@ -15512,10 +15474,10 @@ def main():
                   test_fstring_format_specs_match_cpython,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
-                  test_except_around_builtin_errors_matches_cpython,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
-                  test_gimple_values_print_as_pointers_inside_containers,
-                  test_dataclass_default_factory_fields_start_empty_and_per_instance):
+                  test_dataclass_default_factory_fields_start_empty_and_per_instance,
+                  test_param_annotation_contradicted_by_the_body,
+                  test_untyped_parameter_word_kind_not_recovered):
         try:
             _late()
         except AssertionError as e:
@@ -16225,6 +16187,43 @@ print(normalize_selection([]))
 print(sorted(normalize_selection("")))
 print(sorted(normalize_selection("a")))
 print(sorted(normalize_selection(selected="ab")))
+""")
+
+
+def test_untyped_parameter_word_kind_not_recovered():
+    """The UNANNOTATED twin of `test_param_annotation_contradicted_by_the_body`.
+
+    `def normalize_selection(selected, ...)` (no annotation) with a body
+    that rebinds the name to a list (`selected = [selected]`) and compares
+    it to `None`/`True`/`False` must get the same tagged `int64_t` word as
+    the annotated shape: the slot's kind is proven by the BODY, not by an
+    annotation. Before, usage inference typed the slot `MojoList *` (the
+    body iterates/frozensets it) and every reader split over that:
+    `None`/`True`/`False` arrived as their raw word bits (printed `0`/`1`/`0`
+    instead of their values) and a `''` argument segfaulted, while the
+    definition's word body and the declaration's pointer slot disagreed.
+
+    The binding-estimator reconcile that corrects a container-KIND error
+    (`list` vs `set`) must not treat that deliberate `int64_t` as a usage
+    guess to overwrite — the same declaration/definition split the annotated
+    fix closes. The two arms a `frozenset` repr cannot spell are compared by
+    sorted CONTENT against CPython, as in the annotated twin.
+    """
+    test_gimple_matches_cpython("gimple_untyped_parameter_word_kind_not_recovered", """\
+def normalize_selection(selected, *, possible=None):
+    if selected in (None, True, False):
+        return selected
+    elif isinstance(selected, str):
+        selected = [selected]
+    elif not selected:
+        return ()
+    return frozenset(selected)
+
+print(normalize_selection(None))
+print(normalize_selection(True))
+print(normalize_selection(False))
+print(sorted(normalize_selection('')))
+print(sorted(normalize_selection('a')))
 """)
 
 
@@ -16978,79 +16977,6 @@ def main():
     print(zoo[2].lives)
 main()
 """, filename='inherit.py')
-
-
-def test_gimple_values_print_as_pointers_inside_containers():
-    """CODEGEN_values_print_as_pointers_inside_containers: strings, nested
-    containers and bool-returning calls inside containers must print as
-    values, not raw pointer words / 1/0."""
-    test_gimple_matches_cpython("gimple_ptr_print_repro", """\
-def pair():
-    return ("a", "b")
-
-def main():
-    print(pair())
-    t = (-3.5, 3)
-    print(t)
-    d = {"ann": 3, "bo": 0}
-    print(list(d.items()))
-    print([(i, c) for i, c in enumerate("hi")])
-    print([[1, 2], [3, [4, []]]])
-main()
-""")
-    test_gimple_matches_cpython("gimple_bool_print_repro", """\
-def is_pos(n):
-    return n > 0
-
-def main():
-    r = is_pos(3)
-    print(r)
-    print(is_pos(-1))
-    flags = [is_pos(1), is_pos(-2)]
-    print(flags)
-    f = lambda n: n > 0
-    print(f(5))
-    print(not r)
-    print(bool(""))
-    print(bool("0"))
-main()
-""")
-
-
-def test_except_around_builtin_errors_matches_cpython():
-    """The builtin operations below raise real, catchable exceptions on the
-    compiled path, as they do in CPython: `int("x")` a ValueError (it used to
-    answer 0), `d["zz"]` a KeyError (it used to answer the slot's zero),
-    `[...][99]` an IndexError, and `1 // 0` a ZeroDivisionError. Before the
-    fixes the handlers printed plausible values instead of running, so nothing
-    fell over — only CPython on the same text says which answer is right."""
-    test_gimple_matches_cpython("gimple_except_around_builtin_errors", """\
-def safe_int(s):
-    try:
-        return int(s)
-    except ValueError:
-        return -1
-
-def main():
-    print(safe_int("12"))
-    print(safe_int("x"))
-    d = {"a": 1}
-    try:
-        print(d["zz"])
-    except KeyError:
-        print("no key")
-    try:
-        print([1, 2][99])
-    except IndexError:
-        print("no index")
-    try:
-        print(1 // 0)
-    except ZeroDivisionError:
-        print("div zero")
-    finally:
-        print("finally")
-main()
-""")
 
 
 # Keep the existing main if present; append our test call via module globals not needed

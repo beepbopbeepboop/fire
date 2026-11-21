@@ -33,7 +33,7 @@ feature gap, NOT this test's job):
 
 The stub check is per-imported-name, not "the phrase appears nowhere in
 the translation unit": the codegen's prelude carries its own unconditional
-weak `sort` stub (`bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md`), and a
+weak `sort` stub (`bugs/CODEGEN_prelude_sort_is_not_resolved.md`), and a
 whole-file grep would fail this pin on an unrelated prelude entry. What
 this regression owns is that no name IT imports is bound to a stub.
 
