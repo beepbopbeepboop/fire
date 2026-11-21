@@ -4664,7 +4664,16 @@ def boxed_param_names(gen) -> set:
     Only the two categories that need a box are included. A
     container-vs-container disagreement is already a bare word in both arms
     (`mixed_container_locals`), and a same-family numeric rebinding is
-    deliberately not a conflict, so neither needs the runtime tag."""
+    deliberately not a conflict, so neither needs the runtime tag.
+
+    The UNANNOTATED parameters of the same function go through the rule's
+    annotation-less twin (`untyped_param_mixed_kinds`) from
+    `_cur_untyped_params`, the name set `_reset_func` built from the same
+    params list: a body that binds one kind beside a read of another is the
+    same box-holding word with no annotation half, and its slot is already
+    the `int64_t` word `_param_ctype` declared, so the stores and reads must
+    take the same by-kind representation or the call site's box and the
+    body's read would be two spellings of one value."""
     cached = getattr(gen, '_cur_boxed_params', None)
     if cached is not None:
         return cached
@@ -4677,6 +4686,14 @@ def boxed_param_names(gen) -> set:
         except Exception:
             _conf = None
         if _conf == 'value' or _conf == 'scalar':
+            out.add(_as_str(_pn))
+    for _pn in (getattr(gen, '_cur_untyped_params', None) or ()):
+        try:
+            _conf = untyped_param_mixed_kinds(gen, _as_str(_pn),
+                                              gen._cur_func_body)
+        except Exception:
+            _conf = None
+        if _conf is not None:
             out.add(_as_str(_pn))
     gen._cur_boxed_params = out
     return out
