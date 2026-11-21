@@ -34,6 +34,7 @@ import mlir
 import mojo.backend_gimple.emit_funcs as _ggf
 from fire_compiler import _as_set
 import mojo.middle.types as gimple_ctypes
+from mojo.middle.exprtypes import _walk_ast
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.itcursor as itc
@@ -4636,6 +4637,13 @@ def _lmc_super_call(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, str]:
             gen.lower_expr(a)
         return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
     self_type, self_val = gen.lower_expr(gimple_ctypes.IdentExpr(name='self', line=getattr(node, 'line', 0)))
+    # The DERIVED receiver, kept for the presence set below: the cast to
+    # the base pointer type is correct for the method call, but the
+    # presence words live in the DERIVED struct — the base's own layout
+    # may carry no `__mojo_present` array at all. A bare local (the method's
+    # own `self` parameter), since GIMPLE rejects a parenthesized component
+    # base.
+    _self_derived = gen._ensure_local(self_type, self_val)
     fake_obj_type = f"{base_name} *"
     # `self`'s REAL declared C type is the DERIVED struct (e.g.
     # `_LiteralGenericAlias *`), not `fake_obj_type` (the base
@@ -4660,7 +4668,48 @@ def _lmc_super_call(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, str]:
     # type label.
     if self_type != fake_obj_type:
         self_val = gen._cast(fake_obj_type, self_val)
-    return gen._lower_struct_method_call(self_val, fake_obj_type, func.member, node)
+    _ret_t, _ret_v = gen._lower_struct_method_call(self_val, fake_obj_type, func.member, node)
+    if func.member == '__init__' and cur_struct:
+        # `super().__init__` writes the base's fields straight into THIS
+        # instance, but the derived struct presence-tracks a base field
+        # whenever the class's OWN __init__ does not assign it (see
+        # _mark_presence_field): `c.name` after `super().__init__(name)`
+        # then raised AttributeError, because the base constructor wrote
+        # through its own emission and never set the derived's bit. Set
+        # the derived bits for exactly the fields the base constructor
+        # assigns; a derived __init__ that skips super() leaves them
+        # clear, which keeps CPython's AttributeError for the attribute
+        # that was never set.
+        _sd6 = (getattr(gen, '_struct_def_nodes', None) or {}).get(_gmm_as_str(cur_struct))
+        _base_sd6 = (getattr(gen, '_struct_def_nodes', None) or {}).get(base_name)
+        if _sd6 is not None and _base_sd6 is not None:
+            for _bm6 in _base_sd6.methods:
+                if _gmm_as_str(getattr(_bm6, 'name', '')) != '__init__':
+                    continue
+                _assigned6 = set()
+                for _n6 in _walk_ast(_bm6.body):
+                    _tgts6 = []
+                    if isinstance(_n6, AssignStmt):
+                        _tgts6 = [_n6.target]
+                    elif isinstance(_n6, MultiAssignStmt):
+                        _tgts6 = list(_n6.targets)
+                    for _t6 in _tgts6:
+                        _leaves6 = [_t6]
+                        if isinstance(_t6, (TupleExpr, ListExpr)):
+                            _leaves6 = list(_t6.elements)
+                        for _lf6 in _leaves6:
+                            if (isinstance(_lf6, MemberExpr) and isinstance(_lf6.obj, IdentExpr)
+                                    and _as_str(_lf6.obj.name) == 'self'):
+                                _assigned6.add(_as_str(_lf6.member))
+                for _f6 in sorted(_assigned6):
+                    # No parens around the receiver: GIMPLE rejects a
+                    # parenthesized component base (`(self)->x` is "expected
+                    # expression before '('"). `self` here is the method's
+                    # own parameter, a bare local.
+                    gimple_ctypes.presence_set_emit(gen, _sd6, _f6,
+                                                    f"{_self_derived}", '->')
+                break
+    return _ret_t, _ret_v
 
 
 def _lmc_taskgroup_wait(gen, _wait_obj) -> tuple[str, str]:
