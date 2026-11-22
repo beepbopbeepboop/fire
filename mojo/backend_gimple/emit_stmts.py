@@ -6365,8 +6365,14 @@ def _gen_stmt_ExprStmt(gen, node):
                 else:
                     arg_pairs.append(('int', '0'))
                 _pos += 1
-        # Same float-box rule as `_lower_named_call` (see `_box_float_call_args`).
+        # Same float-box rule as `_lower_named_call` (see `_box_float_call_args`),
+        # and the same tagged-word rule (see `_box_param_call_args`): a bare
+        # `f(None)` / `f(True)` whose parameter is the tagged word must box its
+        # argument by kind, or the callee reads the bare word it was given.
         arg_pairs = ginf._box_float_call_args(gen, raw_name, arg_pairs)
+        arg_pairs = ginf._box_param_call_args(gen, raw_name, arg_pairs,
+                                              getattr(node.value, 'args', None),
+                                              getattr(node.value, 'kwargs', None))
         ginf._tag_mixed_list_call_args(gen, raw_name, arg_pairs)
 
         if fname in gen._KNOWN_SIGS:

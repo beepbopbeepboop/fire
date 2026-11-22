@@ -10220,7 +10220,8 @@ def _gmh_is_foreign_main(stmts, s):
     return isinstance(s, FunctionDef) and s.name == 'main' and s not in stmts
 
 
-def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods):
+def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
+                                module_stmts):
     """Record, per callee, the parameters whose annotation their own body
     contradicts (`infra_infer.param_boxed_names`).
 
@@ -10236,18 +10237,27 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods):
     are pre-signature and either may be the first to see a function."""
     import mojo.middle.infra_infer as ginf
     self._param_box_names: dict[str, set] = {}
-    # The subset of `_param_box_names` whose boxed slot exists because the
-    # parameter is declared `= None`: a call that OMITS the argument pads the
-    # declared default, which must be the None box (the plain word 0 is the
-    # integer 0). See `infra_infer.param_default_none_names`.
-    self._param_box_none_defaults: dict[str, set] = {}
+    # Whole-module call-site evidence for the tagged word (a bool or None
+    # LITERAL passed for an unannotated parameter); read by
+    # `infra_infer.param_default_none_names` from both the call-site record
+    # below and the callee's own body. See `callsite_tagged_literal_params`.
+    self._callsite_tagged_params: dict = ginf.callsite_tagged_literal_params(
+        module_stmts, all_functions, all_structs_for_methods)
+    # The subset of `_param_box_names` that is the TAGGED word by default
+    # evidence (`= None`, a bool default, or a call-site literal): a call that
+    # OMITS such an argument pads the declared default, which must be boxed by
+    # its own kind (the plain word 0 is the integer 0 / False). Stored as
+    # `{parameter: default expression}`, the node `box_word_value` boxes. See
+    # `infra_infer.param_default_none_names` and `param_tagged_defaults`.
+    self._param_box_defaults: dict[str, dict] = {}
     for s in all_functions:
         if isinstance(s, FunctionDef):
             _fs_pb = _as_funcdef_node(s)
-            self._param_box_names[_as_str(s.name)] = ginf.param_boxed_names(
-                self, _fs_pb, _as_str(s.name))
-            self._param_box_none_defaults[_as_str(s.name)] = \
-                ginf.param_default_none_names(self, _fs_pb, _as_str(s.name))
+            _fk_pb = _as_str(s.name)
+            self._param_box_names[_fk_pb] = ginf.param_boxed_names(
+                self, _fs_pb, _fk_pb)
+            self._param_box_defaults[_fk_pb] = ginf.param_tagged_defaults(
+                _fs_pb, ginf.param_default_none_names(self, _fs_pb, _fk_pb))
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             _sd_pb = _as_structdef_node(s)
@@ -10256,8 +10266,8 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods):
                 _pbk = f"{_as_str(_sd_pb.name)}_{_as_str(_pm_pb.name)}"
                 self._param_box_names[_pbk] = ginf.param_boxed_names(
                     self, _pm_pb, _pbk)
-                self._param_box_none_defaults[_pbk] = \
-                    ginf.param_default_none_names(self, _pm_pb, _pbk)
+                self._param_box_defaults[_pbk] = ginf.param_tagged_defaults(
+                    _pm_pb, ginf.param_default_none_names(self, _pm_pb, _pbk))
     # The DECLARATION half of the same rule, applied to the table every
     # signature reader consults. `funcs_shared._param_ctype` overrides a
     # flagged parameter to the tagged word for its OWN readers, but the
@@ -17219,7 +17229,8 @@ def gen_module_impl(self, stmts: list):
                 # `mojo.*` import (see the import block's comment).
                 import mojo.middle.infra_infer as ginf
                 ginf.alias_multi_kind_locals(self, key, m)
-    _gmh_record_param_box_names(self, all_functions, all_structs_for_methods)
+    _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
+                                stmts)
     _gmh_reconcile_param_container_kinds(self)
     _gmh_reconcile_augmented_param_types(
         self, all_functions, all_structs_for_methods)
@@ -20020,7 +20031,8 @@ def gen_module_impl(self, stmts: list):
                 # `mojo.*` import (see the import block's comment).
                 import mojo.middle.infra_infer as ginf
                 ginf.alias_multi_kind_locals(self, key, m)
-    _gmh_record_param_box_names(self, all_functions, all_structs_for_methods)
+    _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
+                                stmts)
     _gmh_reconcile_param_container_kinds(self)
     _gmh_reconcile_augmented_param_types(
         self, all_functions, all_structs_for_methods)

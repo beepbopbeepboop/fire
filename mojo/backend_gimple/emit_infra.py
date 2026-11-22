@@ -8843,15 +8843,17 @@ def _box_param_call_args(gen, callee: str, arg_pairs: list,
         _node = _by_slot.get(_i)
         if _node is None:
             # The argument was OMITTED and padded with the parameter's
-            # declared default. For a parameter declared `= None` the pad
-            # pair is the plain word 0, which is the integer 0, not None:
-            # box the None the declaration promised. This is the only arm
-            # that can know the default (the caller only has the padded
-            # pair, not the AST node).
-            if _pn in (getattr(gen, '_param_box_none_defaults', None) or {}).get(
-                    _as_str(callee), ()):
-                out.append(('int64_t', gen._call_expr(
-                    'int64_t', 'mojo_box_none', [])))
+            # declared default. The pad pair is the bare word (0 for `= None`
+            # and `= False`), which is the integer, not the value the
+            # declaration promised: box the default by its own node, so a
+            # `= None` pads the None box and a `= False` the bool box. This is
+            # the only arm that can know the default (the caller only has the
+            # padded pair, not the AST node).
+            _pdef = ((getattr(gen, '_param_box_defaults', None) or {}).get(
+                _as_str(callee)) or {}).get(_pn)
+            if _pdef is not None:
+                _bv, _bt = box_word_value(gen, _pdef, _at, _av)
+                out.append((_bt, _bv))
                 continue
             out.append((_at, _av))
             continue
