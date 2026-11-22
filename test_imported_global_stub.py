@@ -329,10 +329,41 @@ def test_py_global_typed_through_reexported_callee():
         'home_module_path': os.path.join(HERE, 'module_loader.py')}, exports.get('STDLIB_PATH')
 
 
+def test_def_returning_imported_str_global_is_char_ptr():
+    # A def returning a bare imported `str` global was typed `int64_t`. A definer outside the
+    # compiler's own directory exports no entry for its `NAME = "s"` global
+    # (the module_loader export scan is gated to `_selfhost_dir`), so the
+    # importer's accessor table is empty for it. The definer IS compiled into
+    # this unit (do_imports=True), so its field `char *` is known by the time
+    # return inference runs. Red before the fix: `f` was typed `int64_t` while
+    # its body read `_k_src_globals.NAME` as `char *`.
+    import re
+    import gimple_codegen
+    root = os.path.join(HERE, 'build', 'test_imported_global_stub')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='probe_', dir=root)
+    try:
+        with open(os.path.join(td, 'k_src.py'), 'w') as f:
+            f.write('NAME = "s"\n')
+        path = os.path.join(td, 'd_def.py')
+        src = 'from k_src import NAME\n\ndef f(x):\n    return NAME\n'
+        with open(path, 'w') as f:
+            f.write(src)
+        out = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=path)
+        protos = re.findall(r'^\S[^\n]*\bf_[0-9a-f]+ \(', out, re.M)
+        assert protos, out
+        assert all(p.startswith('char * ') for p in protos), protos
+        assert not re.search(r'int64_t f_[0-9a-f]+ \(int64_t x\)', out), out
+    finally:
+        import shutil
+        shutil.rmtree(td, ignore_errors=True)
+
+
 if __name__ == '__main__':
     test_imported_global_has_no_function_stub()
     test_function_scoped_str_global_reads_accessor_not_stub()
     test_py_scalar_global_scanner_types_only_what_the_definer_types()
     test_py_str_literal_global_is_read_through_accessor()
     test_py_global_typed_through_reexported_callee()
+    test_def_returning_imported_str_global_is_char_ptr()
     print('PASS')

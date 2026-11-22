@@ -127,7 +127,7 @@ from mojo.middle.module_shared import (
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,
     _collect_import_modules, _collect_import_modules_rec, _cpp_method_receiver_name, _extract_init_expr, _gmi_all_stmts_nonfunc, _gmi_as_str, _gmi_collect_global_stmts,
     _gmi_collect_return_values, _gmi_collect_self_assigns, _gmi_container_ctype, _gmi_find_comptime_one, _gmi_global_init_code, _gmi_phase17_collect_appends, _gmi_prefold_toplevel_comptime, _gmi_tuple_target_globals,
-    _gmi_scan_cpp_nested_imports, _gmi_scan_func_body_for_self_attr, _gmi_scan_import_modules, _gmi_scan_imported_global_homes, _gmi_scan_try_imports, _gmi_self_member, _import_targets,
+    _gmi_scan_cpp_nested_imports, _gmi_scan_func_body_for_self_attr, _gmi_scan_import_modules, _gmi_scan_imported_global_homes, _gmi_module_bound_names, _gmi_scan_try_imports, _gmi_self_member, _import_targets,
     _mojo_type, _pair_key, _ptr_slot_in_range, _register_sym, _selfhost_fn_reassigns_method, _selfhost_homogeneous_tuple_ret_funcs,
     _selfhost_modglobal_is_pathcall, _selfhost_module_scalar_globals, _selfhost_struct_dict_field_val_types, _sms_key, _walk_ast
 )
@@ -15756,6 +15756,18 @@ def gen_module_impl(self, stmts: list):
                 _pub_known.add(id(_pub_s))
     _gmp_register_method_sigs(self, all_structs_for_methods)
 
+    # The from-import homes must exist BEFORE return inference: a def that
+    # returns a bare imported global (`from k_src import NAME` / `return NAME`)
+    # takes its return type from `_quick_type`, which reads
+    # `_own_imported_global_home`. Every `from X import` home is registered
+    # by now (`_gmp_compile_imports` compiled each sibling and Phase 1.7 has
+    # populated `_global_to_module`); the scan is idempotent, so the later
+    # call at the global-typing stage only re-confirms these records. A name
+    # this module binds at module scope itself is excluded here (`own_bound`):
+    # Phase 1.7 has not filled `_own_global_var_types` yet, so the exclusion
+    # must come from the module's own statements, or a shadowing `N = ...`
+    # would route its return type and reads to the imported home.
+    _gmi_scan_imported_global_homes(self, stmts, _gmi_module_bound_names(stmts))
     _gmp_infer_return_types(self, stmts, all_functions)
 
     for _pass2b_iter in range(4):

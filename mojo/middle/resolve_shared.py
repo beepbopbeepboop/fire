@@ -323,6 +323,20 @@ def _quick_type(gen, node) -> str:
         _imp_acc = getattr(gen, '_imported_global_accessors', {}).get(node.name)
         if _imp_acc is not None:
             return _as_str(_imp_acc[0])
+        # The same from-import home the body read routes through
+        # (`bare_global_read_plan`'s `_imp_fields`): when the defining module
+        # is compiled into this unit but no export entry exists for the name
+        # (a definer outside the compiler's own directory, where the
+        # module_loader export scan does not run), its registered field C
+        # type is the answer, not the int64_t default. Without this a def
+        # returning a bare imported `str` global was typed `int64_t`, while
+        # its body read `_k_src_globals.NAME` as `char *`.
+        _imp_home = _as_str(getattr(gen, '_own_imported_global_home', {}).get(node.name) or '')
+        _imp_field = _as_str(getattr(gen, '_own_imported_global_field', {}).get(node.name) or '')
+        if _imp_home and _imp_field:
+            _imp_fields = gen._module_global_field_type(_imp_home, _imp_field)
+            if _imp_fields is not None:
+                return _as_str(_imp_fields[0])
         return 'int64_t'
     if (isinstance(node, gimple_ctypes.SubscriptExpr)
             and (isinstance(node.obj, gimple_ctypes.IdentExpr)
