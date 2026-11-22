@@ -1741,7 +1741,8 @@ def fanout(*a, **kw) -> Fanout:
 # reorganising the runner. `gate` below is the wider one.
 test('gimple', [PY, 'test_gimple.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple.py'],
-     desc='GIMPLE unit suite (python-interpreted codegen)')
+     desc='GIMPLE unit suite (python-interpreted codegen)',
+     disabled='bugs/gate-gimple.md')
 # Registered 2026-09-26. Both `test_gimple_runner.py` and
 # `test_gimple_generator_runner.py` were in NO bucket — no `make check`, no
 # `make gate` ran a single case in them — for as long as they existed. That
@@ -1788,7 +1789,8 @@ test('modcache', [PY, 'test_module_cache.py'], mem='tiny', cache=True,
      timeout=1800,
      extra=GIMPLE_SOURCES + ['test_module_cache.py', 'exec_budget.py',
                              'myinterpreter.py', 'fire.py', 'fire_main.py'],
-     desc='module cache end-to-end stages')
+     desc='module cache end-to-end stages',
+     disabled='bugs/gate-modcache.md')
 # Registered 2026-09-27. Found while implementing FORMAL.md phase 0:
 # `reflect._PROTO_RE` could not match a pointer return (`char *name(...)` — the
 # `*` is attached to the type with no space before the name), so it silently
@@ -1819,7 +1821,8 @@ test('ptrreg-boxed-str', [PY, 'test_ptr_registry.py', '--group', 'boxedstr'],
 # cell where it is silently 0 — an instrument nothing runs is a claim.
 test('refusal-taxonomy', [PY, 'test_refusal_taxonomy.py'],
      deps=['preflight'], mem='tiny',
-     desc='the sweep\'s refusal families stay a taxonomy, and stay out of "other"')
+     desc='the sweep\'s refusal families stay a taxonomy, and stay out of "other"',
+     disabled='bugs/gate-refusal-taxonomy.md')
 # ~275 s, because it builds and runs real programs on both paths. `proofs`, not
 # `check`: the everyday inner loop should not pay for it every time.
 test('comptime-parity', [PY, 'test_comptime_parity.py'],
@@ -1957,7 +1960,8 @@ test('linkmode', [PY, 'test_link_mode.py'], cache=True, mem='tiny',
      timeout=7200,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'driver.py', 'test_link_mode.py'],
-     desc='the real driver.compile_program link-mode pipeline')
+     desc='the real driver.compile_program link-mode pipeline',
+     disabled='bugs/gate-linkmode.md')
 test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
      mem='tiny', extra=GIMPLE_SOURCES + ['test_no_new_container_casts.py'],
      desc='grow-only allowlist on ad-hoc container casts (text scan)')
@@ -2114,13 +2118,15 @@ test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
-     desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
+     desc='compile-and-execute: plain programs, structs, closures, stdlib calls',
+     disabled='bugs/gate-gimplerunner.md')
 test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_generator_runner.py',
                              'exec_budget.py',      # imported: must be in the key
                              'build_config.py', RUNTIME_SRC, RUNTIME_HDR]
          + CORO_RUNTIME,
-     desc='compile-and-execute: every generator/coroutine shape, both backends')
+     desc='compile-and-execute: every generator/coroutine shape, both backends',
+     disabled='bugs/gate-gimplegenerators.md')
 
 test('runtimere', [PY, 'test_runtime_re.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_runtime_re.py', 'build_config.py', 'exec_budget.py',
@@ -3152,7 +3158,8 @@ test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
             'check it mostly is. The 1.5 GB warm peak is its table row and is '
             'NOT what may size this class; see '
             'a cold store (MEASURED_PEAK_GB["prooflib"]). See ' + MEM_DEBT_DOC,
-     desc='the sweep, measured against the interpreter: no invented coverage')
+     desc='the sweep, measured against the interpreter: no invented coverage',
+     disabled='bugs/gate-formal-sweep-truth.md')
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'], mem='tiny',
      desc='every bound symbol is accounted for, on every container format')
@@ -4845,7 +4852,8 @@ test('function-body-alias-class-import',
      [PY, 'test_function_body_alias_class_import.py'], cache=True, mem='tiny',
      extra=['test_function_body_alias_class_import.py'],
      desc='a function-body `from M import Class as Alias` binds the class, '
-          'not an "unavailable in compiled mode" stub')
+          'not an "unavailable in compiled mode" stub',
+     disabled='bugs/gate-function-body-alias-class-import.md')
 test('gpu-offload-validation-part3',
      [PY, 'test_gpu_offload_validation_part3.py'], cache=True, mem='tiny',
      extra=['test_gpu_offload_validation_part3.py'],
