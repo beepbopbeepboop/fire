@@ -10842,15 +10842,14 @@ fn main():
     # ever holds a float and in Python a float operand makes the whole
     # operation a float one.
     #
-    # The sixth and ninth lines are the ONE recorded cost of "always a
-    # double", asserted here rather than left to rot: a boxed read whose
-    # runtime slot turns out to be an INT gets promoted, so its arithmetic
-    # result is float-typed and prints `2.0` where CPython prints `2` — the
-    # same number, a different format. Choosing per slot would need a
-    # runtime branch around the whole operand dispatch, and a wrong value
-    # traded for a wrong format is the right way round. Line seven is the
-    # control: a read with a COMPILE-TIME index takes no box at all, so
-    # `t[0] + 1` is exact.
+    # The sixth and ninth lines are a boxed read whose runtime slot is an
+    # INT: `+ 1` on it must answer by the box's KIND (an int word, printed
+    # `2` as CPython prints it), not promote to a double (`2.0`). That
+    # promotion used to be recorded here as an accepted cost of "always a
+    # double"; the read-side box now carries its kind and
+    # `_tagged_arith_select` answers by it (`_kind_arith_operand`), so the
+    # expectation is CPython's own output. Line seven is the control: a read
+    # with a COMPILE-TIME index takes no box at all, so `t[0] + 1` is exact.
     test_gimple_stdout("gimple_heterogeneous_element_arithmetic_unboxes", """\
 fn main():
     var t = struct.unpack('<if', struct.pack('<if', 1, 1.5))
@@ -10866,7 +10865,7 @@ fn main():
     var a = [1, 2.5]
     for x in a:
         print(x + 1)
-""", "1.5\n2.5\n3.0\n1.5\n1.5\n2.0\n2\n2.0\n3.5\n")
+""", "1.5\n2.5\n3.0\n1.5\n1.5\n2\n2\n2\n3.5\n")
 
     # The SAME case one level down, in the spelling that is not `var`:
     # `b = [1, 2.5]` / `t = struct.unpack(...)` is an `AssignStmt`, and the
@@ -10877,9 +10876,7 @@ fn main():
     # Exit 0, no diagnostic, and the identical `var` spelling one line away
     # was right. `c` is the control: a homogeneous list is untouched, and
     # `t`'s two reads are the static-index and computed-index cases of the
-    # same value. (The trailing `2.0` is the documented promotion above, not
-    # a defect: a boxed read whose slot turns out to be an int is computed
-    # in double.)
+    # same value.
     test_gimple_stdout("gimple_heterogeneous_reads_survive_a_plain_assignment", """\
 fn main():
     b = [1, 2.5]
