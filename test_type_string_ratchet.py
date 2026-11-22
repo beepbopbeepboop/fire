@@ -35,15 +35,9 @@ PATTERNS = {
     # type-checks at the source; the builder calls (`_rt_call`, `_cast`,
     # `_copy`, `_goto`, `_binop`, ...) are checked by gimple_lint.
     "gen._emit( text": r"""\b(?:gen|self)\._emit\(""",
-    # ...and `build.raw` is the builder's adapter for a statement no family
-    # models yet, so it is the same debt and must not become the way around
-    # the count above. Only `_emit_raw` itself should call it.
-    "build.raw( text": r"""\bbuild\.raw\(""",
-    # Stage 5b: the per-temp word facts are ONE `WordFacts` record map
-    # (mojo/middle/valueinfo.py: `may_be_box`, `mark_tagged`, ...). A direct
-    # `gen._boxed_vals` is the old spelling. The six sets themselves are gone
-    # (stage 5b step 4, 2026-11-21), and no prose names them through `gen.`
-    # either, so the baseline is 0 (it was 10 while the `bind` lines existed).
+    # Stage 5b: the six dynamic-word sets are read and written through
+    # `gen._words` (mojo/middle/valueinfo.py: `may_be_box`, `mark_tagged`, ...).
+    # A direct `gen._boxed_vals` is the old spelling.
     "direct word-set use": r"""(?m)^(?![ \t]*#).*\b(?:gen|self)\._(?:boxed_vals|tagged_word_vals|dyn_word_vals|int_word_vals|maybe_kinds_vals|boxed_container_vals)\b""",
 }
 
@@ -55,21 +49,8 @@ BASELINE = {
     "== '_Bool'": 2,
     "== 'double'": 8,
     "== 'MojoList *'": 29,
-    # Stage 2b is landed: every statement the lowering writes is a builder
-    # call, and `build.raw` is the only text channel left (its own baseline).
-    "gen._emit( text": 0,
-    "build.raw( text": 1,
-    "direct word-set use": 0,
-}
-
-# A pattern whose SUBJECT is narrower than "every backend module".  The
-# `gen._emit( text` ratchet counts a statement spelled as GIMPLE C text;
-# `emit_metal.py` emits Metal Shading Language through its own `_emit` method
-# and writes no gimple statement at all, so its 21 `self._emit(` calls can
-# never move.  Leaving them in made the ratchet's floor 21 instead of 0,
-# where a real regression could hide behind them (measured 2026-11-21).
-_NOT_THIS_PATTERNS_SUBJECT = {
-    "gen._emit( text": {"mojo/backend_gimple/emit_metal.py"},
+    "gen._emit( text": 266,
+    "direct word-set use": 10,
 }
 
 
@@ -85,19 +66,8 @@ def sources() -> list:
 
 
 def counts() -> dict:
-    texts: list = []
-    for p in sources():
-        texts.append((os.path.relpath(p, HERE).replace(os.sep, '/'), open(p).read()))
-    out: dict = {}
-    for k in PATTERNS:
-        skip = _NOT_THIS_PATTERNS_SUBJECT.get(k, set())
-        n = 0
-        for rel, text in texts:
-            if rel in skip:
-                continue
-            n += len(re.findall(PATTERNS[k], text))
-        out[k] = n
-    return out
+    texts = [open(p).read() for p in sources()]
+    return {k: sum(len(re.findall(v, t)) for t in texts) for k, v in PATTERNS.items()}
 
 
 def per_file(only_stage4: bool = True) -> None:

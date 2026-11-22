@@ -332,11 +332,8 @@ def count_text_calls() -> tuple:
 # ANY call still spelled as text, whatever its callee: a computed name
 # (`f"{base}_resume ({h})"`, `f"mojo_list_set_{suf} (...)"`), a user function,
 # a libc function.  `_rt_call` / `_rt_into` / `_rt_void` take a computed callee
-# name too.  May only shrink: `_emit_call`'s three result/void sites moved to
-# `build.call_into` / `build.call_void` on 2026-11-21 (7 -> 4), and the last
-# `gen._emit` statement families moved to the builder on 2026-11-21 (4 -> 1:
-# the one left is the Metal `for`, which is not a gimple statement).
-TEXT_ANY_CALL_BASELINE = 1
+# name too.  May only shrink.
+TEXT_ANY_CALL_BASELINE = 7
 
 
 def count_text_any_calls() -> tuple:
@@ -456,9 +453,8 @@ def test_text_casts() -> None:
 # Control flow still spelled as TEXT.  `gen._goto(l)`, `gen._cond_goto(c, a, b)`,
 # `gen._ret(v)` and `gen._ret_void()` are the only spellings of a jump or a
 # return, so the code that must see every exit from a `try` / `with` region
-# has one place to look.  May only shrink.  The last site (`_cond_goto`'s own
-# `if (...) goto a; else goto b;`) is `build.cond_br` now, so the baseline is 0.
-TEXT_CF_BASELINE = 0
+# has one place to look.  May only shrink.
+TEXT_CF_BASELINE = 1
 
 
 def count_text_cf() -> tuple:

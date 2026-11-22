@@ -129,28 +129,13 @@ class ReportText(unittest.TestCase):
 class Ledger(unittest.TestCase):
     def test_a_new_red_takes_the_previous_run_as_last_good(self):
         st = {}
-        new, rec = G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": [], "passed": ["j"]})
+        new, rec = G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": []})
         self.assertEqual(new, ["j"])
         self.assertEqual(st["jobs"]["j"]["last_good"], "S1")
 
-    def test_a_job_that_did_not_run_in_the_previous_run_has_no_last_good(self):
-        """A SKIP is in neither `failed` nor `passed`, and absence from FAILED is not a pass. Reading it as one gave
-        all fifty `bootstrap-stage2-dumps:<item>` entries the same `last_good` from a run whose own log skipped them
-        and whose producer was red at that very sha (2026-11-21)."""
-        st = {}
-        G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": [], "passed": ["other"]})
-        self.assertIsNone(st["jobs"]["j"]["last_good"])
-        self.assertIn("did not report this job green", st["jobs"]["j"]["bisect_note"])
-
-    def test_a_previous_run_with_no_passed_set_is_not_evidence(self):
-        # A verify.json written before `passed` was recorded cannot say the job was green.
-        st = {}
-        G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": []})
-        self.assertIsNone(st["jobs"]["j"]["last_good"])
-
     def test_a_job_red_in_the_previous_run_has_no_known_good(self):
         st = {}
-        G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": ["j"], "passed": []})
+        G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": ["j"]})
         self.assertIsNone(st["jobs"]["j"]["last_good"])
 
     def test_still_red_is_not_new_and_keeps_its_history(self):

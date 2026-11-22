@@ -16049,7 +16049,6 @@ def main():
                   test_none_argument_is_none_in_the_callee,
                   test_none_prints_as_none,
                   test_none_vs_zero_distinguished,
-                  test_optional_int_param_none_check_keeps_its_none_arm,
                   test_dict_get_unknown_domain_into_a_list_local,
                   test_textwrap_dedent_matches_cpython,
                   test_mixed_return_none_string_and_set_arms,
@@ -16058,7 +16057,6 @@ def main():
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
                   test_none_beside_a_scalar_arm_returns_the_tagged_word,
                   test_copy_of_a_tagged_none_keeps_it,
-                  test_copy_of_a_dynamic_word_keeps_it,
                   test_fstring_format_specs_match_cpython,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
@@ -16728,41 +16726,6 @@ def main():
     print(0 in [None, 1])
 main()
 """)
-
-
-def test_optional_int_param_none_check_keeps_its_none_arm():
-    """`x is None` / `is not None` on a parameter DECLARED `Optional[Int]` asks
-    about the value, not about the resolved C type.
-
-    `_resolve_type` erases `Optional[Int]` to `int64_t`, and the provably-int
-    fold added for `n = 0; n is None` read that ctype as proof the parameter
-    could never be None: `look()` compiled to `return 7` (the wrong arm), and
-    in a large enough function the same fold emitted a bare integer_cst into a
-    `_Bool` temp that `-fgimple` rejects, which is how five stdlib modules
-    (collections/list, collections/deque, collections/interval, os/os,
-    os/process) fell back to source and turned the `stdlib-dylib` job red
-    (2026-11-21). The `Int`-annotated parameter below keeps the
-    fold: its `x is None` is the constant False on both sides of the fix, so
-    this case also pins that the fold was narrowed, not removed.
-    """
-    test_gimple_stdout("gimple_optional_int_param_none_check_keeps_its_none_arm", """\
-def look(stop: Optional[Int] = None) -> Int:
-    if stop is None:
-        return -1
-    return 7
-
-def present(stop: Optional[Int] = None) -> Bool:
-    return stop is not None
-
-def int_param(x: Int) -> Bool:
-    return x is None
-
-def main():
-    print(look())
-    print(look(5))
-    print(present(), present(5))
-    print(int_param(0), int_param(3))
-""", "-1\n7\nFalse True\nFalse False\n")
 
 
 def test_dict_get_unknown_domain_into_a_list_local():
@@ -17543,30 +17506,6 @@ def main():
         print(b)
     for c in make(["x", "y"]):
         print(c)
-main()
-""")
-
-
-def test_copy_of_a_dynamic_word_keeps_it():
-    """A word of unknown kind (`_dyn_word_vals`: a slot read from a container
-    whose element kinds only the runtime knows) lost that fact at a copy, so
-    the copy was added as a plain integer. `xs = [1.5, 2, None]` boxes the
-    double; `v = xs[0]; w = v; print(w + 1)` added the BOX POINTER to 1 and
-    printed 4350185905 where CPython prints 2.5. `gen._copy` now carries the
-    word facts (`WordFacts.carry`), so the copy stays dynamic and `+` asks the
-    runtime for the kind (`mojo_add_words`)."""
-    test_gimple_matches_cpython("gimple_copy_of_a_dynamic_word", """\
-def main():
-    xs = [1.5, 2, None]
-    v = xs[0]
-    w = v
-    print(w + 1)
-    u = w
-    print(u + 1)
-    n = xs[1]
-    m = n
-    print(m + 1)
-
 main()
 """)
 

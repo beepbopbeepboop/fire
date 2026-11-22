@@ -38,7 +38,6 @@ import mlir
 # "unavailable in compiled mode" stub returning 0.
 from fire_compiler import for_target_names
 import mojo.middle.types as gimple_ctypes
-import mojo.ir.build as build
 from mojo.middle.types import _FOREIGN_CALLABLES
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -3619,7 +3618,7 @@ def _resolve_and_start_task(gen, inner) -> tuple[str, dict] | None:
         else:
             arg_pairs.append(gen.lower_expr(gimple_ctypes.IdentExpr(name=_cap_name)))
     handle = gen._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
-    build.call_void(gen, 'mojo_async_schedule_ready', [handle])
+    gen._emit(f"  mojo_async_schedule_ready ({handle});")
     return handle, api
 
 

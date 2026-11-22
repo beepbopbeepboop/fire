@@ -223,62 +223,6 @@ def failed_job_names(log):
     return sorted(set(names))
 
 
-# ---- the ONE reader of the suite's own per-job verdicts -----------------------------------------------------------
-#
-# A run's exit code cannot answer "did this job pass at this commit":
-#   * `python3 tools/suite.py bootstrap-stage2-dumps` exits 0 when the fanout SKIPs behind a disabled producer
-#     (`1 skipped, 2 disabled`), so `rc == 0` scored a job that never ran as "on the right track" (swarm.probe and
-#     autointegrate.probe);
-#   * a fanout ITEM (`bootstrap-stage2-dumps:class_jit.mojo`) is not selectable, so `suite.py <item>` exits 1 at EVERY
-#     commit, which collapsed a bisect's `first_bad` to the first commit after `last_good` for all fifty items;
-#   * a RESOURCE-cap killed a job before it finished, so it says nothing about the output (CLAUDE.md).
-# The runner DOES record the verdict it produced: one `[ i/n] <tag> <job>` line per job, plus the PER-TEST row that
-# aggregates a registration's jobs with the worst item (`suite.py::report`). build/suite.log is the evidence.
-#
-# Two shapes because the runner reports two units: the per-JOB line is keyed by the item for a fanout, and the
-# PER-TEST row is keyed by the registration (`ok <parent> 45 job(s)`, the worst item's status). A registration has to
-# be answered by its own row: one `ok` item must not make a fanout whose other items SKIPped look green.
-PASS_TAG = "ok"                                        # suite.py `_TAG[PASS]`: the spelling of a pass, not "PASS"
-RED_TAGS = frozenset(("FAIL", "TIMEOUT", "ERROR"))     # verdicts on the job's OUTPUT
-SUITE_TAGS = frozenset((PASS_TAG, "skip", "DISABLED", "RESOURCE", "EXPECTED")) | RED_TAGS
-
-_VERDICT_LINE = re.compile(r"^\[\s*\d+/\d+\]\s+(\S+)\s+(\S+)", re.M)      # [ 76/101] ok  job  ...
-_PER_TEST_ROW = re.compile(r"^  (\S+)\s+(\S+)\s+\d+ job\(s\)$", re.M)     #  ok  parent  45 job(s)
-
-
-def suite_verdicts(log, since=None):
-    """{job key: verdict tag} from ONE suite log's own verdict lines — the evidence a run produced about each job.
-
-    SINCE (a time.time() epoch) refuses a log older than the run being judged. build/suite.log is created when the
-    runner starts and rewritten by every run, but a run that died before the runner started (a merge that conflicted,
-    a probe whose selection the runner rejected) leaves the PREVIOUS run's log in place: without the check, that stale
-    log would answer for a run that never produced a verdict."""
-    try:
-        if since is not None and os.path.getmtime(log) < since:
-            return {}
-        txt = open(log, errors="replace").read()
-    except OSError:
-        return {}
-    v = {key: tag for tag, key in _VERDICT_LINE.findall(txt) if tag in SUITE_TAGS}
-    v.update({key: tag for tag, key in _PER_TEST_ROW.findall(txt) if tag in SUITE_TAGS})
-    return v
-
-
-def tag_verdict(tag):
-    """'green' / 'red' / 'no-evidence' for one verdict tag. SKIP, DISABLED, RESOURCE and EXPECTED are no evidence
-    about the code at that commit: the job produced no verdict on its output (a `disabled=`/`expect=` marker is a
-    statement about every commit, and a skipped job did not run at all)."""
-    if tag == PASS_TAG:
-        return "green"
-    return "red" if tag in RED_TAGS else "no-evidence"
-
-
-def job_verdict(log, job, since=None):
-    """'green', 'red' or 'no-evidence' for JOB in ONE suite log: the run's own verdict line, never its exit code.
-    A job with no line (a name the runner refused, a selection that never reached the runner) has no evidence."""
-    return tag_verdict(suite_verdicts(log, since).get(job))
-
-
 def test_failures(tree):
     """The set of 'FAIL  <check>' names test_suite.py reports in `tree` (its own registry-of-checks)."""
     r = subprocess.run(["python3", "test_suite.py"], cwd=tree, capture_output=True, text=True)
