@@ -590,6 +590,7 @@ _SELFHOST_SIGS = {
     # from the caller's `gen._words.x(...)`, found no signature and emitted a
     # weak "unavailable in compiled mode" stub that returned 0. The prototypes
     # match the definitions in `mojo_middle_valueinfo_WordFacts_*`.
+    'WordFacts_carry': ('void', ['WordFacts *', 'char *', 'char *'], 'mojo_middle_valueinfo'),
     'WordFacts_has_slot_kinds': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
     'WordFacts_is_boxed_container': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
     'WordFacts_is_dyn': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
@@ -603,10 +604,9 @@ _SELFHOST_SIGS = {
     'WordFacts_mark_slot_kinds': ('void', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
     'WordFacts_mark_tagged': ('void', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
     'WordFacts_unmark_int_word': ('void', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_snapshot': ('MojoList *', ['WordFacts *'], 'mojo_middle_valueinfo'),
+    'WordFacts_snapshot': ('MojoDict *', ['WordFacts *'], 'mojo_middle_valueinfo'),
     'WordFacts___init__': ('void', ['WordFacts *'], 'mojo_middle_valueinfo'),
-    'WordFacts_bind': ('void', ['WordFacts *', 'int64_t'], 'mojo_middle_valueinfo'),
-    'WordFacts_restore_snapshot': ('void', ['WordFacts *', 'MojoList *'], 'mojo_middle_valueinfo'),
+    'WordFacts_restore_snapshot': ('void', ['WordFacts *', 'MojoDict *'], 'mojo_middle_valueinfo'),
     # Arity AND width must match fire.jit's definition or the closure
     # gets "conflicting types for 'jit_compile_and_execute'".
     # `auto_gpu` is the 6th parameter, and the self-host lowers a
@@ -1740,10 +1740,9 @@ class GimpleGen:
         # cannot know statically (the result of a call to a
         # `_multi_kind_return_funcs` member). Per-function like the other
         # value-keyed side tables, since these names are per-function temps.
-        # the six name-keyed word sets live in one WordFacts (valueinfo.py);
+        # the per-temp value records live in one WordFacts (valueinfo.py);
         # `_reset_func` makes a fresh one per function body
         self._words: WordFacts = WordFacts()
-        self._words.bind(self)
         # Function name -> the return type of the CALLABLE it returns
         # (`def mk(): return lambda: False`). Module scope for the same
         # reason as `_return_slot_types` above: the point is to carry a
@@ -6169,6 +6168,8 @@ class GimpleGen:
         self._words.mark_slot_kinds(name)
     def _word_mark_boxed_container(self, name: str) -> None:
         self._words.mark_boxed_container(name)
+    def _word_carry(self, dst: str, src: str) -> None:
+        self._words.carry(dst, src)
     def _copy(self, dst: str, src: str) -> None:
         grsl._copy(self, dst, src)
     def _binop(self, ctype: str, a: str, op: str, b: str) -> str:

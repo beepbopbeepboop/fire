@@ -249,32 +249,21 @@ def _reset_func(gen, body: list = None, params: list = None,
     # parent's has to survive the closure's lowering intact.
     gen._fresh_vals = set()
     gen._fresh_str_tmps = set()
-    # `_boxed_vals` is this same shape — a set of TEMP NAMES — and was
-    # missing from the reset list above, which is exactly the bug the list's
-    # own comment describes: `temp_counter` restarts at 0 for every
-    # function, so a name an earlier function registered as "this int64_t
-    # may be a box, resolve it with mojo_box_int/mojo_box_double first" is
-    # the SAME SPELLING as an unrelated temp this function is about to
-    # allocate, and the stale entry is read as this function's.
-    # `_to_int64`'s `val in gen._boxed_vals` branch is where it bites, and
-    # it bites hardest when the collided temp is not even an int64_t:
-    # `mojo_box_int (int64_t)` then received a `MojoList *` /
-    # `mojo_box_double` a `char *`, four `-Werror=int-conversion` failures
-    # in the self-host closure (`_generator_to_list`,
-    # `_apply_fstring_spec`, `_maybe_lower_mlir_op`, `_gen_for_dict` —
-    # each reading a name `mojo_backend_gimple_emit_infra__emit_call`
-    # had boxed, or `gen_for_enumerate` before it).
-    #
-    # Every writer and every reader of this set is inside ONE function's
-    # lowering (`_boxed_vals.add` in emit_calls' subscript accessor and in
-    # emit_loops' for-target; the reads in emit_exprs/emit_infra), so
-    # per-function is not merely safe, it is the only scope in which the
-    # name means anything.
-    # ONE fresh WordFacts per function body replaces the six per-function
-    # sets (boxed, tagged, dyn, int-word, maybe-kinds, boxed-container); the
-    # historical names are re-bound to its sets (mojo/middle/valueinfo.py).
+    # The word facts are the same shape of per-function table and were the
+    # bug the list above documents: `temp_counter` restarts at 0 for every
+    # function, so a temp name an earlier function recorded as "this
+    # int64_t may be a box, resolve it with mojo_box_int/mojo_box_double
+    # first" is the SAME SPELLING as an unrelated temp this function is
+    # about to allocate, and the stale record is read as this function's.
+    # It bit hardest when the collided temp was not even an int64_t:
+    # `mojo_box_int (int64_t)` received a `MojoList *` / `mojo_box_double` a
+    # `char *`, four `-Werror=int-conversion` failures in the self-host
+    # closure (`_generator_to_list`, `_apply_fstring_spec`,
+    # `_maybe_lower_mlir_op`, `_gen_for_dict`). Every writer and every
+    # reader of the facts is inside ONE function's lowering, so per-function
+    # is not merely safe, it is the only scope in which the name means
+    # anything. ONE fresh WordFacts per function body holds the records.
     gen._words = WordFacts()
-    gen._words.bind(gen)
     # An UNANNOTATED parameter declared `= None` is a TAGGED word: None is the
     # shared None box, so `is None` / `== None` can tell it from the integer
     # 0, and every read dispatches on the box's kind. The CALL SITE boxes the
@@ -1104,7 +1093,7 @@ class FuncState:
         self.fs_struct_slot_kinds_items: dict = {}
         self.fs_local_bindings_cache: dict = {}
         self.fs_words: WordFacts = WordFacts()
-        self.fs_words_snap: list = []
+        self.fs_words_snap: dict = {}
 
 
 def save_func_state(gen) -> FuncState:
@@ -1243,7 +1232,6 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._fresh_vals = st.fs_fresh_vals
     gen._fresh_str_tmps = st.fs_fresh_str_tmps
     gen._words = st.fs_words
-    gen._words.bind(gen)
     gen._words.restore_snapshot(st.fs_words_snap)
     gen._func_value_names = st.fs_func_value_names
     gen.decls = st.fsdecls
@@ -2478,6 +2466,11 @@ def carry_value_info(gen, dst: str, src: str) -> None:
         gen._rtobj_kinds[dst] = gen._rtobj_kinds[src]
     if src in gen._dict_items_val_elems and dst not in gen._dict_items_val_elems:
         gen._dict_items_val_elems[dst] = gen._dict_items_val_elems[src]
+    # The per-temp value record (mojo/middle/valueinfo.py): what KIND the word
+    # is (plain int / erased pointer / dynamic word / box) and the facts that
+    # are not a kind (tagged, per-slot kinds, an unknown-kind container). They
+    # describe the VALUE, like every table above, so they travel with a copy.
+    gen._word_carry(dst, src)
 
 
 def note_call_result(gen, dst: str, fname: str) -> None:
@@ -10778,12 +10771,10 @@ def _reset_scope_state(gen) -> None:
     _fet['_owned_env_names'] = 'char *'
     _fet['_fresh_vals'] = 'char *'
     _fet['_fresh_str_tmps'] = 'char *'
-    _fet['_boxed_vals'] = 'char *'
-    _fet['_tagged_word_vals'] = 'char *'
     # Which of the above are SETS (the rest are lists): see `_set_elem_fields`.
     for _sf in ('_scoped_free_candidates', '_scope_armed', '_owned_str_elem_names',
                 '_owned_str_elem_vals', '_owned_closure_names', '_owned_env_names',
-                '_fresh_vals', '_fresh_str_tmps', '_boxed_vals', '_tagged_word_vals'):
+                '_fresh_vals', '_fresh_str_tmps'):
         gen._set_elem_fields.add(_sf)
 
 
