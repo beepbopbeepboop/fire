@@ -50,15 +50,55 @@ def due(force, tip=None):
     return G.pending(last_verdict().get("sha"), tip or C.git("rev-parse", "master"))
 
 
-def passed_jobs(tree, since=None):
-    """The registrations the run saw PASS, from the suite's own log (build/suite.log).
+# The runner's per-job verdict tag (`tools/suite.py`'s `_TAG`): a pass is `ok`,
+# not `PASS`. `passed_jobs` used to match `PASS`, so it answered [] on every
+# real log -- and `reconcile`'s `passed` loop is fed from it, so no job was ever
+# recorded as recovered and every `last_good` came from the fabrication in
+# `reconcile` (a SKIP is not a pass).
+_VERDICT_TAG = re.compile(
+    r"^\[\s*\d+/\d+\]\s+(ok|FAIL|skip|DISABLED|TIMEOUT|ERROR|RESOURCE|EXPECTED)\s+(\S+)",
+    re.M)
+_VERDICT_KIND = {"ok": "PASS", "FAIL": "RED", "TIMEOUT": "RED", "ERROR": "RED",
+                 "RESOURCE": "RED", "skip": "SKIP", "DISABLED": "SKIP",
+                 "EXPECTED": "PASS"}
 
-    The tag for a pass is `ok` (`suite.py::_TAG`, the one runner's spelling), NOT `PASS`: the reader here matched
-    `PASS` and so returned [] for every run since the one runner landed, which means `reconcile`'s `passed` loop
-    never saw a recovery and no `last_good` ever came from a run that watched the job pass. A fanout item's `ok` is
-    not its parent's: only the registration's own PER-TEST row (the worst item) answers for it."""
-    v = I.suite_verdicts(os.path.join(tree, "build", "suite.log"), since)
-    return sorted({k for k, tag in v.items() if ":" not in k and I.tag_verdict(tag) == "green"})
+
+def verdicts_in(txt):
+    """{job: PASS|RED|SKIP} from the TEXT of a suite log. See `job_verdicts`."""
+    out = {}
+    for tag, name in _VERDICT_TAG.findall(txt):
+        out[name.split(":")[0]] = _VERDICT_KIND[tag]
+    return out
+
+
+def job_verdicts(tree):
+    """{job: PASS|RED|SKIP} for every job the run in TREE reported.
+
+    One parser for both readers: a second regex over the same log is how the
+    `PASS`/`ok` answers drifted apart. A job the log never names is simply
+    absent -- "did not run" is not a verdict.
+    """
+    try:
+        txt = open(os.path.join(tree, "build", "suite.log"), errors="replace").read()
+    except OSError:
+        return {}
+    return verdicts_in(txt)
+
+
+def passed_jobs(tree):
+    """Jobs the run saw PASS, from the suite's own log (build/suite.log)."""
+    return sorted(j for j, v in job_verdicts(tree).items() if v == "PASS")
+
+
+def job_verdict(job, sha):
+    """PASS / RED / SKIP for JOB at SHA, or None when the run gives no evidence.
+
+    None is the whole point: a fanout ITEM is not a selectable job (`suite.py
+    bootstrap-stage2-dumps:<item>` exits 1 at EVERY commit), and a job whose
+    producer was disabled SKIPs. Neither is a pass and neither is a red.
+    """
+    checkout(sha)
+    return job_verdicts(VERIFY).get(job)
 
 
 def failed_jobs(log):
@@ -101,49 +141,49 @@ def checkout(sha):
 
 
 def job_is_red_at(job, sha):
-    """The run's verdict on JOB at SHA, as 'green', 'red' or 'no-evidence': one job, alone, in the verify worktree.
+    """True (red) / False (green) / None (NO EVIDENCE) for JOB at SHA.
 
-    The verdict is the suite's own per-job line in build/suite.log, never the process exit code. A fanout ITEM name is
-    rejected by the runner before it starts (`no such bucket or test`, exit 1 at EVERY commit), and a selection that
-    SKIPs behind a disabled dep exits 0: reading either exit code as the job's answer is what collapsed `first_bad`
-    to the first commit after `last_good` for all fifty `bootstrap-stage2-dumps:<item>` entries (2026-11-21)."""
-    checkout(sha)
-    since = time.time()
-    subprocess.run(["python3", "tools/suite.py", job], cwd=VERIFY, capture_output=True)
-    return I.job_verdict(os.path.join(VERIFY, "build", "suite.log"), job, since=since)
-
-
-class _NoEvidence(Exception):
-    """A probe produced no verdict for the job at a commit: the bisect has no answer there and must not guess one."""
-
-    def __init__(self, sha):
-        self.sha = sha
+    An exit code alone cannot tell these apart: a fanout ITEM is not selectable,
+    so `suite.py <item>` exits 1 at EVERY commit, and a job whose producer was
+    disabled SKIPs behind it and the suite exits 0. Both were being scored as
+    "red" / "green" and the bisect collapsed `first_bad` to the first commit
+    after `last_good` for all fifty stage2-dumps items.
+    """
+    v = job_verdict(job, sha)
+    return None if v is None else (v == "RED")
 
 
 def bisect_job(job, e, sha):
-    """Fill e["first_bad"] (and bisect_note) for a job that is red at SHA, between its last_good and SHA.
-
-    A commit where the job did not run is NO EVIDENCE, not a red one: `first_bad` stops there and the note says
-    "job did not run at <sha>; cannot bisect" instead of blaming the first commit in the range."""
+    """Fill e["first_bad"] (and bisect_note) for a job that is red at SHA, between its last_good and SHA."""
     if not e.get("last_good"):
-        e["bisect_note"] = e.get("bisect_note") or "no earlier full-gate run had this job green"
+        e["bisect_note"] = "no earlier full-gate run had this job green"
         return
     commits = G.commits_between(e["last_good"], sha, cwd=VERIFY)
     if not commits:
         e["bisect_note"] = "last_good is not an ancestor of the run"
         return
+    if job_is_red_at(job, sha) is not True:
+        e["bisect_note"] = ("job did not run at %s (the run gives no verdict, or "
+                            "a pass); cannot bisect" % sha[:10])
+        return
+    no_evidence = []
 
-    def is_bad(c):
+    def _probe(c):
         v = job_is_red_at(job, c)
-        if v == "no-evidence":
-            raise _NoEvidence(c)
-        return v == "red"
+        if v is None:
+            # Not red, but NOT green either -- remembering it is what lets the
+            # caller discard a first_bad that the missing evidence made
+            # meaningless.
+            no_evidence.append(c)
+            return False
+        return v
 
-    try:
-        e["first_bad"], probes = G.first_bad(commits, is_bad)
-    except _NoEvidence as x:
+    e["first_bad"], probes = G.first_bad(commits, _probe)
+    if no_evidence:
         e["first_bad"] = None
-        e["bisect_note"] = "job did not run at %s; cannot bisect" % x.sha[:10]
+        e["bisect_note"] = ("job did not run at %s; cannot bisect (%d commit(s) "
+                            "between the runs, %d probe(s))"
+                            % (no_evidence[0][:10], len(commits), probes))
         return
     e["bisect_note"] = "%d commit(s) between the runs, %d probe(s)" % (len(commits), probes)
 
@@ -156,17 +196,6 @@ def write_doc(job, e, sha, log):
     """bugs/gate-<job>.md in VERIFY: created if absent, and its `## Gate ledger` section replaced if present."""
     p = os.path.join(VERIFY, "bugs", "gate-%s.md" % job)
     sect = G.report_text(job, e, sha, log, subject)
-    if e.get("registered") is False:
-        # A fanout ITEM is not a registration: `python3 tools/suite.py <item>` is
-        # rejected before the runner starts (`no such bucket or test`), and
-        # `--only '<item>'` matches nothing. The runnable unit is the parent, and
-        # the item's own verdict is one line in the log.
-        repro = ("Reproduce on master by running its parent fanout (`python3 tools/suite.py %s`) and reading the "
-                 "`%s` line out of `build/suite.log`: an item is expanded out of `fanout(...)` and is not a job "
-                 "in `tools/suite.py`, so it cannot be run by name. Then fix the cause."
-                 % (job.split(":", 1)[0], job))
-    else:
-        repro = "Reproduce on master (`python3 tools/suite.py %s`), then fix the cause." % job
     if os.path.exists(p):
         txt = open(p).read()
         m = re.search(r"^## Gate ledger\n.*?(?=^## |\Z)", txt, re.S | re.M)
@@ -178,8 +207,8 @@ def write_doc(job, e, sha, log):
     else:
         txt = ("# Gate: %s is red on master\n\n**Job:** `%s`. Filed by the full gate at `%s`.\n"
                "**Two states:** this doc exists = the job is red and this is the work. Delete it when the job is green "
-               "on master.\n\n%s\n\n%s"
-               % (job, job, sha[:10], repro, sect))
+               "on master.\n\nReproduce on master (`python3 tools/suite.py %s`), then fix the cause.\n\n%s"
+               % (job, job, sha[:10], job, sect))
     os.makedirs(os.path.dirname(p), exist_ok=True)
     open(p, "w").write(txt)
 
@@ -309,14 +338,23 @@ def main():
         f.write("$ %s\n" % " ".join(cmd)); f.flush()
         rc = subprocess.run(cmd, cwd=VERIFY, stdout=f, stderr=subprocess.STDOUT).returncode
     jobs = failed_jobs(log)
-    passed = [j for j in passed_jobs(VERIFY, since=t0) if j not in jobs]
+    passed = [j for j in passed_jobs(VERIFY) if j not in jobs]
     verdict = dict(sha=sha, ok=rc == 0 and not jobs, rc=rc, failed=jobs, passed=passed,
                    gates_off=list(C.gates_cfg().get("off", {})),
                    log=log, secs=round(time.time() - t0), at=time.strftime("%F %T"), epoch=time.time())
-    # A job that was OFF in the previous run did not run there, so it is not in that run's `passed` set and cannot be
-    # its last_good: reconcile's passed-set test excludes it (the patch this replaces had to claim it failed to do so).
+    # A job that was OFF in the previous run was not tested there: it cannot be that run's "last good".
+    off_then = prev.get("gates_off", [])
+    off_now = [j for j in jobs if any(re.search(p, j) for p in off_then)]
+    # `passed` travels with the verdict because `reconcile` needs it: "not in
+    # failed" is not "green" -- a job that SKIPped (every dependent of a
+    # disabled producer, every platform-gated test) is in neither set, and
+    # taking prev["sha"] for it is what gave all fifty stage2-dumps items a
+    # fabricated last_good.
+    prev_ok = dict(prev,
+                   failed=list(prev.get("failed", [])) + off_now,
+                   passed=[j for j in prev.get("passed", []) if j not in off_now])
     st = G.load()
-    newly, recovered = G.reconcile(st, sha, jobs, passed, prev)
+    newly, recovered = G.reconcile(st, sha, jobs, passed, prev_ok)
     for j in newly:
         bisect_job(j, st["jobs"][j], sha)
     checkout(sha)

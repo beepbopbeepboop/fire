@@ -1942,24 +1942,7 @@ def bare_global_read_plan(self, name):
         _global_owner_mod)
 
 
-def _gmi_module_bound_names(stmt_list: list) -> set:
-    """Names this module binds at module scope itself (a top-level assignment,
-    annotated declaration, or def/struct). A `from b import N` whose local
-    name is in this set is shadowed by the module's own binding, so it is
-    never an import home for a read or a return type. Pure; see
-    `_gmi_scan_imported_global_homes`."""
-    names = set()
-    for _bs in _gmi_collect_global_stmts(stmt_list):
-        if isinstance(_bs, AssignStmt) and isinstance(_bs.target, IdentExpr):
-            names.add(_as_str(_bs.target.name))
-        elif isinstance(_bs, VarDecl):
-            names.add(_as_str(_bs.name))
-        elif isinstance(_bs, (FunctionDef, StructDef)):
-            names.add(_as_str(_bs.name))
-    return names
-
-
-def _gmi_scan_imported_global_homes(self, stmt_list: list, own_bound=None) -> None:
+def _gmi_scan_imported_global_homes(self, stmt_list: list) -> None:
     """Record every bare name THIS module's own top-level `from b import K`
     binds, together with the module whose `_<mod>_globals` struct declares
     the field, so a later BARE read of that name loads the OWNER's field
@@ -2042,10 +2025,6 @@ def _gmi_scan_imported_global_homes(self, stmt_list: list, own_bound=None) -> No
             if (not _iowner_s) or _iowner_s == this_mod:
                 continue
             if _iname in self._own_global_var_types:
-                continue
-            # `own_bound`: the caller's module-scope binding names, for a call
-            # made before Phase 1.7 has filled `_own_global_var_types`.
-            if own_bound and _local in own_bound:
                 continue
             if _local in homes:
                 # Two owners for one bare name: ambiguous, so record

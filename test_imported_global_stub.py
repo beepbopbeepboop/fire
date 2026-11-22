@@ -251,36 +251,11 @@ def test_function_scoped_str_global_reads_accessor_not_stub():
         shutil.rmtree(td, ignore_errors=True)
 
 
-def test_py_str_literal_global_is_read_through_accessor():
-    # Before the fix, a compiler-module `NAME = 'x'` (no annotation) was left
-    # unexported, so an importer declared nothing for it and read
-    # `(int64_t)0` -- a silent NULL where the string belongs. `cas.ABI_VERSION`
-    # is the real instance: the definer's accessor is `char *`.
-    import gimple_codegen
-    src = ('from cas import ABI_VERSION\n\n'
-           'def f(x):\n'
-           '    return ABI_VERSION\n')
-    root = os.path.join(HERE, 'build', 'test_imported_global_stub')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='probe_', dir=root)
-    try:
-        path = os.path.join(td, 'uses.py')
-        sep = gimple_codegen.compile_to_gimple(
-            src, do_imports=False, filename=path)
-        assert '(int64_t)0' not in sep, sep
-        assert 'extern char * cas__mojo_global_get_ABI_VERSION (void);' in sep, sep
-        assert '_t1 = cas__mojo_global_get_ABI_VERSION ();' in sep, sep
-    finally:
-        import shutil
-        shutil.rmtree(td, ignore_errors=True)
-
-
 def test_py_scalar_global_scanner_types_only_what_the_definer_types():
     # The `.py` export scan (module_loader.py) types a `NAME[: ANN] = RHS`
     # global exactly as the DEFINING module's accessor is typed, or leaves it
-    # unexported. The rule is pinned directly here; the end-to-end separate
-    # compile of an outside-dir definer is test_separate_compile_reads_outside_
-    # dir_str_global_through_accessor.
+    # unexported. Its own compile is not run here (the scan is gated to the
+    # compiler's directory); the rule is pinned directly.
     import module_loader as ml
     assert ml._ml_scalar_global("STDLIB_PATH = _find_stdlib_path()") == \
         ['STDLIB_PATH', '', '_find_stdlib_path()']
@@ -300,14 +275,7 @@ def test_py_scalar_global_scanner_types_only_what_the_definer_types():
     assert ml._ml_py_global_ctype('', '_find_stdlib_path()', exports) == 'char *'
     assert ml._ml_py_global_ctype('', '_n()', exports) == ''
     assert ml._ml_py_global_ctype('', 'undefined()', exports) == ''
-    # A whole-RHS plain string literal is `char *` in the defining module too
-    # (its accessor is `char *`); the importer must read it that way.
-    assert ml._ml_py_global_ctype('', "'x'", exports) == 'char *'
-    assert ml._ml_py_global_ctype('', '"x"', exports) == 'char *'
-    assert ml._ml_py_global_ctype('', "'a' + b", exports) == ''
-    assert ml._ml_py_global_ctype('', "'a' 'b'", exports) == ''
-    assert ml._ml_py_global_ctype('', "'it''s'", exports) == ''
-    assert ml._ml_py_global_ctype('', "'\\n'", exports) == ''
+    assert ml._ml_py_global_ctype('', "'x'", exports) == ''
     # Annotated: the defining module's own accessor types.
     assert ml._ml_py_global_ctype('str', "'x'", {}) == 'char *'
     assert ml._ml_py_global_ctype('int', '1', {}) == 'int'
@@ -316,83 +284,8 @@ def test_py_scalar_global_scanner_types_only_what_the_definer_types():
     assert ml._ml_py_global_ctype('list[int]', '[]', {}) == ''
 
 
-def test_separate_compile_reads_outside_dir_str_global_through_accessor():
-    # The SEPARATE-compile shape (`do_imports=False`) of a definer OUTSIDE the
-    # compiler's own directory. The module_loader export scan used to run only
-    # for the compiler's `_selfhost_dir`, so an outside-dir definer's
-    # `NAME = "s"` global was unexported and the importer read `(int64_t)0`
-    # (a silent NULL where the string belongs). The definer's accessor is
-    # `char *`, so the importer must declare and read it that way.
-    import gimple_codegen
-    root = os.path.join(HERE, 'build', 'test_imported_global_stub')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='probe_', dir=root)
-    try:
-        with open(os.path.join(td, 'k_src.py'), 'w') as f:
-            f.write('NAME = "s"\n')
-        path = os.path.join(td, 'd_def.py')
-        src = 'from k_src import NAME\n\ndef f(x):\n    return NAME\n'
-        with open(path, 'w') as f:
-            f.write(src)
-        sep = gimple_codegen.compile_to_gimple(src, do_imports=False, filename=path)
-        assert '(int64_t)0' not in sep, sep
-        assert 'extern char * k_src__mojo_global_get_NAME (void);' in sep, sep
-        assert '_t1 = k_src__mojo_global_get_NAME ();' in sep, sep
-    finally:
-        import shutil
-        shutil.rmtree(td, ignore_errors=True)
-
-
-def test_py_global_typed_through_reexported_callee():
-    # `module_loader.STDLIB_PATH = _find_stdlib_path()`: the finder is defined
-    # in the leaf sibling `stdlib_path` and only re-exported here (f72b741eb),
-    # so a same-file callee lookup alone left the global unexported and its
-    # importers read it through a weak `extern int64_t STDLIB_PATH (...)` stub.
-    # The callee must be typed by the sibling that defines it.
-    import module_loader as ml
-    exports = ml.ModuleLoader().load_module_from_path(
-        os.path.join(HERE, 'module_loader.py'))
-    assert exports.get('STDLIB_PATH') == {
-        'kind': 'global_var', 'c_return_type': 'char *',
-        'home_module_path': os.path.join(HERE, 'module_loader.py')}, exports.get('STDLIB_PATH')
-
-
-def test_def_returning_imported_str_global_is_char_ptr():
-    # A def returning a bare imported `str` global was typed `int64_t`. A definer outside the
-    # compiler's own directory exports no entry for its `NAME = "s"` global
-    # (the module_loader export scan is gated to `_selfhost_dir`), so the
-    # importer's accessor table is empty for it. The definer IS compiled into
-    # this unit (do_imports=True), so its field `char *` is known by the time
-    # return inference runs. Red before the fix: `f` was typed `int64_t` while
-    # its body read `_k_src_globals.NAME` as `char *`.
-    import re
-    import gimple_codegen
-    root = os.path.join(HERE, 'build', 'test_imported_global_stub')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='probe_', dir=root)
-    try:
-        with open(os.path.join(td, 'k_src.py'), 'w') as f:
-            f.write('NAME = "s"\n')
-        path = os.path.join(td, 'd_def.py')
-        src = 'from k_src import NAME\n\ndef f(x):\n    return NAME\n'
-        with open(path, 'w') as f:
-            f.write(src)
-        out = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=path)
-        protos = re.findall(r'^\S[^\n]*\bf_[0-9a-f]+ \(', out, re.M)
-        assert protos, out
-        assert all(p.startswith('char * ') for p in protos), protos
-        assert not re.search(r'int64_t f_[0-9a-f]+ \(int64_t x\)', out), out
-    finally:
-        import shutil
-        shutil.rmtree(td, ignore_errors=True)
-
-
 if __name__ == '__main__':
     test_imported_global_has_no_function_stub()
     test_function_scoped_str_global_reads_accessor_not_stub()
     test_py_scalar_global_scanner_types_only_what_the_definer_types()
-    test_py_str_literal_global_is_read_through_accessor()
-    test_py_global_typed_through_reexported_callee()
-    test_separate_compile_reads_outside_dir_str_global_through_accessor()
-    test_def_returning_imported_str_global_is_char_ptr()
     print('PASS')

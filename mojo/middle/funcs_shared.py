@@ -375,7 +375,7 @@ def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
         # Apply unanimous container evidence when usage left the slot at the
         # int64_t default, but preserve scalar (char* / double) or struct
         # conclusions.
-        if gimple_ctypes.TypeLattice.is_int_word_or_unsolved(ctype):
+        if ctype in ('int64_t', 'int', ''):
             return _xc
         return _xc
     if ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
@@ -1053,454 +1053,6 @@ def register_imported_symbol(gen, name: str, info: dict,
         ]
 
 
-def register_module_member_function(gen, module_name: str, member_name: str,
-                                    sub_ref=None):
-    """Record `<module_name>.<member_name>` as an imported top-level FUNCTION
-    of the module a bare `import M as module_name` alias names, so a use site
-    resolves to that definition's real mangled symbol.
-
-    This is the module-qualified CALL writer (`m.f(...)`, `_lower_method_call`'s
-    two branches, which re-dispatch on the bare name). The module-qualified
-    VALUE (`x = m.f`) does NOT use it: that form is answered by
-    `register_module_member_value`, keyed by the module-qualified C symbol, so
-    a same-named class or local def of the importer cannot shadow it. The
-    value form used to be answered from `func_return_types` alone, and that
-    table only carries THIS module's own defs plus the defs of modules a
-    whole-program INLINE compile pulled in. The per-file (`do_imports=False`) path the bootstrap
-    dumps use inlines nothing, so `f = _fc._as_comptimevar_node` missed the
-    branch and fell through to the generic dynamic-dispatch fallback — a
-    `_mojo_dispatch_getattr(NULL, "_as_comptimevar_node")` on the module
-    marker, which is a fatal `AttributeError: _as_comptimevar_node` the
-    instant the statement runs, at compile time of every later file.
-
-    Three steps, and all are required:
-
-    1. Resolve through re-exports: `_find_symbol_home_module` answers the
-       module that DEFINES the name (`emit_resolve` re-exports a sibling's
-       helpers), because the mangled symbol is qualified by the DEFINER.
-    2. `_note_own_func_home` pins that home for `_func_qualifier`, which
-       matters when the definer is compiled later in an import cycle.
-    3. Register the MEMBER itself. A bare `import X as alias` records the
-       MODULE in `imported_symbols`, never its members, and `_func_csym`/
-       `_func_mangleable` key off the SYMBOL's own entry — without it the
-       use site emits `_funcptr_<unqualified name>`, or a weak
-       "unavailable in compiled mode" stub, and links to nothing.
-
-    Registration happens ONLY when nothing registered the name already: an
-    import this compile resolved properly (`_emit_stdlib_import_externs`, a
-    `from X import Y`) has the DEFINING module's own signature, and
-    overwriting it with a locally rebuilt one was measured to produce
-    `non-trivial conversion in 'function_decl'`.
-
-    Returns `(sub_ref, raw_export_entry)`: the module ref the alias names
-    after re-export hops, and the scan's (un-upgraded) entry when the member
-    was not registered yet AND that module exports it, else None.
-    """
-    if sub_ref is None:
-        _info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
-        sub_ref = ((_info.get('module') if isinstance(_info, dict) else None)
-                   or module_name)
-    # A MISS is answered from a per-gen cache: every module-alias attribute
-    # read that is not a function (`re.X`, `json.Y`, a constant the earlier
-    # branches did not special-case) would otherwise re-read and re-scan the
-    # aliased module's whole source on every use site. Keyed as one string, not
-    # a tuple: on the self-hosted path a tuple key hashes by ADDRESS.
-    _misses = getattr(gen, '_module_member_fn_misses', None)
-    if _misses is None:
-        _misses = {}
-        gen._module_member_fn_misses = _misses
-    _miss_key = module_name + '.' + member_name
-    if _miss_key in _misses:
-        # `_as_str`: a dict VALUE read back on the self-hosted path is
-        # int64_t, and this return value is a module ref every caller uses as
-        # a string (the same reason `_as_str` guards every other dict read in
-        # this file).
-        return _as_str(_misses[_miss_key]), None
-    # The DEFINER and the name it knows the member by, from ONE walk. A
-    # re-export that RENAMES (`from impl import double_it as dt`) binds `dt`
-    # only in the re-exporting namespace; `impl` exports `double_it`, and
-    # the export lookup below — and the mangled symbol `_func_csym` builds
-    # from the registered entry — are keyed on the DEFINER's spelling.
-    # `want_name` answers both halves from the same hop walk the module-only
-    # question uses, so the two cannot drift.
-    _def_name = member_name
-    _defining = None
-    try:
-        _home = gen._find_symbol_home_module(sub_ref, member_name, 'fn',
-                                             want_name=True)
-    except Exception:
-        _home = None
-    if _home:
-        _home_mod = _as_str(_home[0])
-        _home_name = _as_str(_home[1])
-        if _home_mod:
-            _defining = _home_mod
-        if _home_name:
-            _def_name = _home_name
-    if _defining and _defining != sub_ref:
-        sub_ref = _defining
-    try:
-        gen._note_own_func_home(member_name, sub_ref, record_scope=False)
-    except Exception:
-        pass
-    if member_name in (getattr(gen, 'imported_symbols', None) or {}):
-        return sub_ref, None
-    try:
-        _exps, _qual = gen._local_sibling_module_exports(sub_ref)
-    except Exception:
-        _exps, _qual = None, None
-    _raw = (_exps or {}).get(_def_name)
-    if _raw:
-        _entry = gen._resolved_export_entry(sub_ref, _def_name, _raw)
-        if _entry:
-            _entry = dict(_entry)
-            _entry['module'] = sub_ref
-            gen._register_imported_symbol(member_name, _entry, _def_name,
-                                          write_param_types=True)
-    else:
-        _misses[_miss_key] = sub_ref
-    return sub_ref, _raw
-
-
-def sanitize_module_qualifier(gen, q) -> str:
-    """The C qualifier a module's free functions carry in THIS compile: the
-    `module_qualifier` string rule, with the per-compile
-    `_inline_module_qualifiers` remap applied. An empty module name means "no
-    module" and sanitizes to no qualifier (the root compile's own GimpleGen is
-    built without one). `emit_funcs._func_qualifier` and
-    `module_member_function_csym` both need exactly this answer; this is the
-    one copy."""
-    from mojo.middle.module_shared import module_qualifier
-    if not q:
-        return ''
-    key = module_qualifier(q)
-    resolved = gen._inline_module_qualifiers.get(key, key)
-    return module_qualifier(resolved)
-
-
-def _module_member_home(gen, module_name: str, member_name: str, kind: str):
-    """`(module_ref, definer, defined_name)` for `<alias>.<member>` where
-    `alias` is a bare `import M as alias` binding, resolved through the
-    alias's own module and its re-export hops; None when no module behind the
-    alias defines `member` as a `kind` ('fn' or 'struct').
-
-    Answered by the MODULE, never by the TU-wide bare-name tables: a same-named
-    class or function in the importer is not a candidate at all."""
-    _info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
-    sub_ref = ((_info.get('module') if isinstance(_info, dict) else None)
-               or module_name)
-    try:
-        if kind == 'struct':
-            _defining = gen._find_struct_home_module(sub_ref, member_name)
-            if not _defining:
-                return None
-            return sub_ref, _as_str(_defining), member_name
-        _home = gen._find_symbol_home_module(sub_ref, member_name, kind,
-                                             want_name=True)
-    except Exception:
-        return None
-    if not _home or not _as_str(_home[0]):
-        return None
-    return sub_ref, _as_str(_home[0]), (_as_str(_home[1]) or member_name)
-
-
-def module_member_is_struct(gen, module_name: str, member_name: str) -> bool:
-    """Does the module `module_name` binds define `member_name` as a class?
-
-    The class-as-value read (`W = h.Widget`) asks THIS, not the TU-wide
-    `struct_field_types`, which holds only the classes of modules this compile
-    inlined: a per-file compile inlines nothing, so the class was invisible
-    and the read fell through to a dynamic `getattr` on the module marker."""
-    return _module_member_home(gen, module_name, member_name, 'struct') is not None
-
-
-def module_member_function_csym(gen, module_name: str, member_name: str):
-    """`(c_symbol, definer, defined_name, fs)` for `<alias>.<member>` read as a
-    FREE FUNCTION of the module the alias names, or None when no module behind
-    it defines a plain (non-generic) function of that name.
-
-    The C symbol is the one the DEFINING module's own compile emitted for
-    `def_name`: `<qualifier>_<name><overload suffix>` where the qualifier is the
-    definer's `sanitize_module_qualifier` and the suffix hashes the definer's
-    own parameter list (`_home_signature_ctypes`). Nothing here reads
-    `_func_csym(bare_name)`, `_func_mangleable(bare_name)` or any other
-    bare-name table, so an importer's class or local def of the same name
-    cannot change the answer (the case that used to hand back the class
-    typedef's address: `class double_it` beside `h.double_it`).
-
-    A name the definer defines twice (overloads) is not answered here: which
-    overload a bare value means needs a signature the value form does not
-    have, so None is returned and the caller keeps its own answer."""
-    _home = _module_member_home(gen, module_name, member_name, 'fn')
-    if _home is None:
-        return None
-    _sub_ref, definer, def_name = _home
-    _stmts = gen._parsed_import(definer)[2] or []
-    _defs = [s for s in _stmts
-             if isinstance(s, gimple_ctypes.FunctionDef) and _as_str(s.name) == def_name]
-    if len(_defs) != 1 or getattr(_defs[0], 'comptime_params', None):
-        return None
-    fs = _defs[0]
-    base = _as_str(gimple_ctypes._safe_name(def_name))
-    if def_name in gen._NO_OVERLOAD_MANGLE or def_name in gen._extra_no_mangle:
-        sym = base
-    else:
-        qualifier = sanitize_module_qualifier(gen, definer)
-        # `definer` as a REF feeds the registry tier of
-        # `_definer_committed_pts`: when the definer was compiled in its own
-        # instance (a separate compile) its committed signature is not in
-        # THIS gen's store, and only the definer's own answer may hash the
-        # suffix (the per-file `undefined symbol _helper_f_9f63a2` against
-        # the definition's `helper_f_815e8f` — the importer's own
-        # `_home_signature_ctypes` fallback hashed its view, not the
-        # definer's).
-        _pts = _definer_committed_pts(gen, qualifier, def_name,
-                                      module_ref=definer)
-        if _pts is None:
-            _pts = gen._home_signature_ctypes(definer, fs)
-        suffix = _as_str(gen.overload_suffix_for(_pts))
-        sym = (qualifier + '_' + base if qualifier else base) + suffix
-    return sym, definer, def_name, fs
-
-
-# The DEFINER's committed free-function parameter signatures, published by
-# `publish_definer_committed_pts` at the end of every module compile and read
-# by a SEPARATELY compiled importer (its own `GimpleGen` instance,
-# `do_imports=False`, which never sees the definer's per-instance
-# `_home_def_param_types` store). Keyed by the definer's SOURCE FILE path plus
-# the function name, not by the module-qualifier spelling: the definer was
-# compiled under the name its own compile command line chose, while the
-# importer refers to it by the spelling of its own import statement, and the
-# two spellings are a different string whenever the import is relative or
-# abbreviated — the exact qualifier-drift class `_record_home_def_pts`'s
-# docstring records. The path is the one identity both sides resolve
-# independently (the publisher knows its own file; the reader resolves the
-# definer's ref through `_parsed_import`), so the key cannot drift.
-# Process-wide on purpose: the definer's instance is gone before the
-# importer's compiles (`compile_module_to_c` per file), and `fire dylib`'s
-# serial build compiles every module in one process. A dump fanout or a
-# `fire dylib -j>1` worker is a different process, starts with an empty table,
-# and falls back to exactly today's answer — never to a stale one.
-# Value: `(source_text, [param ctypes])`; the source is a staleness guard,
-# checked by the reader only when both sides know it (a publish that could
-# not recover its own source stores '', which matches everything rather than
-# matching nothing).
-_PUBLISHED_DEF_PTS: dict = {}
-
-
-def _published_def_pts_key(path: str, name: str) -> str:
-    """Registry key: the definer's file path (absolutized, so a relative
-    publish and an absolute resolve of the same file share a key) + a
-    non-NUL separator (the self-hosted backend's string concat is
-    strlen-based, so a NUL separator would collapse, as in `_pair_key`) +
-    the function name."""
-    return os.path.abspath(path) + '\x1f' + name
-
-
-def publish_definer_committed_pts(gen) -> None:
-    """Copy `gen`'s committed DEFINITION-side free-function parameter
-    signatures into the process-wide `_PUBLISHED_DEF_PTS` registry.
-
-    Called once per finished `gen_module_impl`, after emission is complete,
-    so the value published is the one the emitted symbol/prototype consumed
-    (`_commit_home_def_pts`'s commit is the last plain-assignment write to a
-    key — a later guess can only fill a key that has no committed answer,
-    and a first-wins `_record_home_def_pts` write against a committed key is
-    a no-op). The registry therefore holds the emitted signature by the time
-    the next module in the process compiles against it.
-
-    The store is keyed by `_pair_key(qualifier, name)` and the registry by
-    (path, name), so the name is recovered by REBUILDING the store key with
-    the same computation the writers used (`_func_qualifier` over this
-    module's own top-level function names, whose tier-1 check answers from
-    the module being compiled itself and never reaches the ambiguity tiers)
-    rather than by splitting the pair key — whose NUL separator the
-    self-hosted backend cannot split back out.
-
-    A failure here must never fail the compile: the registry is a
-    cross-instance cache for a LATER separate compile, not part of this
-    artifact, so the caller wraps the call and skips on exception. In a
-    `do_imports` compile (the inline shape) this publishes entries that the
-    shared instance store already holds — a strict subset of it — so a
-    same-process importer still answers from tier 0 and the inline behavior
-    is unchanged."""
-    store = getattr(gen, '_home_def_param_types', None)
-    if not store:
-        return
-    path = _as_str(getattr(gen, '_current_filename', '') or '')
-    if not path:
-        return
-    names = getattr(gen, '_local_top_level_func_names', None)
-    if not names:
-        return
-    base = os.path.abspath(path)
-    src = _as_str(getattr(gen, '_source_text', '') or '')
-    store = _as_dict(store)
-    for name in list(names):
-        try:
-            qual = _as_str(gen._func_qualifier(name))
-            entry = store.get(_pair_key(qual, name))
-        except Exception:
-            continue
-        if entry is None:
-            continue
-        _PUBLISHED_DEF_PTS[_published_def_pts_key(base, _as_str(name))] = (
-            src, list(entry))
-
-
-def _published_def_pts(gen, module_ref: str, name: str):
-    """The parameter ctypes a SEPARATELY compiled definer published for
-    `name`, or None when this process never compiled that definer's file (a
-    dump fanout's fresh process, a `fire dylib -j>1` worker) or its source
-    has changed since the publish. `module_ref` is the definer's module as
-    the IMPORTER spells it (a ref, not a qualifier): `_parsed_import`
-    resolves it to the very file the definer's own compile was run on, which
-    is the registry's key half — the qualifier spelling the importer's
-    `_func_qualifier` computes is deliberately NOT part of the lookup, so the
-    two halves of one mangled symbol cannot drift on a module-name spelling
-    disagreement."""
-    if not module_ref:
-        return None
-    try:
-        _path, _src, _stmts = _parsed_import(gen, module_ref)
-    except Exception:
-        return None
-    if not _path:
-        return None
-    entry = _PUBLISHED_DEF_PTS.get(_published_def_pts_key(_path, name))
-    if entry is None:
-        return None
-    _stored_src = entry[0]
-    if _stored_src and _src and _stored_src != _src:
-        return None
-    return list(entry[1])
-
-
-def _definer_committed_pts(gen, qualifier: str, def_name: str,
-                           module_ref: str = None):
-    """The parameter ctypes the DEFINING unit committed for `def_name`: the
-    whole-program `_home_def_param_types` entry `emit_funcs._commit_home_def_pts`
-    writes when the definition is emitted (the tier-0 read
-    `emit_funcs._imported_def_pts` makes for a bare name), else — when the
-    definer was compiled in its OWN `GimpleGen` instance (a separate compile,
-    `do_imports=False`) whose store this instance never sees — the entry that
-    definer's compile published to the process-wide registry
-    (`_published_def_pts`, keyed by the definer's source file), or None when
-    that definition has not been compiled in this process yet.
-
-    An importer must not hash its OWN resolution of the callee's parameters
-    instead. An unannotated parameter is typed from usage and from the
-    call-site evidence in the importing unit, and each compile's
-    `_inferred_param_types` is per-instance. An importer that calls
-    `glob.escape("a*b")` infers `pathname: char *`, while the definer, which
-    sees no such call, emits `escape(int64_t pathname)`. Hashing the importer's
-    view named `glob_escape_d719e0` against the definition's
-    `glob_escape_9f63a2` (the `globcompiled` gate job's link failure).
-
-    `module_ref` is the definer's module as a REF (the reader's spelling),
-    used only for the registry tier: it is what `_parsed_import` opens, and
-    the `qualifier` half above stays exactly what it was for the in-instance
-    read."""
-    _committed = _as_dict(getattr(gen, '_home_def_param_types', None)).get(
-        _pair_key(qualifier, def_name))
-    if _committed is None and module_ref is not None:
-        _committed = _published_def_pts(gen, module_ref, def_name)
-    if _committed is None:
-        return None
-    return list(_committed)
-
-
-def register_module_member_value(gen, module_name: str, member_name: str):
-    """`(c_symbol, defined_name)` for the module-member function VALUE
-    `<alias>.<member>`, registering its extern under the C SYMBOL, or None
-    when the member is not a function of the aliased module.
-
-    The registration is keyed by `c_symbol` (e.g. `helper_double_it_9f63a2`),
-    not by the bare member name. A bare key is what the extern pass and every
-    `_func_csym(bare)` read go through, and that key is occupied TU-wide by any
-    same-named class, local def or other import, so a bare registration either
-    loses to it or is skipped (`_gmp_emit_imported_symbol_stubs` skips any
-    name in `struct_field_types`). A `csym` on the entry is the
-    extern's own name (`module_gen._gmp_emit_imported_symbol_stubs` reads it
-    before deriving one), and the signature is rewritten to say it too.
-
-    Idempotent: a second read of the same member finds the entry and returns."""
-    _found = module_member_function_csym(gen, module_name, member_name)
-    if _found is None:
-        return None
-    sym, definer, def_name, _fs = _found
-    _syms = _as_dict(gen.imported_symbols)
-    if sym in _syms:
-        return sym, def_name
-    try:
-        _exps, _qual = gen._local_sibling_module_exports(definer)
-    except Exception:
-        return None
-    _raw = (_exps or {}).get(def_name)
-    if not _raw:
-        return None
-    _entry = gen._resolved_export_entry(definer, def_name, _raw)
-    if not _entry:
-        return None
-    _entry = dict(_entry)
-    _entry['module'] = definer
-    _entry['csym'] = sym
-    # The DEFINING unit's measured return type, from its per-definition store
-    # (`_home_def_return_types`, keyed by the definer's qualifier and name —
-    # the same answer the extern emitter reads for a bare name). The scan's
-    # own `int64_t` is only a default for an unannotated `def`; left in place
-    # it declares `int64_t sym (void)` against a definition that returns
-    # `MojoList *` (measured: `import fgn_b; fgn_b.make()` conflicting types).
-    _measured_ret = _as_dict(getattr(gen, '_home_def_return_types', None)).get(
-        _pair_key(sanitize_module_qualifier(gen, definer), def_name))
-    if _measured_ret:
-        _ret = _as_str(_measured_ret)
-        _entry['c_return_type'] = _ret
-        _entry['c_return_type_is_default'] = False
-        if _entry.get('signature'):
-            _sig = _as_str(_entry['signature'])
-            _m = re.match(r'.*?' + re.escape(def_name), _sig)
-            if _m and _m.end() < len(_sig):
-                _entry['signature'] = _ret + ' ' + def_name + _sig[_m.end():]
-    # The DEFINER's parameter list, when it committed one (see
-    # `_definer_committed_pts`, whose registry tier answers for a definer
-    # compiled in its own instance — the separate-compile shape — so the
-    # prototype says what the definition emits, `int64_t pathname`, not the
-    # importer's `char * pathname`). Otherwise the extern and the definition
-    # disagree in one translation unit (`conflicting types for
-    # 'glob_escape_9f63a2'`, the `globcompiled` job). Only the parameter list
-    # is rewritten, and only when it lines up one-to-one with the definition's
-    # parameters: a `*args`/`**kwargs` shape keeps the scan's answer.
-    _committed = _definer_committed_pts(gen, sanitize_module_qualifier(gen, definer), def_name,
-                                        module_ref=definer)
-    _fs_params = list(_fs.params or [])
-    if (_committed is not None and len(_committed) == len(_fs_params)
-            and not any(_as_str(_pn).startswith('*') for _pn, _pt in _fs_params)):
-        _params = [f"{_as_str(_ct)} {_as_str(_pn)}"
-                   for _ct, (_pn, _pt) in zip(_committed, _fs_params)]
-        _entry['c_parameters'] = _params
-        if _entry.get('signature'):
-            _sig = _as_str(_entry['signature'])
-            _open = _sig.find('(')
-            if _open >= 0 and _sig.endswith(')'):
-                _entry['signature'] = _sig[:_open] + '(' + ', '.join(_params) + ')'
-    if _entry.get('signature'):
-        _entry['signature'] = gimple_ctypes._replace_first_ident(
-            _as_str(_entry['signature']), def_name, sym)
-    gen._register_imported_symbol(sym, _entry, None, write_param_types=True)
-    # The call is re-dispatched on `sym`, so its keyword arguments are mapped
-    # to slots by the table `_kwarg_param_names` reads under the name the call
-    # is emitted with. Without a `sym` entry that lookup misses and a keyword
-    # argument pads by position: `m.f('x', recursive=True)` bound `True` to
-    # `root` (the `globcompiled` job's recursive glob). Mirrors the parameter
-    # types the registration above already keys under `sym`.
-    _names_tbl = getattr(gen, '_func_param_names', None)
-    if _names_tbl is not None:
-        _as_dict(_names_tbl)[sym] = [
-            _as_str(_pn) for _pn, _pt in _fs_params if not _as_str(_pn).startswith('*')]
-    return sym, def_name
-
-
 def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
     """Does `module`'s OWN top-level source define `name`? `kind` is
     'struct' (a StructDef), 'fn' (a top-level FunctionDef), or 'comptime'
@@ -1524,7 +1076,7 @@ def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
     return False
 
 def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int = 0,
-                              want_abs: bool = False, want_name: bool = False):
+                              want_abs: bool = False):
     """The module ref whose own source DIRECTLY defines top-level `name`,
     starting from `module` and following its `from X import name` statements
     transitively (re-export chains). None if no reachable module defines it
@@ -1539,15 +1091,6 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
     caller absolutizing for itself and getting the base wrong (a relative
     ref resolved against the IMPORTING module is a different file whenever
     the hop chain is more than one level deep).
-
-    `want_name` answers with `(module, defined_name)` instead of the module
-    alone — the name the walk's LAST hop exported, which differs from the
-    caller's `name` exactly when a re-export RENAMES (`from impl import
-    double_it as dt` binds `dt` locally but the defining module knows the
-    symbol as `double_it`, and both the export lookup and the mangled
-    symbol are keyed on the DEFINER's spelling). The walk itself is the
-    same, which is why this is a mode of this function rather than a
-    second copy of the hop logic.
 
     Why this exists: the module a client imports a symbol FROM and the
     module that DEFINES it are two different modules whenever the former
@@ -1607,15 +1150,12 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
     key = kind + '\x1f' + module + '\x1f' + name
     if want_abs:
         key = key + '\x1fabs'
-    if want_name:
-        key = key + '\x1fname'
     if key in cache:
         return cache[key]
     cache[key] = None
     if _module_defines_symbol(gen, module, name, kind):
-        _home = (module, name) if want_name else module
-        cache[key] = _home
-        return _home
+        cache[key] = module
+        return module
     _path, _src, stmts = gen._parsed_import(module)
     if not stmts:
         return None
@@ -1630,18 +1170,9 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
             # and keep the cycle/depth guards the walk already has.
             sub = gen._abs_module(st.module, module) if st.module.startswith('.') else st.module
             r = _find_symbol_home_module(gen, sub, name, kind, depth + 1,
-                                         want_abs=want_abs, want_name=want_name)
+                                         want_abs=want_abs)
             if r:
-                if want_name:
-                    # Both halves through `_as_str`: a tuple read back
-                    # through a recursive call's `object` return is not
-                    # statically a string on the self-hosted path.
-                    _rm = _as_str(r[0])
-                    if not want_abs and st.module.startswith('.'):
-                        _rm = _as_str(st.module)
-                    _raw = (_rm, _as_str(r[1]))
-                else:
-                    _raw = r if want_abs else (st.module if st.module.startswith('.') else r)
+                _raw = r if want_abs else (st.module if st.module.startswith('.') else r)
                 cache[key] = _raw
                 return _raw
             continue
@@ -1652,7 +1183,7 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
                 continue
             sub = gen._abs_module(st.module, module) if st.module.startswith('.') else st.module
             r = _find_symbol_home_module(gen, sub, nm, kind, depth + 1,
-                                         want_abs=want_abs, want_name=want_name)
+                                         want_abs=want_abs)
             if r:
                 # `r` is the spelling the NEXT hop used to reach the
                 # definition, which for a relative hop is absolute
@@ -1662,15 +1193,8 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
                 # differ. `r == sub` (the non-relative, therefore identical
                 # case) is by far the common one and is left untouched. With
                 # `want_abs` the caller asked for the parseable spelling, so
-                # `r` is already the answer. `want_name` answers both halves:
-                # the same module spelling, and the name THIS hop exported.
-                if want_name:
-                    _rm = _as_str(r[0])
-                    if not want_abs and st.module.startswith('.'):
-                        _rm = _as_str(st.module)
-                    _raw = (_rm, _as_str(r[1]))
-                else:
-                    _raw = r if want_abs else (st.module if st.module.startswith('.') else r)
+                # `r` is already the answer.
+                _raw = r if want_abs else (st.module if st.module.startswith('.') else r)
                 cache[key] = _raw
                 return _raw
     return None
@@ -1880,9 +1404,10 @@ def _note_struct_attr_alias(gen, module: str, alias: str, member: str) -> str | 
         `UnaryOp.operand` for a negative-step `range` by calling a NULL
         class value through `mojo_fnptr_call_1`.
 
-    The confirmation is that the aliased module itself defines `member` as a
-    class (`module_member_is_struct`), and that the class is one this compile
-    registered (`struct_field_types`). The base test is
+    No home-module confirmation, unlike the from-import spelling: there the
+    bare name could be an unrelated function, whereas `module.member` names
+    the attribute explicitly, so `member in struct_field_types` plus a base
+    that is a real module marker IS the confirmation. The base test is
     `gen._module_alias_names` — the set the plain-`import X as Y` scan
     fills, and the only one that means "namespace, not value"
     (`imported_symbols` also holds every `from X import name` binding, so
@@ -1893,14 +1418,6 @@ def _note_struct_attr_alias(gen, module: str, alias: str, member: str) -> str | 
     if member not in gen.struct_field_types:
         return None
     if module not in getattr(gen, '_module_alias_names', ()):
-        return None
-    # `member in struct_field_types` is a TU-wide bare-name test: a class of the
-    # IMPORTER with the same name would pass it, and `f = h.double_it` (where
-    # `h` is a module that defines only a FUNCTION `double_it`) then recorded
-    # `f -> double_it`, so every later `f(21)` built the importer's class
-    # instead of calling the function. The aliased module has to define the
-    # class itself; that is the confirmation the comment above relies on.
-    if not module_member_is_struct(gen, module, member):
         return None
     if module in gen.var_types or module in gen.struct_field_types:
         return None

@@ -35,7 +35,6 @@ import ast_rewriter
 import regex_compile
 import mlir
 import mojo.middle.types as gimple_ctypes
-import mojo.ir.build as build
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
@@ -60,7 +59,7 @@ from mojo.middle.funcs_shared import *  # noqa: F401,F403
 from mojo.middle.funcs_shared import (
     _SELFHOST_EXTRA_FIELD_CACHE, _as_dict, _as_funcdef_node, _as_str, _as_structdef_node, _find_generic_source,
     _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _module_attr_module, _note_struct_attr_alias, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
-    _home_signature_ctypes, _param_ctype, _parsed_import, _published_def_pts, _reexported_defining_qualifier, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
+    _home_signature_ctypes, _param_ctype, _parsed_import, _reexported_defining_qualifier, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
     _ris_collect, _scan_from_imports_flat, _selfhost_begin_compile, _selfhost_extracted_fn_index, _selfhost_files_key, _selfhost_gen_self_param_ctype, _selfhost_parsed_source, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
 )
@@ -132,7 +131,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     outer_closures = dict(sorted(_outer_closures_map.items(), key=lambda _x: _as_str(_x[0])))
     ci = outer_closures.get(node.name)
     if ci is None:
-        build.comment(gen, f"/* TODO: closure '{node.name}' (no pre-pass info) */")
+        gen._emit(f"  /* TODO: closure '{node.name}' (no pre-pass info) */")
         return
     # `len(...) > 0`, not a bare `if ci.captures`: a non-capturing nested
     # `def` has `ci.captures == []`, and an empty MojoList is a non-null
@@ -172,9 +171,8 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 # `Tools/wasm/wasi/__main__.py`'s
                 # `subdir` -> `decorator` -> `wrapper` chain, whose
                 # `wrapper` declares `nonlocal working_dir`).
-                build.assign(
-                    gen, f"{env_var}->{gimple_ctypes._c_field_name(vname)}",
-                    _own_mut_ptr)
+                gen._emit(
+                    f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {_own_mut_ptr};")
             elif vname in ci.mut_names and not (vname in gen._captures and gen._env_param):
                 # `{mut}`-capture-spec closure (ClosureInfo.mut_names):
                 # store the local's own POINTER (not its dereferenced
@@ -201,7 +199,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 # falls through to the by-value branch below rather than
                 # emit something silently wrong.
                 ptr_val = gen._new_val(_fct, gen._cname(vname))
-                build.assign(gen, f'{env_var}->{gimple_ctypes._c_field_name(vname)}', f'{ptr_val}')
+                gen._emit(f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {ptr_val};")
             # If vname is captured in the current function's own env, read from _env->vname.
             elif vname in gen._captures and gen._env_param:
                 # GIMPLE: cannot use component_ref directly as RHS of struct store;
@@ -216,7 +214,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                     tmp = gen._new_val(_fct, f'&{_boxed}')
                 else:
                     tmp = gen._new_val(_fct, f"{gen._env_param}->{gimple_ctypes._c_field_name(vname)}")
-                build.assign(gen, f'{env_var}->{gimple_ctypes._c_field_name(vname)}', f'{tmp}')
+                gen._emit(f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {tmp};")
             else:
                 # Use _safe_coerce_emit to handle int→int64_t and other conversions.
                 # A heap-boxed local's var_types entry is the BOX's pointer type,
@@ -291,7 +289,7 @@ def _gen_stmt_ImportStmt(gen, node):
             # own `import struct`.
             # GIMPLE: an int64_t lvalue needs an int64_t-typed constant, not a
             # bare `0` (which is `int`) — that is a non-trivial integer_cst.
-            build.assign(gen, f'{gen._cname(local_name)}', f'(int64_t)0', f'  /* module marker */')
+            gen._emit(f"  {gen._cname(local_name)} = (int64_t)0;  /* module marker */")
 
 
 
@@ -396,8 +394,8 @@ def _gen_stmt_FromImportStmt(gen, node):
                 # comment: route through _cname so the assignment
                 # targets the same (possibly C-keyword-renamed) local
                 # _declare_var just declared.
-                build.assign(gen, gen._cname(symbol_name), '(int64_t)0',
-                             '  /* module marker (from-import submodule) */')
+                gen._emit(f"  {gen._cname(symbol_name)} = (int64_t)0;  "
+                           f"/* module marker (from-import submodule) */")
             continue
         # A module-level VALUE imported from a module that is inline-compiled
         # into this same whole-program unit (`def test(): from ctypes import
@@ -1268,7 +1266,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                 elif isinstance(_v, str):
                     try:
                         _sv = gen._emit_string_literal(_v)
-                        if (not gimple_ctypes.TypeLattice.is_cstr(gen.var_types.get(node.target))):
+                        if gen.var_types.get(node.target) != 'char *':
                             gen.var_types[node.target] = 'char *'
                         gen._safe_coerce_emit('char *', 'char *', _sv, node.target)
                     except Exception:
@@ -1331,7 +1329,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                         elif isinstance(_v, str):
                             try:
                                 _sv = gen._emit_string_literal(_v)
-                                if (not gimple_ctypes.TypeLattice.is_cstr(gen.var_types.get(_t))):
+                                if gen.var_types.get(_t) != 'char *':
                                     gen.var_types[_t] = 'char *'
                                 gen._safe_coerce_emit('char *', 'char *', _sv, _t)
                             except Exception:
@@ -1382,7 +1380,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                     elif isinstance(_v, str):
                         try:
                             _sv = gen._emit_string_literal(_v)
-                            if (not gimple_ctypes.TypeLattice.is_cstr(gen.var_types.get(node.target))):
+                            if gen.var_types.get(node.target) != 'char *':
                                 gen.var_types[node.target] = 'char *'
                             gen._safe_coerce_emit('char *', 'char *', _sv, node.target)
                         except Exception:
@@ -1431,7 +1429,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                             elif isinstance(_v, str):
                                 try:
                                     _sv = gen._emit_string_literal(_v)
-                                    if (not gimple_ctypes.TypeLattice.is_cstr(gen.var_types.get(_t))):
+                                    if gen.var_types.get(_t) != 'char *':
                                         gen.var_types[_t] = 'char *'
                                     gen._safe_coerce_emit('char *', 'char *', _sv, _t)
                                 except Exception:
@@ -2699,23 +2697,6 @@ def _imported_def_pts(gen, bare_name: str) -> list | None:
             pts = _def_store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
-        # A SEPARATELY compiled definer committed its signature into ITS OWN
-        # instance's store, which this gen never sees; its compile published
-        # it to the process-wide registry keyed by the definer's source file
-        # (`_published_def_pts`, same helper `_definer_committed_pts` uses
-        # for the module-member spelling). It outranks the registration-time
-        # snapshot below for the same reason the in-instance store does: it
-        # is the signature the emitted definition symbol was hashed from,
-        # while the snapshot is this importer's own view of the same
-        # FunctionDef (`_home_signature_ctypes`), which for an unannotated
-        # parameter can freeze a different type and hash a different suffix
-        # (the per-file `undefined symbol _helper_f_9f63a2` against the
-        # definition's `helper_f_815e8f`). `q` is the UNsanitized ref
-        # `_parsed_import` opens — the sanitizer is a display rule for the
-        # store keys, not part of file resolution.
-        pts = _published_def_pts(gen, q, bare_name)
-        if pts is not None:
-            return pts
         if store:
             pts = store.get(_pair_key(_sq, bare_name))
             if pts is not None:
@@ -3614,14 +3595,6 @@ def _func_mangleable(gen, name: str) -> bool:
             or name in gen._extra_no_mangle
             or name in gen.struct_field_types):
         return False
-    # An entry keyed by its OWN final C symbol (`funcs_shared.register_module_
-    # member_value`: `helper_double_it_9f63a2`, recorded `csym == name`) is
-    # already the mangled name. Mangling it again would double-qualify it, so
-    # a call re-dispatched on that symbol emits exactly the extern the value
-    # form and the import stubs name.
-    _final = _as_dict(_as_dict(getattr(gen, 'imported_symbols', None)).get(name))
-    if _final and _as_str(_final.get('csym')) == name:
-        return False
     # A local user def is authoritative — mangle it even if it shares a name
     # with a libc symbol (e.g. `abs` overloaded in math vs complex: both rename
     # to mojo_abs and would otherwise collide at link).
@@ -4393,8 +4366,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # a plain, positive-index lookup is the established-safe replacement.
     if node.name == 'main' and gimple_ctypes.TypeLattice.is_int_word(ret_type):
         _n_body_lines = len(gen.body_lines)
-        _last_body_line = (gen.body_lines[_n_body_lines - 1].line()
-                           if _n_body_lines > 0 else '')
+        _last_body_line = gen.body_lines[_n_body_lines - 1] if _n_body_lines > 0 else ''
         if not _last_body_line.strip().startswith('return'):
             gen._ret('0')
 
@@ -4413,7 +4385,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         f"{ret_type} {safe} ({params_str})",
         "{",
         *gen.decls,
-        *ginf.body_text(gen),
+        *gen.body_lines,
         "}",
     ]
 
@@ -4613,7 +4585,7 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
         "  _ran = 1;",
         *_cai_call,
         *_dep_init_calls,
-        *ginf.body_text(gen),
+        *gen.body_lines,
         "}",
     ]
 
@@ -4907,7 +4879,7 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
     for f in sdef.fields:
         if not isinstance(f, gimple_ctypes.VarDecl) or f.type_ann is None:
             continue
-        if (not gimple_ctypes.TypeLattice.is_list(fields.get(f.name))):
+        if fields.get(f.name) != 'MojoList *':
             continue
         _ann2 = _as_str(f.type_ann).strip()
         if not (_ann2.startswith('List[') and _ann2.endswith(']')):
@@ -5269,7 +5241,7 @@ def _publish_imported_class(gen, module: str, name: str) -> bool:
         _module_is_in_unit, _module_source_path, _gmp_assign_struct_cnames,
         _gmp_register_struct_fields, _gmp_register_method_sigs)
     _pkey = _as_str(module) + '::' + _as_str(name)
-    if _pkey in gen._published_class_keys:
+    if hasattr(gen, '_published_class_keys') and _pkey in gen._published_class_keys:
         return True
     if not _module_is_in_unit(gen, module):
         return False
@@ -5332,6 +5304,10 @@ def _publish_imported_class(gen, module: str, name: str) -> bool:
             if cname not in gen.struct_field_types:
                 gen.struct_field_types[cname] = {}
     _gmp_register_struct_fields(gen, stmts, {}, defs, [])
+    if not hasattr(gen, '_method_param_names'):
+        # gen_module_impl creates this just before its own call to the
+        # signature pass; publishing can run from an earlier pass.
+        gen._method_param_names = {}
     _gmp_register_method_sigs(gen, defs)
     # The CALL-SITE qualifier half of every method symbol: `_struct_method_
     # qualifier` derives it from `_imported_struct_home`, which the defining
@@ -5354,6 +5330,8 @@ def _publish_imported_class(gen, module: str, name: str) -> bool:
     # the defining module's section can come AFTER this one (an ancestor
     # still mid-compile emits its section last), and a call before the
     # prototype is an implicit declaration (a hard error in C99+).
+    if not hasattr(gen, '_published_class_defs'):
+        gen._published_class_defs = []
     for sd in defs:
         _known = False
         for _pc in gen._published_class_defs:
@@ -5362,6 +5340,8 @@ def _publish_imported_class(gen, module: str, name: str) -> bool:
                 break
         if not _known:
             gen._published_class_defs.append(sd)
+    if not hasattr(gen, '_published_class_keys'):
+        gen._published_class_keys = set()
     gen._published_class_keys.add(_pkey)
     return True
 
@@ -5930,7 +5910,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
         f"{_sig_kw}{ret_type} {mangled} ({params_str})",
         "{",
         *gen.decls,
-        *ginf.body_text(gen),
+        *gen.body_lines,
         "}",
     ]
     gen._pop_import_scope()

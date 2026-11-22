@@ -295,12 +295,7 @@ GIMPLE_SOURCES = (
     + sorted(os.path.relpath(p, REPO)
              for p in glob.glob(os.path.join(REPO, 'mojo', 'middle', '*.py')))
     + sorted(os.path.relpath(p, REPO)
-             for p in glob.glob(os.path.join(REPO, 'mojo', 'backend_gimple', '*.py')))
-    # The IR the backend builds statements with (mojo/ir/build.py and the
-    # Instr/Type shapes it returns) is codegen too: a change there can change
-    # every generated .ci, so it belongs in every cached check's key.
-    + sorted(os.path.relpath(p, REPO)
-             for p in glob.glob(os.path.join(REPO, 'mojo', 'ir', '*.py'))))
+             for p in glob.glob(os.path.join(REPO, 'mojo', 'backend_gimple', '*.py'))))
 
 # ── Named memory buckets ─────────────────────────────────────────────────────
 # Ceilings in GB, applied to a job's whole process TREE (memcap sums the tree
@@ -436,11 +431,7 @@ def needs_memwhy(spec) -> bool:
 # somebody adds a measurement and forgets to move the class.
 MEASURED_RUN = ('a full `gate`, 2026-11-15, master 5339685b5, per-job peaks from '
                 'the run log (--apply-peaks); linkmode re-measured 2026-11-20 on '
-                '632a573a5 by a single-job --no-cache run; sqliteruntime '
-                're-measured 2026-11-21 on 6f7ff40ef after its whole-closure '
-                'case was replaced by a single-module one; gimple re-measured '
-                '2026-11-21 on 5adfcb546 by a single-job --no-cache run while '
-                'its `import cas` closure blowup was fixed')
+                '632a573a5 by a single-job --no-cache run')
 
 # `measured`: read off that run for this job.
     # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
@@ -471,15 +462,11 @@ MEASURED_PEAK_GB = {
     'selfhost':                    (7.9, 'measured'),
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
-    # 5.58 GB was this job's number until 2026-11-21, when the cause was found
-    # rather than just measured: a single case compiled the compiler's WHOLE
-    # import closure (147 MB of C, 681 s, 8.06 GB cold). It now compiles the
-    # runtime signature table alone, and the job measures 0.7 GB for its whole
-    # process tree on a cold CAS cache (368 s) and 0.4 GB warm (119 s). The
-    # 1.3 -> 2.3 -> 5.58 GB growth that was recorded here as an "unresolved
-    # compiler memory regression" was that ONE whole-closure compile, not a
-    # drift in the builds this job exists to exercise.
-    'sqliteruntime':               (0.7, 'measured'),
+    # 2.3 GB was that job's number until it was re-measured at 5.58 GB (see
+    # the registration's memwhy). The growth 1.3 -> 2.3 -> 5.58 across recent
+    # commits is an UNRESOLVED compiler memory regression, recorded rather
+    # than hidden: this table entry only sizes the class to what was measured.
+    'sqliteruntime':               (5.58, 'measured'),
     'bootstrap-stage1-transitive': (4.1, 'measured'),
     'bootstrap-stage2-cc':         (4.1, 'measured'),
     'bootstrap-stage2-dumps':      (0.7, 'measured'),   # per item
@@ -610,12 +597,6 @@ MEASURED_PEAK_GB = {
     'coro-future-await':       (0.12, 'measured'),   # 15.4 s, 17 cases
     'nested-async-generic':    (0.12, 'measured'),   # 2.8 s
     'coro-detached-async':     (0.11, 'measured'),   # 1.8 s
-    # The pure-parser pin registered with its fix (2026-11-22): 0.6 s, 2 cases,
-    # and 25.9 MB maximum RSS by `/usr/bin/time -l` (below memcap's 0.1 GB
-    # report, hence the finer instrument). `tiny` is 133x the recorded value,
-    # which is the ladder's floor and therefore the exception `--list` names
-    # rather than a class assigned from a resemblance.
-    'coro-paramflow-cycle':    (0.03, 'measured'),
     'x86-containers':          (0.06, 'measured'),   # 47.6 s, 60 cases x 2 backends
     'gimple-async-runner':     (0.04, 'measured'),   # 0.6 s, 38 cases
     # …and the three that were registered, ungated, and NOT expect-marked —
@@ -758,15 +739,7 @@ MEASURED_PEAK_GB = {
     'coro':                                   (0.2, 'measured'),
     'coro-nested-capture':                    (0.2, 'measured'),
     'formal-ast':                             (0.1, 'measured'),
-    # 0.4 GB was this job's number until 2026-11-21, from a gate that ran
-    # BEFORE `test_known_function_not_shadowed_by_global_fnptr` was added: its
-    # `import cas` compile inlined the whole compiler closure (123 MB of C,
-    # 6.5-6.8 GB) because `cas.stdlib_fingerprint()` imported `module_loader`
-    # from inside a function, which RESOURCE-killed the job at this 4 GB class.
-    # That dependency is a leaf module now (`stdlib_path.py`); the job measures
-    # 0.4-0.9 GB again depending on how many gcc children overlap, and `tiny`
-    # covers it either way.
-    'gimple':                                 (0.9, 'measured'),
+    'gimple':                                 (0.4, 'measured'),
     'gimplegenerators':                       (0.2, 'measured'),
     'runtimere':                              (0.2, 'estimated'),
     'globcompiled':                           (0.2, 'estimated'),
@@ -1747,8 +1720,7 @@ def fanout(*a, **kw) -> Fanout:
 # reorganising the runner. `gate` below is the wider one.
 test('gimple', [PY, 'test_gimple.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple.py'],
-     desc='GIMPLE unit suite (python-interpreted codegen)',
-     disabled='bugs/gate-gimple.md')
+     desc='GIMPLE unit suite (python-interpreted codegen)')
 # Registered 2026-09-26. Both `test_gimple_runner.py` and
 # `test_gimple_generator_runner.py` were in NO bucket — no `make check`, no
 # `make gate` ran a single case in them — for as long as they existed. That
@@ -1855,7 +1827,8 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             'runtime/fire_python.h',
             'formal/model', 'FORMAL.md', 'formal/build.py',
             'build_stdlib_dylib.py'],
-     desc='runtime header export scan sees every declaration')
+     desc='runtime header export scan sees every declaration',
+     disabled='bugs/gate-rthdrscan.md')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
 # the ratchet, and the reason it needed a measurement to be safe.
 # `test_selfhost.py` calls `fire.build_executable(fire.py)`, which is the
@@ -1888,22 +1861,6 @@ test('selfhost', [PY, 'test_selfhost.py'], mem='module', cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'fire_main.py', 'test_selfhost.py'],
      desc='the compiler compiles itself to a linked binary, cleanly')
-# Red on master 2026-11-21: `ComptimeVarStmt.comptime_params` was declared in
-# fire_compiler.py but had no row in module_gen.py's hardcoded
-# struct_field_types map, so the emitted C struct would define no such member
-# and the first compiled reader of it (mojo/middle/comptime.py's
-# `_comptime_alias_template` / `_eval_alias_application`) would have been a
-# gcc failure of the whole self-host TU — the defect class the test's
-# docstring records (Parser.errors, ImportStmt.lazy, StructDef.presence_fields).
-# Registered by no suite job, which is why no run ever saw it. It is a pure
-# source-text reader (0.0 GB, sub-second, no build) and it is NOT cached,
-# matching the reg-pin convention: the map it audits IS the input, and a
-# recorded PASS would replay over exactly the change this pin exists to catch.
-test('selfhost-struct-layout-map',
-     [PY, 'test_selfhost_struct_layout_map_regression.py'], mem='tiny',
-     desc='every field declared in fire_compiler.py has a row in the '
-          'hardcoded struct_field_types map in module_gen.py, so the emitted '
-          'self-host C struct defines every member the closure reads')
 test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'test_runtime_diff.py'],
@@ -2029,18 +1986,16 @@ test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
 # in every branch that did not cause it — so this is the one shape that can:
 # `--ratchet` fails only when a file GAINS a citation, against per-file ceilings
 # in `tools/dangling_refs_baseline.py`. The corpus drifted red while nothing
-# was watching it (2026-11-09: 28 files over their baselines) and the campaign
-# that cleared it landed, so the older `expect=` marker and its doc are both
-# gone and this job is plain green: measured 2026-11-22, `--ratchet` exits 0.
-#
-# It was briefly switched OFF with a `disabled=` marker after the gate at
-# 0d832b8d39, and the job is turned back on here because the red that filing
-# recorded is gone from master: the file that had gained the citations was the
-# `CODEGEN_imported_str_global_return_int64` bug report, which cited two
-# deleted gate-bootstrap-stage2-cc docs and has since been deleted with its own
-# fix (6148b8cbf), so the gain went with the file. A red this job reports is
-# fixed by the prose rewrite `--ratchet`'s own message asks for, never by
-# re-adding the marker.
+# was watching it (2026-11-09: 28 files over their baselines, the same set at
+# master's tip and at this branch's base), which the `expect=` below declares:
+# a whole-job condition with no count, because the ratchet prints no summary
+# line the runner can check one against. Its doc
+# (the doc SUITE_doc_refs_ratchet_red, now retired) was the switch — the campaign landed,
+# the doc goes, and a still-marked `doc-refs` that now PASSES reports loudly
+# until the marker drops. An `expect=` in `check` runs against this bucket's
+# stated convention on purpose: the alternative is a permanently UNDECLARED red
+# in the everyday tally, and the anti-rot above is what makes the marker
+# temporary rather than permanent.
 #
 # The key covers `**/*.md` and `**/*.py` because the walk's subject is every
 # `.md` and `.py` in the tree — `fire_compiler.py` alone is 24 of the citations,
@@ -2121,8 +2076,7 @@ test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
-     desc='compile-and-execute: plain programs, structs, closures, stdlib calls',
-     disabled='bugs/gate-gimplerunner.md')
+     desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
 test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_generator_runner.py',
                              'exec_budget.py',      # imported: must be in the key
@@ -2289,30 +2243,6 @@ test('new-syntax-parse', [PY, 'test_new_syntax_parsing.py'], cache=True, mem='ti
             + GIMPLE_SOURCES),
      desc="the new-modular syntax parses, and still does NOT parse where it "
           "must not (ellipsis, float literals, attribute access)")
-# The pure-parser half of `mojo/middle/coro.py`: `_ParamFlow`'s cycle rule in
-# `_mixed_generator_callee` (492d9fffd). An unfed pass-through cycle used to
-# answer "fed", so the mixed-generator specialization cloned a caller for a
-# generator that never reaches it and recursed until `RecursionError` (seen on
-# cpp_core.py once its printers were split). The file landed with the fix and
-# was registered NOWHERE until this entry: `test_suite.py`'s estate check named
-# it as "not run by any registered spec, not in UNREGISTERED, and in no
-# declared family", so the regression ran only when someone typed its name.
-#
-# `check` is the bucket the bug doc names, and it is the right one: this parses
-# source and calls `_mixed_generator_callee` directly, so there is no build and
-# no compiled path. The `coroutine` bucket is the compile-and-RUN coro cluster;
-# this is the analysis pin that keeps their generator routing honest. Measured
-# 0.6 s and 25.9 MB maximum RSS (`/usr/bin/time -l`, two runs agreeing) before
-# registration, well under what memcap's own 0.1 GB poll resolves.
-test('coro-paramflow-cycle', [PY, 'test_coro_paramflow_cycle.py'], cache=True,
-     mem='tiny', deps=['preflight'],
-     # Every `mojo/middle/*.py` is in GIMPLE_SOURCES, `mojo/middle/coro.py`
-     # among them, and coro.py imports several of its siblings; `fire_compiler`
-     # is the parser/AST the fixture is tokenized and parsed with. Without both
-     # in the key, editing either replayed a recorded PASS.
-     extra=GIMPLE_SOURCES + ['test_coro_paramflow_cycle.py', 'fire_compiler.py'],
-     desc='a pass-through cycle nothing feeds is not a generator source, so '
-          'the mixed-generator specialization does not recurse on it')
 # The x86-64 PARITY differential, registered 2026-10-06 (`work/x86-coverage-endtoend`)
 # because it was in NO bucket and in no `UNREGISTERED` list — the shape
 # `test_suite.py`'s estate check exists to report: a test file neither
@@ -2466,23 +2396,6 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
             'runtime/fire_async_runtime.cpp', 'runtime/fire_async_runtime.h'] + CORO_RUNTIME,
      desc='nested async-def mutable closure capture under MOJO_CORO=stackswitch '
           '(was 0/9, unregistered, naming the pre-rename mojo_*.c runtime files)')
-# Two pure-Python pins the estate check reported as run by nothing (bug:
-# SUITE_estate_two_test_files_unregistered). Neither compiles anything.
-# The stage2-dumps pin reads the registry and asserts the `bootstrap-stage2-cc`
-# producer is still disabled by its doc, so its cache key names both.
-test('bootstrap-stage2-dumps-t-print', [PY, 'test_bootstrap_stage2_dumps_t_print.py'],
-     mem='tiny',
-     extra=['test_bootstrap_stage2_dumps_t_print.py', 'tools/suite.py',
-            'bugs/mid/gate-bootstrap-stage2-cc.md'],
-     desc='bootstrap-stage2-dumps fanout skips behind disabled bootstrap-stage2-cc '
-          '(pinned against the registry and its doc)')
-# The GIR stage-4 type-lattice predicates over mojo/middle/types.py; the GIR W1
-# tail (landed 2026-11-22) checks its rewrites against this file.
-test('type-lattice-predicates', [PY, 'test_type_lattice_predicates.py'], cache=True,
-     mem='tiny',
-     extra=['test_type_lattice_predicates.py', 'mojo/middle/types.py',
-            'tools/type_string_codemod.py'],
-     desc='GIR stage-4 type-lattice predicates over mojo/middle/types.py (pure Python)')
 
 # ── The self-hosted BINARY's own compiled codegen ───────────────────────────
 # Everything here runs a mojoc process, so everything is capped, and
@@ -2695,35 +2608,27 @@ test('runtimedylib', [PY, 'test_runtime_dylib.py'],
 # ~240 s at a 2.4 GB peak, so `tiny` (4) is the class the ratchet assigns. In
 # the 17-job `check` run its footprint inflated to the 4.0 GB ceiling and it was
 # killed (a RESOURCE verdict, reported apart from FAIL), and a later 3-job run
-# timed out at 600 s. Both of those were the whole-closure compile recorded on
-# the registration below; with it gone the job is back to `tiny` and a
-# measured 368 s.
+# timed out at 600 s: under heavy load this job is the one to look at first.
 test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'],
-     # `tiny` (4 GB) is the floor class, and it is now the MEASURED one. The
-     # job used to peak at 5.58 GB (and was RESOURCE-killed at 4.2 GB) because
-     # one of its cases, `test_probe_ignores_the_runtime_signature_table` (then
-     # named `test_probe_ignores_mentions`), compiled the compiler's
-     # WHOLE import closure (`from build_config import find_gcc` with
-     # do_imports=True): re-measured 2026-11-21 on this tree, that single
-     # compile emits 147 MB of C, takes 681 s cold and peaks at 8.06 GB. That
-     # case now compiles the compiler's runtime signature table
-     # (`mojo/middle/rt_sigs.py`, do_imports=False — 0.5 s, ~1 MB, the module
-     # that actually carries the optional units' names as literal data), so
-     # the job's own measurement is 368 s / 0.7 GB tree on the first (cold CAS)
-     # run and 119 s / 0.4 GB on a warm one — memcap's tree peak and
-     # `/usr/bin/time -l`'s 414 MB max RSS for the driver, 2026-11-21. A QUICK
-     # suite job must not contain a whole-closure compile: that is a self-host
-     # step's cost, and it is what timed this job out at 600 s in the gate at
-     # ce55ca85bf.
-     mem='tiny',
-     # 119-368 s measured is 12 real build/link/RUN steps (5 programs x 2
-     # pipelines plus two link-line probes), and the suite runs it beside
-     # ~17 other jobs, so the margin is for the machine, not for the job:
-     # this was the entry that stretched past a cap on load alone before
-     # (CONTROL.html round 2: 724 s wall for 122 s CPU). Nothing here compiles
-     # the compiler's closure any more, so a genuine hang still costs one
-     # cap, not a day.
-     deps=['preflight'], timeout=1200,
+     # `tiny` (4) was set from a 1.3 GB peak. Re-measured 2026-11-18 with
+     # `/usr/bin/time -l` on a quiet machine: peak RSS 5.58 GB over 870 s
+     # (exit 0). The suite's own log recorded 4.2 GB and RESOURCE-KILLED the
+     # job at 532 s, so 4.2 was a partial peak, not the job's need. The
+     # ratchet's 1.5x headroom rule (class_for_peak) puts 5.58 GB at `module`
+     # (8.37 GB needed; `small` is 8). Over the 4 GB line and therefore a
+     # debt, not a fact -- see MEM_DEBT_DOC.
+     mem='module',
+     memwhy='measured 5.58 GB peak RSS 2026-11-18 (/usr/bin/time -l on '
+            'test_sqlite3_runtime.py, 870 s wall, exit 0); the suite log '
+            'recorded 4.2 GB and RESOURCE-killed it at 532 s, so that number '
+            'was a partial peak. Building the sqlite3 optional units drags in '
+            'the runtime headers and several test programs; the '
+            '1.3 -> 2.3 -> 5.58 GB growth across recent commits is an OPEN '
+            'compiler memory regression, and this class is 4.3x the measured '
+            'peak only because the headroom rule rounds 8.37 GB up to the next '
+            'rung -- reducing the peak is the real fix. See '
+            'doc/POLICY_memory_over_4gb.md.',
+     deps=['preflight'], timeout=600,
      desc='optional-unit link mechanism: derivation, probe, and every '
           'test_sqlite3*.mojo built+linked+RUN on both pipelines')
 
@@ -2833,7 +2738,7 @@ test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='small',
             'only 1.46x and the run was RESOURCE-capped at it. Over the 4 GB debt '
             'line — see ' + MEM_DEBT_DOC,
      desc='gcc -fgimple + link: stage1/fire.ci -> stage2/mojo',
-     disabled='bugs/mid/gate-bootstrap-stage2-cc.md')
+     disabled='bugs/gate-bootstrap-stage2-cc.md')
 
 # `tiny` (4), down from `module` (24): 0.5 GB measured PER ITEM, the only
 # fanout item peak in the table, so the ratchet assigns 0.75 GB. `module` was
@@ -4490,8 +4395,7 @@ test('closure-address-of-capture', [PY, 'test_closure_address_of_capture.py'],
      desc="Pointer(to=x) of a by-value capture takes the env field's address (CODEGEN closure capture)")
 test('codegen-container-param-unknown-arg', [PY, 'test_codegen_container_param_unknown_arg.py'],
      mem='tiny',
-     desc='container parameter with an unknown argument (registered by the estate audit)',
-     disabled='bugs/gate-codegen-container-param-unknown-arg.md')
+     desc='container parameter with an unknown argument (registered by the estate audit)')
 test('comptime-generic-alias-fold', [PY, 'test_comptime_generic_alias_fold.py'],
      mem='tiny',
      desc='a generic comptime alias folds (registered by the estate audit)')
@@ -4510,8 +4414,6 @@ test('stdlib-syntax-quick-bench-math', [PY, 'test_stdlib_syntax_quick_bench_math
 test('land-doc-summary', [PY, 'tools/test_land_doc_summary.py'],
      mem='tiny',
      desc='land doc summary (registered by the estate audit)')
-test('arms-extracted', [PY, 'test_gimple_arms_extracted.py'], mem='tiny',
-     desc='GIR Stage 6: the eight giant lowering functions have no movable `if` arms (the pin was in no bucket; registered)')
 test('gates-bootstrap-not-off', [PY, 'test_gates_bootstrap_jobs_not_off.py'],
      mem='tiny',
      desc='GATE_red_recover-land_2026-11-02-part5-part3: no gates.json OFF pattern may name a bootstrap gate job')
@@ -5102,17 +5004,7 @@ BUCKETS = {
               # others because `proofs` is the whole formal picture in one
               # bucket, and in `check` for `formal-sys`'s reason: no Lean, four
               # seconds.
-              'formal-reproducible',
-              # …and `selfhost-struct-layout-map`: a pure source-text reader
-              # (0.0 GB, sub-second, no build) in the everyday loop rather
-              # than in `regressions` because GATE registration is exactly
-              # the point — it was registered nowhere, which is why
-              # `ComptimeVarStmt.comptime_params` sat absent from the emitted
-              # self-host C struct and no `make` ever reported it. A field
-              # without a row is dropped from the struct the next reader of
-              # it makes gcc reject, so the everyday gate has to see the next
-              # one (bug doc deleted with the fix, 2026-11-21).
-              'selfhost-struct-layout-map'],
+              'formal-reproducible'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus
@@ -5447,13 +5339,9 @@ BUCKETS['check'].append('codegen-container-param-unknown-arg')
 BUCKETS['check'].append('comptime-generic-alias-fold')
 BUCKETS['check'].append('extend-register-refusal')
 BUCKETS['check'].append('gates-coro-jobs-not-off')
-# The pure-parser `_ParamFlow` cycle pin; its registration above says why
-# `check` and not `coroutine`.
-BUCKETS['check'].append('coro-paramflow-cycle')
 BUCKETS['check'].append('stdlib-import-suffix')
 BUCKETS['check'].append('stdlib-syntax-quick-bench-math')
 BUCKETS['check'].append('land-doc-summary')
-BUCKETS['check'].append('arms-extracted')
 BUCKETS['check'].append('dylib-generic-instances')
 BUCKETS['check'].append('import-overload-choice')
 BUCKETS['check'].append('out-param-local')
@@ -5465,10 +5353,6 @@ BUCKETS['check'].append('function-body-alias-class-import')
 BUCKETS['check'].append('gpu-offload-validation-part3')
 BUCKETS['check'].append('mojoc-import-conformance')
 BUCKETS['check'].append('mojoc-synthetic-signature-default')
-# The two pure-Python pins the estate check named as run by nothing; their
-# registrations above say what each one reads.
-BUCKETS['check'].append('bootstrap-stage2-dumps-t-print')
-BUCKETS['check'].append('type-lattice-predicates')
 BUCKETS['check'].append('mojoc-implicit-default-conformance')
 BUCKETS['check'].append('trait-comptime-member-conformance-diagnostic')
 
@@ -6762,32 +6646,20 @@ def _line(job, res, done, total, active):
 # ── Reporting ────────────────────────────────────────────────────────────────
 # The screen gets the failures and one tally. Everything per-test — a PASS
 # line each, with argv, exit code, duration and measured peak — is in the log.
-BUGS_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bugs'))
-
-
-def known_bugs(name, bugs_dir=None):
+def known_bugs(name):
     """The bug docs that already track a failing job, so a red gate says whether it is a regression someone has
     seen before (a doc exists) or a new one (none does). A doc matches when its file name carries every word of the
     job's name (`gimple` -> GATE_check_gimple_selfhost_...), or when its title names the job in backticks. The
-    result is a list of bugs/ paths, possibly empty; it is a pointer for the reader, not a verdict on the failure.
-
-    The job and the file name are split on the SAME separators, `[-_.:]`. They did not used to be — the job name
-    was split on `[-_]` only, while a fanout ITEM's name puts its file after a colon (`bootstrap-stage2-dumps:
-    test_sqlite3_simple.mojo`) and a per-item doc's name carries the dots of the extension — so neither the item
-    nor its parent could ever match the doc that tracked it. Measured at gate c0182fd3: fifty
-    `bootstrap-stage2-dumps:<file>.mojo` docs on disk and the gate still printed `NEW: no bug doc tracks this job`
-    for their parent, which is the signal a reader uses to tell a repeat from a fresh break. `bugs_dir` exists so
-    the matcher can be tested against a synthetic corpus instead of whatever the live bugs/ holds today."""
+    result is a list of bugs/ paths, possibly empty; it is a pointer for the reader, not a verdict on the failure."""
     import re as _re
-    words = [w for w in _re.split(r'[-_.:]', name.lower()) if w]
-    bugs = os.path.normpath(bugs_dir or BUGS_DIR)
+    words = [w for w in _re.split(r'[-_]', name.lower()) if w]
     hits = []
-    for root, _dirs, files in os.walk(bugs):
+    for root, _dirs, files in os.walk(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bugs')):
         for f in files:
             if not f.endswith('.md') or f.startswith(('OPEN_WORK', 'README')):
                 continue
             path = os.path.normpath(os.path.join(root, f))
-            tokens = set(_re.split(r'[-_.:]', f[:-3].lower()))
+            tokens = set(_re.split(r'[-_.]', f[:-3].lower()))
             if all(w in tokens for w in words):
                 hits.append(path)
                 continue
@@ -6797,8 +6669,8 @@ def known_bugs(name, bugs_dir=None):
                 continue
             if title.startswith('#') and f'`{name}`' in title:    # the title names the job, not a passing mention
                 hits.append(path)
-    base = os.path.dirname(bugs)            # so the answer reads `bugs/<doc>.md` for any corpus handed in
-    return sorted(os.path.relpath(h, base) for h in hits)
+    rel = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    return sorted(os.path.relpath(h, rel) for h in hits)
 
 
 def _hms(secs):

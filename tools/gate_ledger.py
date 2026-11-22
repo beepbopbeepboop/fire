@@ -214,30 +214,27 @@ def save(st):
 
 
 def reconcile(st, run_sha, failed, passed, prev):
-    """Fold one full-gate run into the ledger. FAILED are the red jobs, PASSED the ones the run SAW PASS, PREV the
-    previous run's {"sha":..., "failed": [...], "passed": [...]} (the last_good of a job that was green there).
-    Returns (newly_red, recovered): the jobs whose first_bad must now be found, and those that came back.
-
-    A job's last_good is the previous run's sha ONLY when that run's own log reports the job PASSED. A job that
-    SKIPped there (every dependent of a disabled producer, every platform-gated test) is in neither `failed` nor
-    `passed`, and reading that absence as green is what gave all fifty `bootstrap-stage2-dumps:<item>` entries the
-    same `last_good` from a run whose log skipped them and whose producer was red at that very sha (2026-11-21).
-    A job that did not run has no evidence either way: last_good stays None, and the note says so."""
+    """Fold one full-gate run into the ledger. FAILED are the red jobs, PASSED the ones the run saw pass, PREV the
+    previous run's {"sha":..., "failed": [...]} (the last_good of a job that was green then). Returns
+    (newly_red, recovered): the jobs whose first_bad must now be found, and those that came back."""
     jobs, newly, recovered = st.setdefault("jobs", {}), [], []
-    seen_pass = set(prev.get("passed") or [])
     for j in failed:
         e = jobs.get(j)
         if e and e.get("red"):
             e["last_seen_bad"] = run_sha
             continue
         good = (e or {}).get("last_good")
-        if not good and prev.get("sha") and j in seen_pass:
+        # "not in failed" is NOT "green": a job that SKIPped (every dependent
+        # of a disabled producer, every platform-gated test) is in neither
+        # set, and taking prev["sha"] for it is what gave all fifty
+        # stage2-dumps items a last_good recorded at a run whose own log shows
+        # `skip <item>` beside a RED producer. Require the previous run to have
+        # seen the job PASS; with no such record, last_good stays None and the
+        # bisect says so instead of inventing a first_bad.
+        if (not good and prev.get("sha") and not prev.get("unknown")
+                and j in set(prev.get("passed", ()))):
             good = prev["sha"]
-        entry = {"red": True, "last_good": good, "first_bad": None, "last_seen_bad": run_sha, "marked": False}
-        if not good:
-            entry["bisect_note"] = ("the run at %s did not report this job green (it did not run there), so there is "
-                                    "no last_good to bisect from" % (prev.get("sha") or "?")[:10])
-        jobs[j] = entry
+        jobs[j] = {"red": True, "last_good": good, "first_bad": None, "last_seen_bad": run_sha, "marked": False}
         newly.append(j)
     for j in passed:
         e = jobs.get(j)
@@ -252,37 +249,22 @@ def reconcile(st, run_sha, failed, passed, prev):
 
 
 def report_text(job, e, run_sha, log, subj_of):
-    """The body of the ledger section filed in bugs/gate-<job>.md.
-
-    The "Skipped" paragraph is a claim that a `disabled=` switch exists, so it is
-    emitted only for the state the ledger actually produced (`e["marked"]`, set
-    from `get_disabled` after `set_disabled` ran), never merely because the job
-    has a registration: a fanout ITEM has none at all, and a registration that
-    already carries an `expect=`/`disabled=` marker somebody wrote is left alone
-    by `set_marker`. Claiming a switch in either case sends the fixer to remove
-    an argument that is not there (2026-11-21: fifty stage2-dumps docs)."""
+    """The body of the ledger section filed in bugs/gate-<job>.md."""
     def show(sha):
         return "none recorded (no earlier full-gate run covered this job)" if not sha else "`%s` %s" % (sha[:10], subj_of(sha))
     fb = e.get("first_bad")
-    if e.get("marked") is not True and e.get("registered") is False:
+    if e.get("registered") is False:
         # A fanout item (`bootstrap-stage2-dumps:fib_jit.mojo`) is not a
         # registration of its own, so set_disabled wrote nothing and there is no
-        # marker for a fixer to remove.
+        # marker for a fixer to remove. The boilerplate that said there was is
+        # what sent the fifty stage2-dumps docs of 2026-11-21 after an argument
+        # that could not exist.
         skipped = ("- **No marker:** `%s` is one item of the `%s` fanout and "
                    "has no registration of its own, so there is no `disabled=` "
                    "argument to remove: the gate runs it as part of that fanout. "
                    "Fix the cause (when a producer is what is off, its doc is the "
                    "switch), make the item pass, and delete this doc in the same "
                    "commit." % (job, job.split(":", 1)[0]))
-    elif e.get("marked") is not True:
-        # Registered, but the splice wrote no marker: the registration already
-        # carries an expect=/disabled= marker a person wrote, which the ledger
-        # never overwrites. There is still no switch naming this doc to remove.
-        skipped = ("- **No marker:** the ledger wrote no `disabled=` argument naming this doc for `%s` "
-                   "(its registration already carries an `expect=`/`disabled=` marker somebody wrote, which "
-                   "the ledger does not overwrite), so there is no switch to remove: the gate RUNS this job "
-                   "and it fails. Fix the cause (if that existing marker is the switch, it is what has to "
-                   "change), make the job pass, and delete this doc in the same commit." % job)
     else:
         skipped = ("- **Skipped:** the job's registration in `tools/suite.py` carries `disabled='%s'`, so the gate spends no time on it. "
                    "To fix it: remove the `disabled=` argument, make the job pass, and delete this doc in the same commit."

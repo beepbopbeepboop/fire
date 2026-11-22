@@ -258,27 +258,15 @@ def _ml_py_ann_ctype(ann: str) -> str:
     return ''
 
 
-def _ml_plain_str_literal(rhs: str) -> bool:
-    """True when `rhs` is exactly one quoted string literal with no quote of
-    the same kind inside it (`'x'`, `"x"`). Concatenation (`'a' + b`), a
-    triple-quoted or escaped string all answer False and stay unexported."""
-    if len(rhs) < 2 or rhs[0] not in ('"', "'") or rhs[-1] != rhs[0]:
-        return False
-    return rhs[0] not in rhs[1:-1] and '\\' not in rhs
-
-
 def _ml_py_global_ctype(ann: str, rhs: str, exports: dict) -> str:
     """The C type a `.py` sibling's `NAME[: ANN] = RHS` global is exported
     with, or '' to leave it unexported (its reads then keep the stub, as they
     always did). An annotation decides it alone. Unannotated, only a whole-RHS
     `callee(...)` to a same-file `def` whose C return is a pointer, `char *` or
     `double` qualifies: that is the rule the defining module applies to the
-    same RHS, so the importer's extern matches its accessor. A whole-RHS plain
-    string literal (`NAME = 'x'`) is `char *` in the defining module too."""
+    same RHS, so the importer's extern matches its accessor."""
     if ann != '':
         return _ml_py_ann_ctype(ann)
-    if _ml_plain_str_literal(rhs):
-        return 'char *'
     callee = _ml_plain_call_callee(rhs)
     if callee == '' or callee not in exports:
         return ''
@@ -533,18 +521,58 @@ class _ReflectTable(ctypes.Structure):
                 ('n_syms', ctypes.c_uint32), ('reserved', ctypes.c_uint32),
                 ('syms', ctypes.POINTER(_ReflectSym))]
 
-# The stdlib path's finder lives in the LEAF module `stdlib_path` (which imports
-# only `os`), not here, and the three finder names are re-exported so every
-# existing caller — tests, tools — keeps importing them from the module it always
-# did; `STDLIB_PATH` is computed here from that finder exactly as before.
-# `cas.stdlib_fingerprint` needs the path too, and it must NOT drag this module
-# into a compile: this module is part of the compiler's own import closure, so a
-# function-scoped `from module_loader import STDLIB_PATH` there inlined the WHOLE
-# compiler (123 MB of C, 6.5 GB peak) into any compile that touched `cas`,
-# RESOURCE-killing the `gimple` job at its 4 GB class. See stdlib_path.py's
-# docstring.
-from stdlib_path import (_STDLIB_CHECKOUTS, _find_stdlib_path,  # noqa: F401  (re-export)
-                         _is_stdlib_root)
+# The Mojo library checkouts this tree can be built against, most-preferred
+# first.
+_STDLIB_CHECKOUTS = (
+    ('new-modular', 'Mojo/stdlib'),
+    ('modular', 'mojo/stdlib'),
+)
+
+
+def _is_stdlib_root(path):
+    """True if `path` is a Mojo stdlib root rather than some same-named dir.
+
+    Both checkouts keep the importable package tree under `stdlib/std`, so that
+    subdirectory is what distinguishes a real root from, say, a build output
+    directory that happens to be called `stdlib`.
+    """
+    return os.path.isdir(os.path.join(path, 'std'))
+
+
+def _find_stdlib_path() -> str:
+    """Find stdlib path using multiple strategies.
+
+    1. Check MOJO_STDLIB environment variable
+    2. Try each known checkout location (see _STDLIB_CHECKOUTS)
+    3. Search upward from current directory
+    4. Return the first candidate (runtime handles a missing stdlib gracefully)
+    """
+    # Strategy 1: Environment variable override
+    if 'MOJO_STDLIB' in os.environ:
+        path = os.environ['MOJO_STDLIB']
+        if os.path.isdir(path):
+            return path
+
+    # Strategy 2: Known checkout locations, most-preferred first
+    for checkout, rel in _STDLIB_CHECKOUTS:
+        abs_path = f'/Users/mrs/net/chatgpt/claude/{checkout}/{rel}'
+        if _is_stdlib_root(abs_path):
+            return abs_path
+
+    # Strategy 3: Search upward from current working directory
+    cwd = os.path.abspath(os.getcwd())
+    for _ in range(10):  # Search up to 10 levels
+        for checkout, rel in _STDLIB_CHECKOUTS:
+            candidate = os.path.join(cwd, checkout, *rel.split('/'))
+            if _is_stdlib_root(candidate):
+                return candidate
+        cwd = os.path.dirname(cwd)
+        if cwd == '/':
+            break
+
+    # Fallback: return the preferred path (runtime will handle missing stdlib gracefully)
+    return f'/Users/mrs/net/chatgpt/claude/{_STDLIB_CHECKOUTS[0][0]}/{_STDLIB_CHECKOUTS[0][1]}'
+
 STDLIB_PATH = _find_stdlib_path()
 TEST_PATH = os.path.join(HERE, 'runtime')  # For test modules
 
@@ -710,24 +738,6 @@ class ModuleLoader:
     # modules — one implementation, two entry points, per this project's
     # "consolidate, don't duplicate" convention. (self._path_cache is set
     # up in __init__.)
-    def _py_sibling_exports(self, content: str, pydir: str, path: str) -> dict:
-        """`{name: export entry}` for every name a column-0 `from SIBLING import
-        ...` in the `.py` source `content` pulls from a sibling in `pydir`
-        (never `path` itself). The first sibling that exports a name wins."""
-        out: dict = {}
-        _reexp = _ml_from_imports(content)
-        for _rxi in range(0, len(_reexp) - 1, 2):
-            _srcmod = _ml_as_str(_reexp[_rxi])
-            _names_blob = _ml_as_str(_reexp[_rxi + 1])
-            _sib = os.path.join(pydir, _srcmod.split('.')[-1] + '.py')
-            if not os.path.isfile(_sib) or _sib == path:
-                continue
-            _sib_exp = self.load_module_from_path(_sib)
-            for _nm in _ml_idents(_names_blob):
-                if _nm in _sib_exp:
-                    out.setdefault(_nm, _sib_exp[_nm])
-        return out
-
     def load_module_from_path(self, path: str) -> dict:
         """Extract exported fn/def signatures from an ARBITRARY .mojo file
         path (no STDLIB_PATH/TEST_PATH restriction — see docstring above).
@@ -1287,37 +1297,20 @@ class ModuleLoader:
                     exports[_nm] = {
                         'kind': 'global_var', 'c_return_type': _crt,
                         'home_module_path': path}
-            # Scalar globals: `NAME: str = ...`, `NAME: int = ...`,
-            # `NAME = callee(...)` (see `_ml_py_global_ctype`), in ANY `.py`
-            # module, not only the compiler's own directory. The scan types a
-            # global exactly as its home module's accessor is typed, so an
-            # outside-dir definer exports the same entry a compiler sibling
-            # does. Gating it to `_selfhost_dir` left a separate compile of
-            # `from k_src import NAME` (k_src.py outside the compiler dir)
-            # reading `(int64_t)0` for a `str` global. Without an export, a
-            # function-scoped `from M import NAME` declared the name as a
-            # no-signature `extern int64_t NAME (...)` and read it through a
-            # `_funcptr_` stub, not the defining module's `M__mojo_global_get_
-            # NAME` accessor. Anything whose type is not decided here stays
-            # unexported, as before. The set/container scans above stay gated:
-            # they carry the conflicting-declaration cases documented there.
-            if path.endswith('.py'):
-                _pydir = os.path.dirname(path)
-                # Names this module imports from its sibling modules, with
-                # the sibling's own export entry. A callee that is re-exported
-                # (`from stdlib_path import _find_stdlib_path`, then
-                # `STDLIB_PATH = _find_stdlib_path()`) is typed by the sibling
-                # that DEFINES it, exactly as the home module types its accessor.
-                _sib_exp_by_name = self._py_sibling_exports(content, _pydir, path)
-                _callee_exports = dict(_sib_exp_by_name)
-                _callee_exports.update(exports)
+                # Scalar globals: `NAME: str = ...`, `NAME: int = ...`,
+                # `NAME = callee(...)` (see `_ml_py_global_ctype`). Without an
+                # export, a function-scoped `from M import NAME` declared the
+                # name as a no-signature `extern int64_t NAME (...)` and read
+                # it through a `_funcptr_` stub, not the defining module's
+                # `M__mojo_global_get_NAME` accessor. Anything whose type is
+                # not decided here stays unexported, as before.
                 for _line in content.split('\n'):
                     if not _line or _line[0] in ' \t#':
                         continue
                     _sg = _ml_scalar_global(_line)
                     if len(_sg) == 0 or _sg[0] in exports:
                         continue
-                    _sgt = _ml_py_global_ctype(_sg[1], _sg[2], _callee_exports)
+                    _sgt = _ml_py_global_ctype(_sg[1], _sg[2], exports)
                     if _sgt == '':
                         continue
                     exports[_sg[0]] = {
@@ -1326,12 +1319,21 @@ class ModuleLoader:
                 # Re-exports: `from SIBLING import (a, b)` — a set global not
                 # defined locally but surfaced through this module carries the
                 # sibling's own home accessor.
-                for _nm, _si in _sib_exp_by_name.items():
-                    if (isinstance(_si, dict) and _si.get('kind') == 'global_var'
-                            and _si.get('c_return_type') in (
-                                'int64_t', 'MojoSet *', 'MojoDict *', 'MojoList *')
-                            and _nm not in exports):
-                        exports[_nm] = dict(_si)
+                _reexp = _ml_from_imports(content)
+                for _rxi in range(0, len(_reexp) - 1, 2):
+                    _srcmod = _ml_as_str(_reexp[_rxi])
+                    _names_blob = _ml_as_str(_reexp[_rxi + 1])
+                    _sib = os.path.join(_pydir, _srcmod.split('.')[-1] + '.py')
+                    if not os.path.isfile(_sib) or _sib == path:
+                        continue
+                    _sib_exp = self.load_module_from_path(_sib)
+                    for _nm in _ml_idents(_names_blob):
+                        _si = _sib_exp.get(_nm)
+                        if (isinstance(_si, dict) and _si.get('kind') == 'global_var'
+                                and _si.get('c_return_type') in (
+                                    'int64_t', 'MojoSet *', 'MojoDict *', 'MojoList *')
+                                and _nm not in exports):
+                            exports[_nm] = dict(_si)
 
             # Extract module-scope PLAIN `var NAME = EXPR` globals (not
             # `comptime` — those are handled separately, by re-parsing and

@@ -4189,14 +4189,12 @@ def run(gen, stmts: list):
     """Materialize in-TU instantiations for `stmts`; returns the extra
     top-level statements to append to them, and fills `gen._intu_funcs` /
     `_intu_structs` (what this compile DEFINES) and `gen._intu_func_args` /
-    `_intu_struct_args` (what the `.o` route must NOT also emit).
-
-    Those five tables (with `_intu_factory_records`) are declared once in
-    `GimpleGen.__init__` and accumulate across the modules of one compile.
-    They are deliberately NOT initialised here: a lazy
-    `if not hasattr(gen, attr): setattr(...)` never runs in the compiled
-    compiler, where every declared GimpleGen field answers `hasattr` True --
-    the NULL container then crashed the first `gen._intu_funcs[...] = ...`."""
+    `_intu_struct_args` (what the `.o` route must NOT also emit)."""
+    for attr, default in (('_intu_funcs', {}), ('_intu_structs', {}),
+                          ('_intu_func_args', {}), ('_intu_struct_args', {}),
+                          ('_intu_factory_records', {})):
+        if not hasattr(gen, attr):
+            setattr(gen, attr, dict(default))
     if _skip(gen):
         return []
     local_generic_struct_defs = {

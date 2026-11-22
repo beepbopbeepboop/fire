@@ -624,15 +624,6 @@ class AssignStmt:
     # it when present, since a dataclass field with a default is exactly the
     # `name: Type = default` shape that reaches this branch.
     type_ann: object = None
-    # True for the binding statement of an `alias NAME = value` declaration.
-    # `alias` is a soft keyword (a plain identifier in Python sources, like
-    # `fn`/`struct`), so the parser leaves it as a no-op ExprStmt beside the
-    # ordinary AssignStmt it already produced; this field is the explicit
-    # marker that the assignment IS the declaration, so a consumer never has
-    # to pair two statements by line. Readers: unknown_decl_check (the RHS of
-    # a declaration is not a read — see its `_node`), and anything else that
-    # needs to tell a module alias from a module-level assignment.
-    is_alias: bool = False
 
 @dataclass
 class AugAssignStmt:
@@ -9847,30 +9838,6 @@ class Parser:
                 stmt.is_async = True
                 return stmt
             # else: `async` used as an ordinary identifier — fall through.
-        # `alias` is a soft keyword like `fn`/`struct`: real Python has no
-        # `alias` keyword, so `alias = ...`, `alias.attr`, `alias(...)` and
-        # `alias, x = ...` are all ordinary identifier uses. Only commit to a
-        # declaration when the shape that follows could actually BE one:
-        # `alias` then a name-like token then `=`, `:` or `[`. The declaration
-        # is the AssignStmt alone, marked `is_alias`: the keyword itself is not
-        # a statement, so no consumer (the interpreter, module_gen's type-alias
-        # harvest, the diagnostics passes) has to recognise a sentinel before
-        # it. The marker is also what keeps unknown_decl_check from reporting
-        # the alias's value as a read — an alias value the folder cannot
-        # resolve must leave its consumer undecided, not become a false
-        # positive.
-        if t.kind == "NAME" and t.value == "alias":
-            nxt, nxt2 = self._peek(1), self._peek(2)
-            name_like = nxt.kind in ("NAME", "KW") or (
-                nxt.kind == "STRING" and nxt.value.startswith("`"))
-            if name_like and nxt2.kind in ("ASSIGN", "COLON", "LBRACKET"):
-                self._advance()  # consume 'alias'
-                inner = self._parse_stmt()
-                if not isinstance(inner, AssignStmt):
-                    raise SyntaxError(
-                        f"{self._loc(t)}`alias` must bind a name with `=`")
-                inner.is_alias = True
-                return inner
         if t.kind == "NAME" and t.value == "__enum":
             return self._parse_struct()
         if t.kind == "KW":

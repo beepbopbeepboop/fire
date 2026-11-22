@@ -3,7 +3,7 @@
 
 Run: python3 tools/test_gate_ledger.py
 """
-import ast, os, sys, unittest
+import ast, os, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gate_ledger as G
 
@@ -96,8 +96,8 @@ class ReportText(unittest.TestCase):
         e.setdefault("first_bad", "S2")
         return G.report_text(job, e, "S3" * 4, "verify-S3.log", lambda s: "subject")
 
-    def test_a_marked_job_names_its_disabled_marker(self):
-        self.assertIn("disabled='%s'" % _doc("gate-gimple"), self.text("gimple", registered=True, marked=True))
+    def test_a_registered_job_names_its_disabled_marker(self):
+        self.assertIn("disabled='%s'" % _doc("gate-gimple"), self.text("gimple", registered=True))
 
     def test_a_fanout_item_says_there_is_no_marker_and_names_the_parent(self):
         t = self.text("dumps:x.mojo", registered=False)
@@ -105,21 +105,8 @@ class ReportText(unittest.TestCase):
         self.assertIn("one item of the `dumps` fanout", t)
         self.assertIn("no registration of its own", t)
 
-    def test_a_registration_the_splice_could_not_mark_does_not_claim_a_marker(self):
-        """`set_marker` writes nothing when the registration already carries an
-        `expect=`/`disabled=` marker somebody wrote, so `marked` is False while the
-        job IS registered: the doc must not claim a switch the splice never wrote.
-        Stating the produced marker state, not the registration's existence, is the
-        root cause of the 2026-11-21 fifty-doc cascade's false paragraph."""
-        t = self.text("gamma", registered=True, marked=False)
-        self.assertNotIn("disabled='", t)
-        self.assertIn("No marker", t)
-        self.assertIn("RUNS this job", t)
-
-    def test_an_unrecorded_marker_state_is_not_a_claim(self):
-        # No `marked` recorded: the ledger does not know a marker was written, so
-        # the doc may not tell a fixer to remove one.
-        self.assertNotIn("disabled='", self.text("gimple", registered=True))
+    def test_an_unrecorded_registration_state_keeps_the_registered_wording(self):
+        self.assertIn("disabled='", self.text("gimple"))
 
     def test_registered_tells_a_fanout_item_from_its_parent(self):
         self.assertTrue(G.registered(SRC, "eps"))
@@ -129,28 +116,34 @@ class ReportText(unittest.TestCase):
 class Ledger(unittest.TestCase):
     def test_a_new_red_takes_the_previous_run_as_last_good(self):
         st = {}
-        new, rec = G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": [], "passed": ["j"]})
+        new, rec = G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": [],
+                                                     "passed": ["j"]})
         self.assertEqual(new, ["j"])
         self.assertEqual(st["jobs"]["j"]["last_good"], "S1")
 
-    def test_a_job_that_did_not_run_in_the_previous_run_has_no_last_good(self):
-        """A SKIP is in neither `failed` nor `passed`, and absence from FAILED is not a pass. Reading it as one gave
-        all fifty `bootstrap-stage2-dumps:<item>` entries the same `last_good` from a run whose own log skipped them
-        and whose producer was red at that very sha (2026-11-21)."""
-        st = {}
-        G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": [], "passed": ["other"]})
-        self.assertIsNone(st["jobs"]["j"]["last_good"])
-        self.assertIn("did not report this job green", st["jobs"]["j"]["bisect_note"])
+    def test_a_skip_in_the_previous_run_is_not_a_last_good(self):
+        """A job the previous run SKIPped is NO EVIDENCE, not a pass.
 
-    def test_a_previous_run_with_no_passed_set_is_not_evidence(self):
-        # A verify.json written before `passed` was recorded cannot say the job was green.
+        Every dependent of a disabled producer and every platform-gated test
+        is in neither `failed` nor `passed`, and reading "not in failed" as
+        green is what gave all fifty `bootstrap-stage2-dumps:<file>` items a
+        last_good recorded at a run whose log shows `skip <item>` beside a RED
+        producer: a SKIP is not a pass.
+        """
+        st = {}
+        G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": [],
+                                            "passed": ["other"]})
+        self.assertIsNone(st["jobs"]["j"]["last_good"])
+
+    def test_a_previous_run_that_recorded_no_passes_is_not_a_last_good(self):
+        """Older verdicts carry no `passed` key at all; that is not a pass."""
         st = {}
         G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": []})
         self.assertIsNone(st["jobs"]["j"]["last_good"])
 
     def test_a_job_red_in_the_previous_run_has_no_known_good(self):
         st = {}
-        G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": ["j"], "passed": []})
+        G.reconcile(st, "S2", ["j"], [], {"sha": "S1", "failed": ["j"]})
         self.assertIsNone(st["jobs"]["j"]["last_good"])
 
     def test_still_red_is_not_new_and_keeps_its_history(self):
@@ -198,6 +191,39 @@ class GitHistory(unittest.TestCase):
     def test_commits_between_excludes_good_and_includes_bad(self):
         good = self.commit("a.py"); c2 = self.commit("b.py"); c3 = self.commit("c.py")
         self.assertEqual(G.commits_between(good, c3, cwd=self.d), [c2, c3])
+
+
+class SuiteLogVerdicts(unittest.TestCase):
+    """One parser reads the runner's per-job verdict line.
+
+    `passed_jobs` used to match `PASS`, but the runner's tag for a pass has
+    been `ok` since `tools/suite.py`'s `_TAG` landed -- so it answered [] on
+    every real log, `reconcile`'s `passed` loop was fed nothing, and no job was
+    ever recorded as recovered.
+    """
+
+    LOG = ("[  1/3] ok       alpha            0.1s\n"
+           "[  2/3] skip     beta             0.0s  (0 running)\n"
+           "[  3/3] FAIL     gamma            0.2s\n")
+
+    def test_the_runner_tag_is_read(self):
+        import verify_landed as V
+        self.assertEqual(V.verdicts_in(self.LOG),
+                         {"alpha": "PASS", "beta": "SKIP", "gamma": "RED"})
+
+    def test_passed_jobs_is_the_pass_set_only(self):
+        import verify_landed as V
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "build"))
+            open(os.path.join(d, "build", "suite.log"), "w").write(self.LOG)
+            self.assertEqual(V.passed_jobs(d), ["alpha"])
+
+    def test_a_job_the_log_never_names_is_absent_not_passed(self):
+        import verify_landed as V
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "build"))
+            open(os.path.join(d, "build", "suite.log"), "w").write(self.LOG)
+            self.assertEqual(V.job_verdicts(d).get("never-ran"), None)
 
 
 if __name__ == "__main__":

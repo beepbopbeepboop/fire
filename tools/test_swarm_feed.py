@@ -231,21 +231,16 @@ def main():
     ok &= check("fresh branches go before failed ones", S.fresh_first(["b", "a", "c"], tasks) == ["a", "c"])
     ok &= check("with only failed branches left, they are tried", S.fresh_first(["b"], tasks) == ["b"])
     C.state_of = _state
-    # the culprit search: a fake probe that is red once the culprit is in the prefix. probe() takes the batch alone:
-    # there is ONE landing gate (tools/gates.json `landing`), and the old --stdlib flag went away with the full landing
-    # gate (commit 719279f8e), so a probe call carrying a gate flag is a stale caller on either side.
+    # the culprit search: a fake probe that is red once the culprit is in the prefix
     _probe = S.probe
-    calls = []
     for bad, seq in [("c", ["a", "b", "c", "d", "e"]), ("a", ["a", "b", "c"]), ("e", ["a", "b", "c", "d", "e"])]:
-        def fake_probe(*args, bad=bad):
-            calls.append(args)
-            batch = args[0]
-            return ("RED", batch, ["job-" + bad], "") if bad in batch else ("GREEN", batch, [], "")
-        S.probe = fake_probe
+        S.probe = lambda s, bad=bad, stdlib=True: ("RED", s, ["job-" + bad], "") if bad in s else ("GREEN", s, [], "")
         ok &= check("the culprit search finds %s in %s" % (bad, seq), S.find_culprit(seq, ["job-" + bad])[0] == bad)
-    ok &= check("the culprit search probes with the batch alone, no gate flag",
-                calls and all(len(a) == 1 for a in calls))
-    S.probe = lambda batch: ("BUSY", [], [], "another integrator")
+    seen = []
+    S.probe = lambda s, stdlib=True: (seen.append(stdlib), ("RED", s, ["j"], ""))[1]
+    S.find_culprit(["a", "b", "c"], ["j"], stdlib=False)
+    ok &= check("the culprit search probes behind the batch's own gate", seen and not any(seen))
+    S.probe = lambda s, stdlib=True: ("BUSY", [], [], "another integrator")
     ok &= check("an inconclusive sub-probe names no culprit", S.find_culprit(["a", "b", "c"], ["j"]) == (None, []))
     S.probe = _probe
     print("all passed" if ok else "FAILED")

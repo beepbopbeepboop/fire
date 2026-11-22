@@ -30,11 +30,6 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-# The one answer to "`<alias>.<member>` as a function value" (see its
-# docstring): keyed by the module-qualified C symbol, never by the bare member
-# name, so the VALUE form this file answers cannot be shadowed by an importer's
-# same-named class or def.
-from mojo.middle.funcs_shared import register_module_member_value
 
 def _ident_call_name(gen, func_node) -> str:
     """`func_node.name` for a call whose callee is an IdentExpr, forced to
@@ -136,43 +131,22 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
         _fname = _as_str(node.member)
     if not _fname:
         return None
+    # A local shadows a module-level name, a global shadows a function of
+    # the same name, and a struct/class name is a type, not a callable —
+    # all three are decided by Python scoping before "is it a function?"
+    # ever matters.
+    if _fname in getattr(gen, 'var_types', ()) or \
+            _fname in getattr(gen, '_global_var_types', ()) or \
+            _fname in getattr(gen, 'struct_field_types', ()):
+        return None
     _gen_api = getattr(gen, '_generator_api', None) or {}
-    # `m.f` where `m` really is a MODULE alias (`_module_alias_names`, the set
-    # the `import` statements populate and an ordinary `from X import name`
-    # binding never does). Its answer is the MODULE's, and that is the only
-    # answer taken: a local, a module-level global, or a class of the importer
-    # named `f` is a different object and never shadows the attribute. The
-    # bare-name tables below (`struct_field_types`, `var_types`,
-    # `func_return_types`, `_func_csym`) are TU-wide, so consulting them here
-    # is how a same-named class made `h.double_it` read as the class typedef.
-    _module_member = (
-        isinstance(node, gimple_ctypes.MemberExpr)
-        and isinstance(node.obj, gimple_ctypes.IdentExpr)
-        and _as_str(node.obj.name) in getattr(gen, '_module_alias_names', ()))
-    if _module_member:
-        _mm = register_module_member_value(
-            gen, _as_str(node.obj.name), _fname)
-        if _mm is None:
-            return None
-        _c_name, _def_name = _mm
-        _is_gen = _def_name in _gen_api
-    else:
-        # A local shadows a module-level name, and a global shadows a function of
-        # the same name — Python scoping decides both, for the BARE-NAME spelling.
-        # A struct/class name is a type, not a callable.
-        if _fname in getattr(gen, 'struct_field_types', ()):
-            return None
-        if (_fname in getattr(gen, 'var_types', ())
-                or _fname in getattr(gen, '_global_var_types', ())):
-            return None
-        _is_gen = _fname in _gen_api
-        if not _is_gen and _fname not in getattr(gen, 'func_return_types', ()):
-            return None
-        _c_name = gen._func_csym(_fname)
-        if _fname in gen._c_names:
-            _c_name = gen._c_names[_fname]
-        _c_name = _as_str(_c_name)
-        _def_name = _fname
+    _is_gen = _fname in _gen_api
+    if not _is_gen and _fname not in getattr(gen, 'func_return_types', ()):
+        return None
+    _c_name = gen._func_csym(_fname)
+    if _fname in gen._c_names:
+        _c_name = gen._c_names[_fname]
+    _c_name = _as_str(_c_name)
     # gen_module's `_funcptr_target` rule, reused rather than restated: a
     # supported compiled generator has NO ordinary C definition under its
     # bare csym (only `<base>_start/_resume/_value/_destroy`), so the
@@ -180,20 +154,17 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     # `<base>_start`.
     _target = _c_name
     if _is_gen:
-        _target = f"{_gen_api[_def_name]['base']}_start"
+        _target = f"{_gen_api[_fname]['base']}_start"
     # A VARIADIC callee gets the same `MojoVarargFn` a variadic LAMBDA gets
     # (see `_lower_LambdaExpr` and runtime/fire_runtime.h's "Variadic
     # callables"), so the runtime dispatcher packs the arguments instead of
     # the call site passing them positionally. A direct call by name is
     # untouched; only the value form changes. The shape is looked up under
-    # the C symbol, and for a bare name also under the source name, because a
-    # mangled `*args` method is registered under the mangled symbol and a plain
-    # top-level function under its own name. A module member is looked up by
-    # its symbol only: its source name belongs to the importer's namespace.
+    # BOTH the C symbol and the source name, because a mangled `*args`
+    # method is registered under the mangled symbol and a plain top-level
+    # function under its own name.
     _vshapes = getattr(gen, '_variadic_func_shape', None) or {}
-    _vshape = _vshapes.get(_target) or _vshapes.get(_c_name)
-    if _vshape is None and not _module_member:
-        _vshape = _vshapes.get(_fname)
+    _vshape = _vshapes.get(_target) or _vshapes.get(_c_name) or _vshapes.get(_fname)
     if _vshape is not None:
         # The address of a function is not a legal GIMPLE operand either as
         # `&f` (no unary `&` in the grammar) or as `(void *)f` ("invalid
@@ -931,7 +902,7 @@ def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
         if _dunder not in _have:
             continue
         _csym = gen._struct_method_csym(struct_name, _dunder, '')
-        if (not gimple_ctypes.TypeLattice.is_cstr(gen.func_return_types.get(_csym))):
+        if gen.func_return_types.get(_csym) != 'char *':
             continue
         # Same null semantics the generated field-dump has: a NULL object
         # reprs as "None" rather than crashing. Interned through

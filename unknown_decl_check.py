@@ -26,11 +26,7 @@ are bound NOWHERE a valid program could bind them:
     its names are unknown here.
 
 Only loads are checked. A name in a binding position (assignment, `for`,
-`with ... as`, the target of `del`, a match capture) is a declaration. The
-whole `alias NAME = value` declaration is one: its target (including bracket
-parameters) binds, and its value is not a read — the value is a compile-time
-expression this pass does not model, and an alias it cannot resolve must leave
-its consumers undecided rather than become a false positive.
+`with ... as`, the target of `del`, a match capture) is a declaration.
 """
 
 import builtins as _py_builtins
@@ -181,21 +177,6 @@ class _Scan:
         # target list (`a, b`): every identifier it spells is bound.
         self.bound.update(_IDENT_RE.findall(s))
 
-    def _bind_alias_target(self, node):
-        """The names an `alias` declaration's target declares.
-
-        `alias NAME = ...` is a plain IdentExpr; `alias NAME[T, U] = ...` is a
-        SubscriptExpr whose index holds the bracket parameters. A subscript
-        target is normally a mutation of a value read (`xs[0] = 1` reads
-        `xs`), which is why the generic binding walk does not bind it — but in
-        an alias declaration both the subscripted name and its parameters are
-        declarations."""
-        if isinstance(node, N.SubscriptExpr):
-            self._value(node.obj, True, False)
-            self._value(node.index, True, False)
-            return
-        self._value(node, True, False)
-
     def _value(self, v, binding: bool, strs: bool):
         if isinstance(v, str):
             if strs:
@@ -231,30 +212,13 @@ class _Scan:
         if isinstance(node, N.FromImportStmt) and node.wildcard:
             self.wildcard = True
         strs = not isinstance(node, _NON_NAME_NODES)
-        # An `alias NAME = value` declaration's value is a compile-time
-        # expression, not a read: its names may be bracket parameters, type
-        # spellings, or a name the folder cannot resolve yet, and this pass is
-        # deliberately conservative about what no valid program could bind.
-        # Reporting it made an alias whose value is not foldable a hard error,
-        # which in turn made a `where` clause consuming it undecided-but-
-        # refused instead of undecided-and-accepted. The target of the
-        # same statement is still a binding via _BINDING_FIELDS.
-        alias_value = isinstance(node, N.AssignStmt) and getattr(
-            node, 'is_alias', False)
         for f in dataclasses.fields(node):
             child = getattr(node, f.name)
             if f.name in _NON_BINDING_STR_FIELDS:
                 # An attribute name is neither a read nor a declaration.
                 if isinstance(child, str):
                     continue
-            if alias_value and f.name == 'target':
-                # `alias Foo = ...` declares Foo, and `alias Foo[T] = ...`
-                # declares the bracket parameters the parser leaves in the
-                # subscript's index. Neither is a read.
-                self._bind_alias_target(child)
-                continue
-            unchecked = (f.name in _UNCHECKED_READ_FIELDS
-                         or (alias_value and f.name == 'value'))
+            unchecked = f.name in _UNCHECKED_READ_FIELDS
             self._unchecked += unchecked
             try:
                 self._value(child, f.name in _BINDING_FIELDS, strs)

@@ -116,7 +116,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
                 return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
             if gimple_ctypes.TypeLattice.is_cstr(_pc):
                 return 'char *', gen._rt_call('char *', 'mojo_list_get_str', [f"{lp}", idx64])
-            if (gimple_ctypes.TypeLattice.is_number_scalar(_pc) or gimple_ctypes.TypeLattice.is_char(_pc) or gimple_ctypes.TypeLattice.is_unsolved(_pc)):
+            if _pc in ('int64_t', 'int', '_Bool', 'double', 'char', '', 'unknown'):
                 return 'int64_t', gen._rt_call('int64_t', 'mojo_list_get_int', [f"{lp}", idx64])
             # Any other slot type is a boxed pointer: read the raw slot and
             # put it back through the coercion chokepoint rather than an
@@ -290,7 +290,7 @@ def _emit_starred_slot_list(gen, list_ptr: str, name: str, start: str,
     if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
         _rd = gen._rt_call('char *', 'mojo_list_get_str', [_lp, _i])
         gen._void_call('mojo_list_append_str', [('MojoList *', _dst), ('char *', _rd)])
-    elif gimple_ctypes.TypeLattice.is_double(gimple_ctypes.TypeLattice.list_suffix(slot_elem)):
+    elif gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'double':
         _rd = gen._rt_call('double', 'mojo_list_get_double', [_lp, _i])
         gen._void_call('mojo_list_append_double', [('MojoList *', _dst), ('double', _rd)])
     else:
@@ -326,7 +326,7 @@ def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
     if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
         gen._void_call('mojo_list_append_str',
                        [('MojoList *', _dst), ('char *', _as_str(value))])
-    elif gimple_ctypes.TypeLattice.is_double(gimple_ctypes.TypeLattice.list_suffix(slot_elem)):
+    elif gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'double':
         gen._void_call('mojo_list_append_double',
                        [('MojoList *', _dst), ('double', _as_str(value))])
     else:

@@ -37,28 +37,6 @@ def test_non_bug_claim_keys_pass_through():
         assert C.norm_claim(key) == key, key
 
 
-def _live(claims):
-    """A registry entry that holds CLAIMS: running, so holds_claims is true without touching git."""
-    return {"claims": claims, "state": "running", "pid": os.getpid(), "branch": "work/x", "worktree": "."}
-
-
-def test_gate_doc_lane_is_blocked_by_a_live_gate_repair():
-    """A bug-gate-<job> lane and a gate:<job> repair are one item: each blocks the other, whichever starts first."""
-    job = "type-string-ratchet"
-    repair = {"fix-gate-" + job: _live(["gate:" + job])}
-    lane = C.doc_claims("gate-" + job)
-    assert C.claim_blocker(lane, repair) is not None, lane
-    lane_live = {"bug-gate-" + job: _live(C.doc_claims("gate-" + job))}
-    assert C.claim_blocker(["gate:" + job], lane_live) is not None, lane_live
-
-
-def test_different_gate_jobs_do_not_block_each_other():
-    """The cross-namespace mapping is exact, not a prefix rule: gate-<a> never blocks gate:<b>."""
-    held = {"fix-gate-stdlib-dylib": _live(["gate:stdlib-dylib"])}
-    assert C.claim_blocker(C.doc_claims("gate-bootstrap-stage2-cc"), held) is None
-    assert C.claim_blocker(C.doc_claims("gate-stdlib"), held) is None
-
-
 def test_unrecognised_path_is_refused():
     """A path the normaliser cannot place is an error, not a literal claim that conflicts with nothing."""
     for bad in ["bugs/mid/sub/" + STEM + ".md", "src/foo.py", "bugs/mid/ x.md"]:

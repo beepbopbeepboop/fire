@@ -3853,125 +3853,6 @@ else:
     print("remainder falsy")
 """)
 
-    # The root cause BEHIND the three cases above: `eval_const_bool_state`
-    # answered CONST_FALSE both for "the fold produced a falsy value" and for
-    # "the shape is foldable but the fold declined". `[1] + [2]` is foldable by
-    # SHAPE (a BinaryOp of two foldable list literals) and the folder has no
-    # list `+` arm, so its None was read as false and a module-level `if`
-    # deleted its then-arm. Teaching the folder one more operator would leave
-    # the class open; the condition now answers CONST_UNKNOWN and the backend
-    # emits BOTH arms as a runtime branch, so CPython's answer is what runs.
-    # The empty rows are the control (their empty result is falsy either way),
-    # and the `x`/`x - 3` rows pin that a genuine non-constant condition still
-    # resolves to a runtime branch instead of being pruned.
-    test_gimple_matches_cpython(
-        "gimple_module_constant_operator_fold_declined_condition", """\
-def main():
-    pass
-
-if [1] + [2]:
-    print("list-plus THEN")
-else:
-    print("list-plus ELSE")
-
-if [1] + []:
-    print("list-plus-empty THEN")
-else:
-    print("list-plus-empty ELSE")
-
-if (1,) + (2,):
-    print("tuple-plus THEN")
-else:
-    print("tuple-plus ELSE")
-
-if (1,) * 2:
-    print("tuple-mul THEN")
-else:
-    print("tuple-mul ELSE")
-
-if "ab" * 2:
-    print("str-mul THEN")
-else:
-    print("str-mul ELSE")
-
-if {1: 2} | {3: 4}:
-    print("dict-or THEN")
-else:
-    print("dict-or ELSE")
-
-if {1: 2} | {}:
-    print("dict-or-empty THEN")
-else:
-    print("dict-or-empty ELSE")
-
-if [] + []:
-    print("empty-list-plus THEN")
-else:
-    print("empty-list-plus ELSE")
-
-if () * 2:
-    print("empty-tuple-mul THEN")
-else:
-    print("empty-tuple-mul ELSE")
-
-if "ab" * 0:
-    print("empty-str-mul THEN")
-else:
-    print("empty-str-mul ELSE")
-
-x = 0
-if x:
-    print("runtime THEN")
-else:
-    print("runtime ELSE")
-
-if x - 3:
-    print("runtime-diff THEN")
-else:
-    print("runtime-diff ELSE")
-
-main()
-""")
-
-    # The decision the CONST_UNKNOWN change forces: a fold that RAISES at
-    # compile time (`1 // 0`) is no longer reported FALSE. The build still
-    # refuses to fold it (`fold_arith` answers None for a zero divisor), the
-    # condition is now a runtime branch, and CPython's ZeroDivisionError is the
-    # observable answer — so the program prints its first statement and then
-    # exits non-zero naming the error, instead of silently printing the else
-    # arm. Pinned by the runtime-error harness because `matches_cpython`
-    # refuses a program whose oracle exits non-zero.
-    test_gimple_runtime_error(
-        "gimple_module_constant_division_by_zero_condition",
-        """\
-print("before")
-if 1 // 0:
-    print("div THEN")
-else:
-    print("div ELSE")
-""", "ZeroDivisionError")
-
-    # The `comptime if` spelling of the same decision, and the reason it has to
-    # be a runtime branch rather than a silent else: `comptime` is not Python,
-    # so there is no oracle for "which arm", but there is one for "the
-    # condition raises" — and the old CONST_FALSE answer hid that entirely.
-    test_gimple_runtime_error(
-        "gimple_comptime_if_division_by_zero_condition",
-        """\
-def f():
-    comptime if 1 // 0:
-        print("ct div THEN")
-    else:
-        print("ct div ELSE")
-    return 0
-
-def main():
-    print("before")
-    f()
-
-main()
-""", "ZeroDivisionError")
-
     # measured wrong independently of the rows above: a lambda that is
     # RETURNED as a value is lifted into its own C function taking a heap env
     # struct, so the captured `double` crosses a struct field, a `malloc`'d env
@@ -5808,64 +5689,6 @@ print(all([1, 1]))
 print(isinstance(1, int))
 print(1 in [1, 2])
 """, "True\nTrue\nTrue\nTrue\n")
-
-    # A bool or None reaching an UNANNOTATED parameter keeps its kind across
-    # the call. The parameter is the `int64_t` word, so the value has to be
-    # tagged at the call site (a bool/None LITERAL passed for it, found by the
-    # module-wide scan `callsite_tagged_literal_params`) and at the default
-    # (`recursive=False` pads the bare 0). Before the fix `str()` of the
-    # parameter printed `1` / `0` / `1` / `0`, the integer each value is.
-    # The control `print(f(1))` line is the omitted-default case; the others
-    # are a passed bool and a passed None.
-    test_gimple_stdout("gimple_unannotated_param_keeps_bool_and_none", """\
-def f(p, *, recursive=False):
-    return str(recursive)
-
-def g(v):
-    return str(v)
-
-def k(v):
-    print(v)
-    return str(v)
-
-def main():
-    print(f(1, recursive=True))
-    print(f(1))
-    print(g(True))
-    print(g(None))
-    print(k(True))
-    print(k(None))
-main()
-""", "True\nFalse\nTrue\nNone\nTrue\nTrue\nNone\nNone\n")
-
-    # The same tag must not break what the body does with the value: a
-    # boxed parameter still does arithmetic, truthiness and a `None` default
-    # beside a bool. Each expected line is CPython's.
-    test_gimple_stdout("gimple_tagged_param_arithmetic_and_truth", """\
-def add(a, b=1):
-    return a + b
-
-def pick(flag, n=0):
-    if flag:
-        return n + 10
-    return n
-
-def tog(x=False):
-    return not x
-
-def pad(v, w=None):
-    return str(v) + str(w)
-
-print(add(True))
-print(add(5))
-print(pick(True))
-print(pick(0, 3))
-print(tog())
-print(tog(True))
-print(pad(True))
-print(pad(None, 2))
-print(pad(1))
-""", "2\n6\n10\n3\nTrue\nFalse\nTrueNone\nNone2\n1None\n")
 
     # ── round() ────────────────────────────────────────────────────────
     # The one-argument form had no lowering at all and returned a float, so
@@ -10900,14 +10723,15 @@ fn main():
     # ever holds a float and in Python a float operand makes the whole
     # operation a float one.
     #
-    # The sixth and ninth lines are a boxed read whose runtime slot is an
-    # INT: `+ 1` on it must answer by the box's KIND (an int word, printed
-    # `2` as CPython prints it), not promote to a double (`2.0`). That
-    # promotion used to be recorded here as an accepted cost of "always a
-    # double"; the read-side box now carries its kind and
-    # `_tagged_arith_select` answers by it (`_kind_arith_operand`), so the
-    # expectation is CPython's own output. Line seven is the control: a read
-    # with a COMPILE-TIME index takes no box at all, so `t[0] + 1` is exact.
+    # The sixth and ninth lines are the ONE recorded cost of "always a
+    # double", asserted here rather than left to rot: a boxed read whose
+    # runtime slot turns out to be an INT gets promoted, so its arithmetic
+    # result is float-typed and prints `2.0` where CPython prints `2` — the
+    # same number, a different format. Choosing per slot would need a
+    # runtime branch around the whole operand dispatch, and a wrong value
+    # traded for a wrong format is the right way round. Line seven is the
+    # control: a read with a COMPILE-TIME index takes no box at all, so
+    # `t[0] + 1` is exact.
     test_gimple_stdout("gimple_heterogeneous_element_arithmetic_unboxes", """\
 fn main():
     var t = struct.unpack('<if', struct.pack('<if', 1, 1.5))
@@ -10923,7 +10747,7 @@ fn main():
     var a = [1, 2.5]
     for x in a:
         print(x + 1)
-""", "1.5\n2.5\n3.0\n1.5\n1.5\n2\n2\n2\n3.5\n")
+""", "1.5\n2.5\n3.0\n1.5\n1.5\n2.0\n2\n2.0\n3.5\n")
 
     # The SAME case one level down, in the spelling that is not `var`:
     # `b = [1, 2.5]` / `t = struct.unpack(...)` is an `AssignStmt`, and the
@@ -10934,7 +10758,9 @@ fn main():
     # Exit 0, no diagnostic, and the identical `var` spelling one line away
     # was right. `c` is the control: a homogeneous list is untouched, and
     # `t`'s two reads are the static-index and computed-index cases of the
-    # same value.
+    # same value. (The trailing `2.0` is the documented promotion above, not
+    # a defect: a boxed read whose slot turns out to be an int is computed
+    # in double.)
     test_gimple_stdout("gimple_heterogeneous_reads_survive_a_plain_assignment", """\
 fn main():
     b = [1, 2.5]
@@ -16104,7 +15930,6 @@ def main():
                   test_none_argument_is_none_in_the_callee,
                   test_none_prints_as_none,
                   test_none_vs_zero_distinguished,
-                  test_optional_int_param_none_check_keeps_its_none_arm,
                   test_dict_get_unknown_domain_into_a_list_local,
                   test_textwrap_dedent_matches_cpython,
                   test_mixed_return_none_string_and_set_arms,
@@ -16113,7 +15938,6 @@ def main():
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
                   test_none_beside_a_scalar_arm_returns_the_tagged_word,
                   test_copy_of_a_tagged_none_keeps_it,
-                  test_copy_of_a_dynamic_word_keeps_it,
                   test_fstring_format_specs_match_cpython,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
@@ -16783,41 +16607,6 @@ def main():
     print(0 in [None, 1])
 main()
 """)
-
-
-def test_optional_int_param_none_check_keeps_its_none_arm():
-    """`x is None` / `is not None` on a parameter DECLARED `Optional[Int]` asks
-    about the value, not about the resolved C type.
-
-    `_resolve_type` erases `Optional[Int]` to `int64_t`, and the provably-int
-    fold added for `n = 0; n is None` read that ctype as proof the parameter
-    could never be None: `look()` compiled to `return 7` (the wrong arm), and
-    in a large enough function the same fold emitted a bare integer_cst into a
-    `_Bool` temp that `-fgimple` rejects, which is how five stdlib modules
-    (collections/list, collections/deque, collections/interval, os/os,
-    os/process) fell back to source and turned the `stdlib-dylib` job red
-    (2026-11-21). The `Int`-annotated parameter below keeps the
-    fold: its `x is None` is the constant False on both sides of the fix, so
-    this case also pins that the fold was narrowed, not removed.
-    """
-    test_gimple_stdout("gimple_optional_int_param_none_check_keeps_its_none_arm", """\
-def look(stop: Optional[Int] = None) -> Int:
-    if stop is None:
-        return -1
-    return 7
-
-def present(stop: Optional[Int] = None) -> Bool:
-    return stop is not None
-
-def int_param(x: Int) -> Bool:
-    return x is None
-
-def main():
-    print(look())
-    print(look(5))
-    print(present(), present(5))
-    print(int_param(0), int_param(3))
-""", "-1\n7\nFalse True\nFalse False\n")
 
 
 def test_dict_get_unknown_domain_into_a_list_local():
@@ -17598,30 +17387,6 @@ def main():
         print(b)
     for c in make(["x", "y"]):
         print(c)
-main()
-""")
-
-
-def test_copy_of_a_dynamic_word_keeps_it():
-    """A word of unknown kind (`_dyn_word_vals`: a slot read from a container
-    whose element kinds only the runtime knows) lost that fact at a copy, so
-    the copy was added as a plain integer. `xs = [1.5, 2, None]` boxes the
-    double; `v = xs[0]; w = v; print(w + 1)` added the BOX POINTER to 1 and
-    printed 4350185905 where CPython prints 2.5. `gen._copy` now carries the
-    word facts (`WordFacts.carry`), so the copy stays dynamic and `+` asks the
-    runtime for the kind (`mojo_add_words`)."""
-    test_gimple_matches_cpython("gimple_copy_of_a_dynamic_word", """\
-def main():
-    xs = [1.5, 2, None]
-    v = xs[0]
-    w = v
-    print(w + 1)
-    u = w
-    print(u + 1)
-    n = xs[1]
-    m = n
-    print(m + 1)
-
 main()
 """)
 

@@ -249,7 +249,7 @@ def _and_or_operand_type(gen, node) -> str:
             return '_Bool'
         if (isinstance(fn, gimple_ctypes.MemberExpr)
                 and _as_str(fn.member) in _STR_PREDICATE_METHODS
-                and gimple_ctypes.TypeLattice.is_cstr(_as_str(gen._quick_type(fn.obj)))):
+                and _as_str(gen._quick_type(fn.obj)) == 'char *'):
             return '_Bool'
     return qt
 
@@ -323,20 +323,6 @@ def _quick_type(gen, node) -> str:
         _imp_acc = getattr(gen, '_imported_global_accessors', {}).get(node.name)
         if _imp_acc is not None:
             return _as_str(_imp_acc[0])
-        # The same from-import home the body read routes through
-        # (`bare_global_read_plan`'s `_imp_fields`): when the defining module
-        # is compiled into this unit but no export entry exists for the name
-        # (a definer outside the compiler's own directory, where the
-        # module_loader export scan does not run), its registered field C
-        # type is the answer, not the int64_t default. Without this a def
-        # returning a bare imported `str` global was typed `int64_t`, while
-        # its body read `_k_src_globals.NAME` as `char *`.
-        _imp_home = _as_str(getattr(gen, '_own_imported_global_home', {}).get(node.name) or '')
-        _imp_field = _as_str(getattr(gen, '_own_imported_global_field', {}).get(node.name) or '')
-        if _imp_home and _imp_field:
-            _imp_fields = gen._module_global_field_type(_imp_home, _imp_field)
-            if _imp_fields is not None:
-                return _as_str(_imp_fields[0])
         return 'int64_t'
     if (isinstance(node, gimple_ctypes.SubscriptExpr)
             and (isinstance(node.obj, gimple_ctypes.IdentExpr)
@@ -675,7 +661,7 @@ def _quick_type(gen, node) -> str:
                 and fname not in gen.imported_symbols
                 and not gen._locally_binds_name(fname)
                 and len(node.args) == 1 and not getattr(node, 'kwargs', None)
-                and gimple_ctypes.TypeLattice.is_cstr(gen._quick_type(node.args[0]))):
+                and gen._quick_type(node.args[0]) == 'char *'):
             return 'char *'
         # A call through a local bound to a LAMBDA, which is never
         # materialized when it is created and called in the same statement
@@ -818,7 +804,7 @@ def _quick_type(gen, node) -> str:
         # chained shapes like `Path(f).resolve().parent` type the whole
         # chain correctly.
         if (node.func.member == 'resolve' and not node.args
-                and gimple_ctypes.TypeLattice.is_cstr(gen._quick_type(node.func.obj))):
+                and gen._quick_type(node.func.obj) == 'char *'):
             return 'char *'
         # Module method calls: re.sub → char *, str.join → char *, etc.
         if isinstance(node.func.obj, gimple_ctypes.IdentExpr):
@@ -1001,13 +987,13 @@ def _quick_type(gen, node) -> str:
         # (fire_compiler.py's own tokenizer dump helper) declared its
         # result int64_t, corrupting the pointer on every read.
         if (node.func.member == 'encode'
-                and gimple_ctypes.TypeLattice.is_cstr(gen._quick_type(node.func.obj))):
+                and gen._quick_type(node.func.obj) == 'char *'):
             return 'MojoBytes *'
         if (node.func.member in ('expandtabs', 'lstrip', 'rstrip', 'strip', 'lower',
                     'upper', 'title', 'capitalize', 'swapcase',
                     'replace', 'format', 'zfill', 'center', 'ljust', 'rjust',
                     'decode', 'join')
-                and gimple_ctypes.TypeLattice.is_cstr(gen._quick_type(node.func.obj))):
+                and gen._quick_type(node.func.obj) == 'char *'):
             return 'char *'
     # Frame/code attributes that are strings (a module using `sys._getframe`; see
     # emit_exprs._lower_MemberExpr): without this a function returning `f.f_code.co_name`
@@ -1272,7 +1258,7 @@ def _quick_type(gen, node) -> str:
             # in emit_calls.py's subscript lowering); the estimator has to
             # agree or the enclosing function's prototype contradicts its
             # own body.
-            if gimple_ctypes.TypeLattice.is_cstr(_as_str(getattr(gen, 'var_types', {}).get(_as_str(obj.name)))):
+            if _as_str(getattr(gen, 'var_types', {}).get(_as_str(obj.name))) == 'char *':
                 return 'char *'
             # A TUPLE's own per-slot record answers the indexed slot's type.
             # The call site that binds a tuple element to a lambda parameter
@@ -1337,7 +1323,7 @@ def _infer_list_elem_type(gen, elements: list) -> str:
         _op = getattr(_e, 'operand', None)
         if not isinstance(_op, gimple_ctypes.IdentExpr):
             continue
-        if gimple_ctypes.TypeLattice.is_cstr(gen._quick_type(_op)):
+        if gen._quick_type(_op) == 'char *':
             _spread_types.append('char *')
             continue
         _oe = gen._elem_types.get(_as_str(_op.name))
@@ -1363,7 +1349,7 @@ def _infer_list_elem_type(gen, elements: list) -> str:
     types = []
     for _e in stored:
         types.append(gen._quick_type(_e))
-    if _spread_types and gimple_ctypes.TypeLattice.is_cstr(gimple_ctypes.TypeLattice.join_all(_spread_types)):
+    if _spread_types and gimple_ctypes.TypeLattice.join_all(_spread_types) == 'char *':
         # A string spread beside non-string slots of its own: the join is
         # `char *`, and `_lower_list_literal` answers that by appending EACH
         # element by its own type (`per_element`), so the ints stay ints.

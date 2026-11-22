@@ -330,11 +330,7 @@ def _assign_target(gen, tgt, et, ev):
         # parsed was a generator; `for pn, pt in params: self._param_ctype(pn,
         # pt, s)` handed an unannotated parameter's None annotation to
         # `strdup` as a "type".
-        #
-        # `_word_bind_box`, not `_word_may_be_box`: the unbox is this NAME's
-        # representation decision, and a box that arrived through a plain copy
-        # does not make it (see `mojo/middle/valueinfo.py`'s bind/read split).
-        if gimple_ctypes.TypeLattice.is_word(et) and gen._word_bind_box(ev):
+        if gimple_ctypes.TypeLattice.is_word(et) and gen._word_may_be_box(ev):
             _un = gen._new_temp('int64_t')
             gen._rt_into(_un, 'mojo_unbox_plain', [f"{ev}"])
             if gen._word_is_dyn(ev):
@@ -351,7 +347,8 @@ def _assign_target(gen, tgt, et, ev):
             if gen._word_is_tagged(ev):
                 gen._word_mark_tagged(_un)
                 if (isinstance(tgt, IdentExpr)
-                        and gimple_ctypes.TypeLattice.is_word(gen.var_types.get(_as_str(tgt.name), 'int64_t'))):
+                        and gen.var_types.get(_as_str(tgt.name), 'int64_t')
+                        == 'int64_t'):
                     _tn = _as_str(tgt.name)
                     gen._word_mark_tagged(_tn)
                     gen._word_mark_boxed(_tn)

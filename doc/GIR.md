@@ -1,6 +1,6 @@
 # GIR: a typed IR for the gimple backend
 
-Status: stages 0, 1, 2a, 2b, 3a, 3b, 3c and 5a landed (2026-11-21). This file is the plan and the rules. Read it
+Status: stages 0, 1, 2a, 3a, 3b and 5a landed (2026-11-14). This file is the plan and the rules. Read it
 before changing anything under `mojo/backend_gimple/` or `mojo/ir/`.
 How the remaining stages are being built with Sonnet/Haiku workers: `doc/GIR_WORKERS.md`.
 
@@ -64,7 +64,7 @@ Four layers, in `mojo/ir/`:
 | `instr.py` | `Ex` (operand), `Instr` (statement), `Function`, `Module`, `Sig`. Ten statement shapes cover 98% of today's emission | landed |
 | `verify.py` | type-checks a `Module`, returns `Finding`s with stable codes | landed |
 | `reader.py` | TRANSITIONAL. Parses emitted `.ci` text and `runtime/*.h` into a `Module`, so the verifier can check today's string backend | landed |
-| `build.py` | the builder the lowering code will call instead of `gen._emit(f"...")` | landed: `gen._emit` sites are 0; `raw` is the adapter for the rest |
+| `build.py` | the builder the lowering code will call instead of `gen._emit(f"...")` | stage 2 |
 
 Beside it, in `mojo/middle/`: `rt_sigs.py` (generated runtime signatures) and
 `rt_call.py` (which scalar arguments need a conversion statement).
@@ -127,14 +127,6 @@ that is meant to be behaviour-preserving:
 
     # before and after the change, in two empty directories:
     for f in <corpus>; do python3 fire.py --dump $f; done ; diff -r before after
-
-`tools/c_oracle.py check` is the same oracle for both backends, and it has TWO
-corpora because one cannot see both printers: `tools/pydiff_corpus` (285
-programs, compiled with the default coroutine backend, so no companion `.cpp` at
-all) and `tools/cpp_corpus` (13 coroutine programs, compiled with `MOJO_CORO=cpp`,
-where an empty companion is an ERROR). A `cpp_core.py`/`cpp_async.py` change
-that leaves the first corpus identical and the second one changed is detected, so
-stage 7 has an oracle before it has a builder.
 
 - **Stage 0 (landed).** `mojo/ir` types, instructions, verifier, reader;
   `tools/gimple_lint.py`; `test_gimple_lint.py` registered as `gimple-lint`.
@@ -199,50 +191,13 @@ stage 7 has an oracle before it has a builder.
   to the result type for arithmetic, to the wider operand for a comparison.
   `TEXT_BINOP_BASELINE` is 0: the last 16 text-spelled sites were rewritten on
   2026-11-14 and the baseline followed them down.
-- **Stage 2b (landed 2026-11-21). The builder.**
-  `mojo/ir/build.py`: `raw`, `copy`, `cast_into`, `assign`, `binop_into`,
-  `call_into`, `call_void`, `label`, `comment`, `cond_br`, `if_block`,
-  `else_if_block`, `else_block`, `end_block`, `if_call`. Each builds a typed
-  `Instr` and appends it to `gen.body_lines` through one chokepoint,
-  `build.append`, which applies the `#line` stamping rule the text emitter
-  used to apply AND clears `gen._last_was_terminal` (the text emitter did
-  that for every ordinary statement; a family that moved without it turned
-  the statement after a jump into a block terminator and dropped an emitted
-  `goto` — measured on `flow/15_try_finally_order.py`). `raw` is the adapter
-  for a statement no family has claimed yet and `_emit_raw` is its only
-  backend caller. Landed in two rounds: copies (`_copy`), casts
-  (`_cast_into`), arithmetic (`_binop_into`), runtime calls
-  (`_rt_call`/`_rt_into`/`_rt_void`), program calls (`_emit_call`'s three
-  result/void sites) and labels (`_emit_label`); then every remaining
-  `gen._emit` site — assignments of every destination spelling, comments,
-  the one- and two-armed conditional branch, if/else-if/else/end blocks and
-  the `if (c) f (...);` one-statement body — across `emit_calls`,
-  `emit_exprs`, `emit_methods`, `emit_stmts`, `emit_loops`, `emit_infra`,
-  `emit_funcs`, `emit_resolve` and `cpp_async`. `_rt_args` and
-  `_binop_text` gained a list-returning sibling (`_binop_operands`) so the
-  coercion stays where it is while the statement becomes a shape.
-  Byte-identical `.ci` on all 285 `tools/pydiff_corpus` programs against
-  master (`tools/c_oracle.py`). Ratchet: `test_type_string_ratchet.py`
-  counts `gen._emit(` / `self._emit(` (300 on 2026-11-20; 266 on
-  2026-11-21 before the first round; 245 under the corrected pattern, which
-  no longer counts `emit_metal.py`'s 21 `self._emit` calls — that file emits
-  Metal Shading Language and writes no gimple statement, so they could never
-  move and made the floor 21 instead of 0; 235 after the first round;
-  **0** now) and `build.raw(` (1: `_emit_raw`), so the adapter cannot become
-  the way around the first count. `test_gimple_lint.py`'s
-  `TEXT_ANY_CALL_BASELINE` fell 4 -> 1 (the one left is the Metal `for`, not
-  a gimple statement) and `TEXT_CF_BASELINE` 1 -> 0 (`_cond_goto` is
-  `build.cond_br` now).
-  Not 2b's: the cast expressions (`_new_val(T, f"(T2){x}")`, 418 on
-  2026-11-20, 41 on 2026-11-21) become `gen._cast(T, x)`; `load_field` /
-  `store_field` as named shapes (an assignment already models the statement,
-  and its operands are spellings until stage 4); `br` / `ret` as `Instr`s,
-  which needs `_emit_cf` to take an `Instr` instead of its statement text —
-  do that one alone; and the coercion (which operand needs a conversion)
-  moving in from `rt_call`/`_rt_args`/`_binop_operands`, which is the stage-4
-  boundary. The control-flow four stay text because `_emit_cf` is told the
-  statement KIND and rewrites exits for a `try`/`with` teardown; stage 3a's
-  paragraph below says why.
+- **Stage 2b. The builder.** `mojo/ir/build.py`: `call`, `cast(value, type)`,
+  `copy`, `binop`, `cmp`, `load_field`, `store_field`, `br`, `cond_br`, `ret`,
+  `label`. Each returns a typed value and appends an `Instr`.
+  `_rt_call`/`_emit_call`/`_new_val`/`_safe_coerce_emit` become thin callers.
+  Ratchet (landed 2026-11-20, `test_type_string_ratchet.py`): the count of
+  `gen._emit(` / `self._emit(` calls in the backend, 300 today, may only shrink. The cast sites (`_new_val(T, f"(T2){x}")`, 418 of them on 2026-11-20, 41 on 2026-11-21) are the next
+  mechanical batch: `gen._cast(T, x)`.
 - **Stage 3a (landed 2026-11-13). Exits are told, not recognised.**
   `_emit_cf` (`emit_infra.py`) replaces `_emit_through`. `gen._goto`,
   `gen._ret`, `gen._ret_void` hand it the KIND of statement and its label or
@@ -259,39 +214,14 @@ stage 7 has an oracle before it has a builder.
   CONSEQUENCE: a call with a result that is spelled as text
   (`gen._new_val(t, f"{fn} ({x})")`) is never marked fresh, so its result
   leaks. Use `gen._rt_call(t, fn, [x])` -- a computed callee name is fine.
-- **Stage 3c (landed 2026-11-21). Statements are `Instr`, not strings.**
-  `gen.body_lines` holds `Instr`; `Instr.line()` is the ONE rule that renders
-  a body entry (two spaces of indent for a modelled statement, verbatim for
-  'opaque', and a blank line then column 0 for a label), and the four
-  function-assembly sites spread `ginf.body_text(gen)`. A statement no
-  family has modelled yet is an 'opaque' `Instr`, so this landing changed no
-  output; what changed is that a statement's shape now travels with it
-  instead of being recovered from its text. `mojo/ir` is in the compiler's
-  own import closure now, which is what its rule 2 was written for.
+- **Stage 3c. Statements are `Instr`, not strings.** `gen.body_lines` becomes
+  a list of `Instr`; the four function-assembly sites print it.
 - **Stage 4. Types are `Type`, not strings.** `var_types` holds `Type`.
   The ten scalar sets and the 2,400 string tests are replaced by `Type`
   methods. Ratchet (landed 2026-11-20, `test_type_string_ratchet.py`): the
   counts of `.endswith(' *')` (344; 67 after the codemod), `== 'int64_t'` (404), `in (.., 'int64_t')`
   (312), `== 'char *'` (398; 159 after the 2026-11-20 codemod that turned 240 of them into `TypeLattice.is_cstr(x)`, byte-identical C on 284 programs), `== '_Bool'` (68; 23 after the codemod), `== 'double'` (187) and
   `== 'MojoList *'` (203) may only shrink.
-  *Measured 2026-11-21 after the stage-4 tail* (two rounds: the first added the representation-class
-  predicates — `is_dict`, `is_set`, `is_bytes`, `is_uword`, `is_char`, `is_voidp`, `is_boxable`,
-  `is_word_value`, `is_c_scalar`, `is_number_scalar` — and taught the codemod to emit a
-  disjunction of classes for a tuple that is a union of them; the second added the single-type
-  spellings the tail still needed — `is_str`, `is_span`, `is_u8`, `is_c_long`, `is_void`,
-  `is_cpp_bool`/`is_cpp_int_scalar` for the C++ emitter's `bool` — and the unsolved marker
-  `is_unsolved` (`''`/`'unknown'`) with its two word compositions, and took the tuple pattern to
-  **0**): `in (..)` 0, `== 'int64_t'` 54, `== 'char *'` 62, `endswith(' *')` 16, `== 'MojoList *'`
-  29, `== '_Bool'` 2, `== 'double'` 8, C byte-identical on all 285 `tools/pydiff_corpus` programs.
-  `python3 test_type_string_ratchet.py --per-file` is the per-file census;
-  `test_type_lattice_predicates.py` pins each predicate's exact membership and each codemod table
-  entry. The remaining `==` tests are the ones whose left side is an expression the codemod
-  deliberately does not accept; the tuple pattern can only shrink from here.
-  *Measured 2026-11-22 after the W1 tail* (eight packets, one commit each, the packet docs deleted with
-  them): `== 'int64_t'` 12, `== 'char *'` 5, `== 'MojoList *'` 9, `endswith(' *')` 12, `== '_Bool'` 0,
-  `== 'double'` 0. The live remainder is comments that quote a test, `endswith(' *')` on a receiver that
-  may be `None` (left alone: `ends_in_star(None)` is False where `.endswith` raises), and `rt_call.py`, which
-  has no `gimple_ctypes` import and so stays as it was. The ratchet baseline is lowered to these counts.
 - **Stage 5a (landed 2026-11-14). A value's facts travel with a copy.**
   `carry_value_info(gen, dst, src)` (`emit_infra.py`) copies what the backend
   knows about a VALUE from one name to another, and `gen._copy` calls it for
@@ -302,102 +232,42 @@ stage 7 has an oracle before it has a builder.
   This CHANGES generated code: 33 compiler modules compile differently
   (about 770 fewer statements; a boxed fallback read becomes a typed read
   where the element type is now known). Small programs are unchanged.
-  The six dynamic-word facts (`_boxed_vals`, `_dyn_word_vals`,
+  NOT carried yet: the six dynamic-word SETS (`_boxed_vals`, `_dyn_word_vals`,
   `_tagged_word_vals`, `_int_word_vals`, `_maybe_kinds_vals`,
-  `_boxed_container_vals`) joined it in stage 5b step 4 (below), which
-  carries `dyn` / `int_word` / `slot_kinds` / `boxed_container` across a copy
-  and, since step 5 (LANDED), the `Box` kind and its `Tagged` flag as well;
-  the bind-side half ("a name holds a box") is the separate `BindBox` flag,
-  which a copy does not carry.
-- **Stage 5b. One value-info record. LANDED 2026-11-21 (steps 1-5).**
-  The name-keyed tables are fields of one `ValueInfo` record per temp:
-  `kind` is `Int / Erased(T) / DynWord / Box / Plain` and the flags
-  `Tagged`, `SlotKinds`, `BoxedContainer` and `BindBox` carry the facts that
-  are not a kind. `int64_t` therefore splits into
+  `_boxed_container_vals`). Carrying them was measured and changes far more
+  (it adds ~1,200 box/repr calls); each needs its own look.
+- **Stage 5b. One value-info record.** The name-keyed tables become fields
+  of one `ValueInfo` object per temp. `int64_t` splits into
   Int / Erased(T) / DynWord / Box in the value's info.
   *Measured 2026-11-20 (the guide for the next round).* The six
   dynamic-word sets, by uses / files / writers (`.add`, `.update`, `[x] =`):
   `_boxed_vals` 93/11/30, `_dyn_word_vals` 75/8/51, `_tagged_word_vals`
   61/7/19, `_int_word_vals` 46/7/9, `_maybe_kinds_vals` 84/11/33,
-  `_boxed_container_vals` 17/6/8: about 376 sites.
-  Plan, in order, each step byte-identical C on `tools/pydiff_corpus` except
-  steps 4-5, which the plan allows to change C (hash
-  `compile_to_gimple_with_cpp` output before and after, review per program):
+  `_boxed_container_vals` 17/6/8: about 376 sites. Each is created in
+  `GimpleGen.__init__` AND again in `emit_infra.py` (lines near 248, 424, 509,
+  698), emptied per function (`.clear()` near 368, 549, 1296-1305), and saved
+  and restored across nested function bodies by `FuncState`
+  (`emit_infra.py` ~958-1310: an `fs_*` field and an `fs_*_items` copy for
+  each). Two of them (`_boxed_vals`, `_tagged_word_vals`) have the save code
+  written TWICE in `FuncState`; the rebinding is deliberate (a rebind in
+  `__init__` leaks under the self-hosted compiler), so do not "simplify" it.
+  Plan, in order, each step byte-identical C on `tools/pydiff_corpus` (hash
+  `compile_to_gimple_with_cpp` output before and after):
   1. (LANDED 2026-11-20, byte-identical on 284 programs) A plain class `WordFacts` (new `mojo/middle/valueinfo.py`) that OWNS the
      six sets and has `save()` / `restore(saved)`; `FuncState` keeps ONE
-     `fs_words` instead of twelve fields.
-   (Steps 2 and 3 LANDED 2026-11-20: 100 readers and 148 writers go through the `gen._word_*` wrappers; `test_type_string_ratchet.py` counts the direct spelling, now 0. `== 'int64_t'` also moved to `TypeLattice.is_word`, 405 -> 101.)
+     `fs_words` instead of twelve fields; the six `gen._x_vals` names stay
+     bound to the same set objects (assigned once at construction, `.clear()`
+     per function), so no reader changes.
+  (Steps 2 and 3 LANDED 2026-11-20: 100 readers and 148 writers go through `gen._words`; `test_type_string_ratchet.py` counts the direct spelling, baseline 10 = the six `bind` lines and docs. `== 'int64_t'` also moved to `TypeLattice.is_word`, 405 -> 101.)
   2. Add read predicates on it (`words.may_be_box(name)`, `words.is_tagged(name)`,
      `words.is_dyn(name)`, `words.is_int_word(name)`) and move the ~200 readers
      (`x in gen._boxed_vals`) onto them by codemod, as the type-string codemods
      did. Ratchet: a text count of `gen._boxed_vals` etc. may only shrink.
   3. Add writers (`words.mark_tagged(name)` ...) and move the ~150 writers.
-  4. (LANDED 2026-11-21) The storage is one `ValueInfo` record per temp,
-     holding the `Int / Erased(T) / DynWord / Box` kind and the three flags the
-     old sets spelled (`Tagged`, `SlotKinds`, `BoxedContainer`; step 5 adds
-     `BindBox`); the six
-     historical sets are derived READ-ONLY views (`WordFacts.boxed`, ...).
-     Two consequences a single kind forces, each measured over the 285 corpus
-     programs (`compile_to_gimple_with_cpp` output, before vs after) and
-     reviewed per program:
-     * `is_dyn` is true for a Box (a box is a word whose kind only the runtime
-       knows). 9 programs change C and NONE changes its CPython verdict (all 9
-       were already WRONG/CRASH): 4 print a boxed word through
-       `mojo_cstr_or_int_str` instead of `mojo_repr_boxed`, 4 ask
-       `mojo_truthy_word` instead of comparing the box against 0 (the correct
-       truthiness for a `False` box), and one stops folding an `isinstance`
-       over a word of runtime-known kind. Only 2 of the 9 change their stdout
-       at all, and in both the old and the new output is an address where
-       CPython prints a value — the programs were wrong before too. A Box may
-       also be a CONTAINER pointer (`mojo_list_get_boxed` hands one back), so
-       a lowering that asks `is_dyn` takes the runtime-word path there instead
-       of the typed-pointer one (e.g. an `or` merge of a boxed container
-       becomes an `int64_t` iterated through the runtime's kind dispatch).
-       That is safe (`mojo_truthy_word` handles registered lists/dicts/sets and
-       `mojo_cstr_or_int_str` renders boxes by kind), just less precise; the
-       bind/read split in the next item is where it gets refined.
-     * `Box` travels AS a Box since step 5 (LANDED 2026-11-21): a copy is the
-       same word, so the `Box` KIND and its `Tagged` flag travel with it, and
-       every reader of "this word's kind is a runtime fact" sees the copy as
-       the box it is. The BIND-side fact is the separate `BindBox` flag
-       (`bind_box` / `bind_tagged`), set by `mark_boxed` / `mark_tagged` and
-       NOT moved by `carry`, and the bind path (`_keep_tagged_box`,
-       `_tagged_bind`, `_for_copy`, the `mojo_box_word` unbox arms in
-       `emit_stmts` / `stmts_shared`) reads it. Without the split, carrying
-       `Box`/`Tagged` made two self-host-closure modules refuse to compile —
-       `mojo/middle/infra_infer.py` (`_pn2 = _chosen.get('param_names') or []`,
-       the `or` merge's dict-get arm is tagged, the merge temp is stored into a
-       `MojoList *` local) and `elaborate.py` (`cands`) — because the bind path
-       read the copy's tag as a decision about the NAME's representation. A
-       pass-through temp is not a name anybody bound, so with the split both
-       compile and the bind path's answers are exactly what they were when a
-       copy was carried as a `DynWord`. The read side had to learn the same
-       lesson one level down: `+ - *` on a maybe-box operand beside an integer
-       now selects by the box's kind (`mojo_mul_word` / `_float_param_arith`)
-       instead of coercing the operand to a `double`, which had made the
-       result — and every local it was stored into — a C double. `carry`'s
-       docstring carries the measurement; `test_gimple.py`'s
-       `test_word_facts_bind_side_does_not_travel` and
-       `test_a_carried_box_operand_keeps_an_int_result`, and
-       `test_dict_slot_read_regression.py`'s Test 7 pin it.
-   5. (LANDED 2026-11-21) Split the bind half of `boxed` out of the read half
-      (the `BindBox` flag, the bullet above), so `carry` can move the `Box`
-      kind and `Tagged`. The bind path answers exactly as it did when a copy
-      was carried as a `DynWord` (every bind-side reader moved, and only for
-      copies); and once a copy IS a box, `+ - *` beside an integer selects the
-      answer by its kind (`_tagged_arith_select`, `mojo_mul_word` /
-      `_float_param_arith`) instead of coercing the operand to a C `double` —
-      the coercion turned an ordinary integer local into a double and made
-      `mojo/backend_gimple/emit_stmts.py` refuse in the whole-closure compile
-      (`'_nbytes': ... cannot also hold a str value (char *)`). Measured:
-      `mojo/middle/infra_infer.py`, `mojo/backend_gimple/emit_stmts.py` and
-      `elaborate.py` compile (`compile_to_gimple(..., do_imports=False)`; the
-      first and third refuse with the bind path on `is_tagged`), and the
-      closure compile of `fire.py`'s tiny `import cas` program reports no
-      module falling back to source inclusion.
-     `test_gimple.py`'s `test_word_facts_one_record_per_temp` pins the record,
-     the read-only views and the carry boundary; `test_gimple_runner.py`'s
-     `test_copy_of_a_dynamic_word_keeps_it` pins the copied dynamic word.
+  4. Only then change the storage to one `ValueInfo` per temp and give it the
+     `Int / Erased(T) / DynWord / Box` kind; that step is allowed to change C
+     (it is the one that carries the sets across copies, +~1,200 box/repr
+     calls measured), and must be landed alone with its own diff review.
 - **Stage 5c. Optional values (measured 2026-11-20; first slice landed).**
   Why the split in 5b matters, measured on `tools/pydiff_corpus`: of 240
   programs only 60 matched CPython, and the largest single cause (about a
@@ -487,13 +357,6 @@ stage 7 has an oracle before it has a builder.
   -> 757 (`_lnc_*`), `_lower_MemberExpr` 1,728 -> 1,533 (`_lme_*`),
   `_lower_binary_tail` 1,421 -> 1,274 (`_lbt_*`), `_lower_struct_method_call`
   482 -> 410 (`_lsmc_*`). `test_gimple_arms_extracted.py` pins that state.
-  Three arms came back afterwards — `_lower_IdentExpr`'s builtin-value-map
-  arm in the 2026-11-21 stage-4 type-predicate codemods (`1b94b71d4`) and
-  `_lower_binary_tail`'s two `x == None` / `x is None` arms (the second
-  added by `70e483ef9`) — and the pin went 6/8. All three were re-extracted
-  on 2026-11-22 as `_lie_builtin_value_map_fastpath`,
-  `_lbt_boxed_none_compare` and `_lbt_proven_int_is_none`, with
-  byte-identical C on both corpora.
   Every other compiler source and test program in the dump corpus emits a
   byte-identical `.ci`; the new parameters have the C types the parent's
   locals had in the compiler's own output, the one exception being
@@ -520,16 +383,6 @@ stage 7 has an oracle before it has a builder.
   become its first parameters and every call passes them. 30 of the 59
   nested functions were lifted (`_gmh_*`, 1,074 lines), which freed 18 more
   passes to move. `gen_module_impl` is 9,416 lines.
-  Third round (2026-11-21): 13 more passes, 856 statement lines -> 13 call
-  sites, so `gen_module_impl` is 9,107 lines. The largest was the 478-line
-  AST struct-table pre-seed, gated on one bool.
-  Fourth round (2026-11-21): the remaining 14 passes, 447 statement lines ->
-  14 call sites, so `gen_module_impl` is **8,674** lines and
-  `extract_arm.py --list-phases` prints `0 lines can be moved`: every
-  statement still in the parent is one of the tool's own refusals (returns,
-  binds a name read later, or calls a nested function).
-  `test_gimple_module_passes.py` pins the extracted rows, their annotations,
-  the 8,674-line ratchet and the `0 lines can be moved` end state.
   NOT moved: 29 nested functions that read a local of `gen_module_impl`
   (lifting one needs a typed parameter per captured local), the passes
   that call them, and the passes that bind a name read later (those need
@@ -540,14 +393,4 @@ stage 7 has an oracle before it has a builder.
 - **Stage 7. Other printers.** The C++ coroutine lowering (`cpp_core.py`,
   `cpp_async.py`, 16,400 lines, a second walk of the same AST) and the direct
   GCC bridge (`gcc/fire/fire-gimple-bridge.cc`, today a stub that builds
-  `int main(){return 0;}`) become printers over GIR. Its oracle is in place and
-  is the second corpus `tools/c_oracle.py` hashes (`tools/cpp_corpus`, 13
-  coroutine programs compiled with `MOJO_CORO=cpp`, both promise shapes).
-  Shape step (2026-11-22): `extract_arm.py` moved every top-level `if` arm of
-  the five dispatch functions into its own module-level function — 30 arms,
-  `_cpp_expr` 3,566 -> 101 lines, `_cpp_stmt` 1,582 -> 73, `_cpp_with_stmt`
-  344 -> 256, `_cpp_yield_from` 716 -> 595, `_cpp_for_stmt` 1,846 -> 456 —
-  so `--list ... 25` prints `0 lines can be moved` for all five and an arm is
-  the unit that later returns an `Ex`. Both corpora are byte-identical.
-  `test_gimple_cpp_core_arms.py` pins it. The builder it prints through
-  (stage 2b, `mojo/ir/build.py`) is still the blocker.
+  `int main(){return 0;}`) become printers over GIR.

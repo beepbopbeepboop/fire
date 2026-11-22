@@ -1675,45 +1675,18 @@ class _ParamFlow:
     def source_ok(self, fd, pidx: int, visiting: set) -> bool:
         """True when parameter `pidx` of plain def `fd` is the tagged generator
         at every call site of `fd`, and is consumed boxed inside `fd`."""
-        return self.sources_ok(fd, pidx, visiting, consumed=True) == 'fed'
+        return self.sources_ok(fd, pidx, visiting, consumed=True)
 
-    def boxed_consumer_ok(self, fd, pidx: int, visiting: set) -> bool:
-        """True when `fd`'s parameter `pidx` is never fed a non-generator value
-        and is consumed boxed. Unlike `source_ok` this does not require a real
-        `g(...)` to reach it: inside `use_ok`, a pass-through whose only way
-        back is a cycle already on the path (`'cycle'`) is no obstacle, because
-        the cycle's own sources are decided at the top of the chain. Requiring
-        'fed' here made `inner(it)` inside `use(it)` look unconsumable whenever
-        `use` was reached from `inner`'s own check, refusing
-        `use(g())` -> `inner(it)` (test_gimple_generator_runner.py)."""
-        return self.sources_ok(fd, pidx, visiting, consumed=True) is not False
-
-    def sources_ok(self, fd, pidx: int, visiting: set, consumed: bool):
+    def sources_ok(self, fd, pidx: int, visiting: set, consumed: bool) -> bool:
         """The source half of `source_ok`: the tagged generator at every call
         site of `fd`. With `consumed` it also requires the boxed-consumer check
         in `fd`'s body (`use_ok`). The per-kind split asks the source half alone:
         a callee that is not yet split can fail the consumer check only through
-        a call site the split is about to separate.
-
-        Returns False when some call site is not the generator, else one of:
-          'fed'    a call site reaches a real `g(...)` through the pass-throughs;
-          'cycle'  every site is a pass-through and the only way back is a
-                   cycle already on the path, so no site hands in the generator.
-        Only 'fed' makes `source_ok` true. `visiting` is the path of
-        `(callee, parameter, consumed)` keys being answered right now: a key
-        met again on that path is a cycle, and it is popped when its answer is
-        returned, so the same callee reached by two sibling paths is answered
-        from each path rather than from whichever ran first."""
+        a call site the split is about to separate."""
         key = (fd.name, pidx, consumed)
         if key in visiting:
-            return 'cycle'
+            return True     # a pass-through cycle contributes no other value
         visiting.add(key)
-        try:
-            return self._sources_ok(fd, pidx, visiting, consumed)
-        finally:
-            visiting.discard(key)
-
-    def _sources_ok(self, fd, pidx: int, visiting: set, consumed: bool):
         if (fd.comptime_params or fd.kwonly or pidx >= len(fd.params)
                 or fd.params[pidx][0].startswith('*')):
             return False
@@ -1721,7 +1694,6 @@ class _ParamFlow:
         sites = self._sites_of(fd.name)
         if not sites:
             return False
-        fed = False
         for c in sites:
             if any(isinstance(a, N.UnaryOp) and a.op in ('*', '**') for a in c.args) \
                     or c.kwargs or pidx >= len(c.args):
@@ -1729,25 +1701,20 @@ class _ParamFlow:
             a = c.args[pidx]
             if (isinstance(a, N.CallExpr) and isinstance(a.func, N.IdentExpr)
                     and a.func.name == self.name):
-                fed = True
                 continue
             if isinstance(a, N.IdentExpr):
-                r = self.passed_from_source(c, a.name, visiting, consumed)
-                if not r:
+                if not self.passed_from_source(c, a.name, visiting, consumed):
                     return False
-                fed = fed or r == 'fed'
                 continue
             return False
-        if consumed and not self.use_ok(fd, pname, visiting):
-            return False
-        return 'fed' if fed else 'cycle'
+        return (not consumed) or self.use_ok(fd, pname, visiting)
 
     def passed_from_source(self, call, aname: str, visiting: set,
-                           consumed: bool = True):
-        """False when the argument `aname` of `call` is not a pass-through: the
+                           consumed: bool = True) -> bool:
+        """True when the argument `aname` of `call` is a pass-through: the
         caller hands on ITS OWN parameter `aname`, and that parameter is itself
-        the tagged generator at every call site of the caller. Otherwise the
-        `sources_ok` answer for that parameter: 'fed' or 'cycle' (see there)."""
+        the tagged generator at every call site of the caller (`source_ok`, or
+        its source half alone with `consumed=False`)."""
         caller = self.caller.get(id(call))
         if (caller is None or id(caller) in self._nested
                 or caller.comptime_params
@@ -1785,7 +1752,7 @@ class _ParamFlow:
                     continue
                 for q, a in enumerate(n.args):
                     if _is_name(a, pname) and q < len(h.params) \
-                            and self.boxed_consumer_ok(h, q, visiting):
+                            and self.source_ok(h, q, visiting):
                         ok_ids.add(id(a))
         for n in _walk(fd):
             if isinstance(n, N.IdentExpr) and n.name == pname and id(n) not in ok_ids:
@@ -2018,7 +1985,7 @@ def _mixed_generator_callee(stmts: list, g: str):
                    if _is_gen_call_of(c.args[pidx], g)
                    or (isinstance(c.args[pidx], N.IdentExpr)
                        and flow.passed_from_source(c, c.args[pidx].name, set(),
-                                                   consumed=False) == 'fed')]
+                                                   consumed=False))]
             if not gen or len(gen) == len(sites):
                 continue
             return fd, pidx, gen
@@ -9363,7 +9330,7 @@ def emit_c(meta_entry: dict) -> str:
     # __mojo_gen_arg_d); every other slot is an int64_t / pointer that a
     # plain cast carries losslessly.
     def _fwd(i):
-        if gimple_ctypes.TypeLattice.is_double(params[i].strip()):
+        if params[i].strip() == 'double':
             return (f', ({{ int64_t __t{i}; double __s{i} = __a{i}; '
                     f'__builtin_memcpy(&__t{i}, &__s{i}, sizeof __t{i}); __t{i}; }})')
         return f', (int64_t)__a{i}'

@@ -590,9 +590,6 @@ _SELFHOST_SIGS = {
     # from the caller's `gen._words.x(...)`, found no signature and emitted a
     # weak "unavailable in compiled mode" stub that returned 0. The prototypes
     # match the definitions in `mojo_middle_valueinfo_WordFacts_*`.
-    'WordFacts_carry': ('void', ['WordFacts *', 'char *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_bind_box': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_bind_tagged': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
     'WordFacts_has_slot_kinds': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
     'WordFacts_is_boxed_container': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
     'WordFacts_is_dyn': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
@@ -606,9 +603,10 @@ _SELFHOST_SIGS = {
     'WordFacts_mark_slot_kinds': ('void', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
     'WordFacts_mark_tagged': ('void', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
     'WordFacts_unmark_int_word': ('void', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
-    'WordFacts_snapshot': ('MojoDict *', ['WordFacts *'], 'mojo_middle_valueinfo'),
+    'WordFacts_snapshot': ('MojoList *', ['WordFacts *'], 'mojo_middle_valueinfo'),
     'WordFacts___init__': ('void', ['WordFacts *'], 'mojo_middle_valueinfo'),
-    'WordFacts_restore_snapshot': ('void', ['WordFacts *', 'MojoDict *'], 'mojo_middle_valueinfo'),
+    'WordFacts_bind': ('void', ['WordFacts *', 'int64_t'], 'mojo_middle_valueinfo'),
+    'WordFacts_restore_snapshot': ('void', ['WordFacts *', 'MojoList *'], 'mojo_middle_valueinfo'),
     # Arity AND width must match fire.jit's definition or the closure
     # gets "conflicting types for 'jit_compile_and_execute'".
     # `auto_gpu` is the 6th parameter, and the self-host lowers a
@@ -1742,9 +1740,10 @@ class GimpleGen:
         # cannot know statically (the result of a call to a
         # `_multi_kind_return_funcs` member). Per-function like the other
         # value-keyed side tables, since these names are per-function temps.
-        # the per-temp value records live in one WordFacts (valueinfo.py);
+        # the six name-keyed word sets live in one WordFacts (valueinfo.py);
         # `_reset_func` makes a fresh one per function body
         self._words: WordFacts = WordFacts()
+        self._words.bind(self)
         # Function name -> the return type of the CALLABLE it returns
         # (`def mk(): return lambda: False`). Module scope for the same
         # reason as `_return_slot_types` above: the point is to carry a
@@ -1984,7 +1983,6 @@ class GimpleGen:
         # inner dict's value type fell back to a generic default and the
         # write lowered as `mojo_list_set_int`, SIGBUS. Confirmed via lldb.
         self._class_attrs: dict[str, dict[str, str]] = {}
-        self._callable_cattr_globals: set = set()    # _classattr_ globals whose class-body value is a FUNCTION (module scope), so `Cls.attr(...)` calls through the global (emit_methods._class_attr_callable_call)
         # Nested-annotated for the same reason as `_class_attrs` just above:
         # bare `dict` left the inner value kind unknown, so the compiled
         # compiler read `self._func_attrs[fn][attr]` through
@@ -3467,68 +3465,6 @@ class GimpleGen:
         # MODULE-wide, not per function (so not in `_reset_func`): once any `type(n, bases, ns)`
         # is lowered, a later function's `isinstance` / `type(x)` must consult the class table.
         self._rt_classes_made: bool = False
-        # Tables some lowering paths still created on first use behind
-        # `if not hasattr(gen, '<name>'): gen.<name> = <container>`. That
-        # pattern does NOT work in the compiled compiler: GimpleGen's
-        # synthetic struct carries every `self.<field> = ...` in the class
-        # from construction, so `hasattr` answers True for a never-assigned
-        # field, the lazy `dict()`/`set()`/`list()` never runs, and the first
-        # mutation dereferences a NULL MojoDict/MojoSet/MojoList. Measured in
-        # a stage2 binary: `./mojo --dump ../array_ops_jit.mojo` died in
-        # `_dict_set_raw_seq_kind_k` (d == NULL) from
-        # `emit_stmts._note_global_slot_kinds`'s `_global_slot_info`, on that
-        # file's module-level `arr = [1, 2, 3, 4, 5]`; `_bool_valued` above
-        # was the same defect. Declaring each table HERE, with the container
-        # type its guard creates, gives `_collect_self_assigns` the real C
-        # type and guarantees a live container from construction on both
-        # paths. `test_gimple.test_every_lazily_initialised_generator_table_
-        # exists` scans the sources for a guard naming a field that is not
-        # declared here, so the next one cannot reintroduce the NULL.
-        #
-        # Module-global slot kinds recorded by `_note_global_slot_kinds`
-        # (see emit_exprs' read of the same table).
-        self._global_slot_info: dict = {}
-        # `dict.fromkeys(...)` / `frozendict.fromkeys(...)` callable temps
-        # (emit_exprs and emit_stmts both record here).
-        self._frozendict_fromkeys_callables: set = set()
-        self._dict_fromkeys_callables: set = set()
-        # Locals bound to a tagged generator word (emit_infra), a generator
-        # handle word, and functions whose drained list is runtime-kinded.
-        self._tagged_gen_vals: set = set()
-        self._gen_handle_word_locals: set = set()
-        self._return_runtime_kinded: set = set()
-        # The C++ emitter's word-local tables. Reset per function where the
-        # generator/async unit gets the chance (cpp_async), created on use
-        # elsewhere -- so they must also exist for the other unit shapes.
-        self._cpp_tagged_word_names: set = set()
-        self._cpp_unpacked_call_words: set = set()
-        self._cpp_word_locals: set = set()
-        self._cpp_word_iter_locals: set = set()
-        # Class prototypes published for the prototype section, and the
-        # Struct_method -> parameter-names table they are registered with.
-        self._method_param_names: dict = {}
-        self._published_class_defs: list = []
-        self._published_class_keys: set = set()
-        # Per-module tables that deliberately persist across the modules of
-        # one compile: GPU per-buffer element counts (`_device_launch_lengths`
-        # is filled by the synthesis pass before the classification pass, so
-        # that pass must not wipe it), and the method -> generator-api map.
-        self._device_launch_lengths: dict = {}
-        self._device_launch_grids: dict = {}
-        self._method_returns_generator: dict = {}
-        # Closure factories with a `nonlocal` in the returned closure, which
-        # must skip the coroutine lift; `mojo.middle.closures` reads it too.
-        self._skip_closure_factory_lift: set = set()
-        # Generic elaboration (elab_intu.run) records: the in-TU mangled names
-        # this compile defines, and the argument tables the `.o` route must not
-        # also emit. Created once per gen and accumulated across modules.
-        self._intu_funcs: dict = {}
-        self._intu_structs: dict = {}
-        self._intu_func_args: dict = {}
-        self._intu_struct_args: dict = {}
-        self._intu_factory_records: dict = {}
-        # Front-end refusals, re-raised by gen_module for LSP/error recovery.
-        self._lsp_recovery_errors: list = []
         self._reset_func()
 
     # Builtin exception names (mirrors myinterpreter.py's _setup_builtins plus
@@ -5147,10 +5083,10 @@ class GimpleGen:
         if own is None:
             return None
         cdecl = self._global_c_decl_types.get(name)
-        if (cdecl is not None and TypeLattice.ends_in_star(cdecl)
+        if (cdecl is not None and cdecl.endswith(' *')
                 and cdecl in ('MojoDict *', 'MojoList *', 'MojoSet *')):
             return cdecl
-        if TypeLattice.is_py_scalar(own):
+        if own in ('int64_t', 'double', '_Bool', 'char *'):
             return own
         if (own in ('MojoDict *', 'MojoList *', 'MojoSet *')
                 and not (cdecl is not None
@@ -5319,11 +5255,9 @@ class GimpleGen:
     def _find_struct_home_module(self, module: str, name: str, depth: int = 0) -> str | None:
         return gfn._find_struct_home_module(self, module, name, depth=depth)
     def _find_symbol_home_module(self, module: str, name: str, kind: str,
-                                 depth: int = 0, want_abs: bool = False,
-                                 want_name: bool = False):
+                                 depth: int = 0, want_abs: bool = False):
         return gfn._find_symbol_home_module(self, module, name, kind,
-                                           depth=depth, want_abs=want_abs,
-                                           want_name=want_name)
+                                           depth=depth, want_abs=want_abs)
     def _reexported_defining_qualifier(self, module: str, name: str,
                                        kind: str = 'fn') -> str:
         return gfn._reexported_defining_qualifier(self, module, name, kind)
@@ -6151,10 +6085,6 @@ class GimpleGen:
         return self._words.may_be_box(name)
     def _word_is_tagged(self, name: str) -> bool:
         return self._words.is_tagged(name)
-    def _word_bind_box(self, name: str) -> bool:
-        return self._words.bind_box(name)
-    def _word_bind_tagged(self, name: str) -> bool:
-        return self._words.bind_tagged(name)
     def _word_is_dyn(self, name: str) -> bool:
         return self._words.is_dyn(name)
     def _word_is_int_word(self, name: str) -> bool:
@@ -6177,8 +6107,6 @@ class GimpleGen:
         self._words.mark_slot_kinds(name)
     def _word_mark_boxed_container(self, name: str) -> None:
         self._words.mark_boxed_container(name)
-    def _word_carry(self, dst: str, src: str) -> None:
-        self._words.carry(dst, src)
     def _copy(self, dst: str, src: str) -> None:
         grsl._copy(self, dst, src)
     def _binop(self, ctype: str, a: str, op: str, b: str) -> str:
@@ -6427,8 +6355,8 @@ def _selfhost_register_gimplegen(gen):
         # `_selfhost_merge_field` in gimple_gen_funcs.py (identical bug: a
         # `_Bool` field seen after an `int64_t` default was silently kept
         # at `int64_t` because only `_ct.endswith(' *')` was accepted).
-        if _gg_cur is None or (TypeLattice.is_int_word_or_bool(_gg_cur)
-                                and (TypeLattice.ends_in_star(_gg_fc_s) or TypeLattice.is_bool(_gg_fc_s))):
+        if _gg_cur is None or (_gg_cur in ('int', 'int64_t', '_Bool')
+                                and (_gg_fc_s.endswith(' *') or _gg_fc_s == '_Bool')):
             _gg_ft_seed[_gg_fk_s] = _gg_fc_s
     gen._selfhost_gimplegen_registered = True
 
