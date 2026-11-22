@@ -6646,20 +6646,32 @@ def _line(job, res, done, total, active):
 # ── Reporting ────────────────────────────────────────────────────────────────
 # The screen gets the failures and one tally. Everything per-test — a PASS
 # line each, with argv, exit code, duration and measured peak — is in the log.
-def known_bugs(name):
+BUGS_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bugs'))
+
+
+def known_bugs(name, bugs_dir=None):
     """The bug docs that already track a failing job, so a red gate says whether it is a regression someone has
     seen before (a doc exists) or a new one (none does). A doc matches when its file name carries every word of the
     job's name (`gimple` -> GATE_check_gimple_selfhost_...), or when its title names the job in backticks. The
-    result is a list of bugs/ paths, possibly empty; it is a pointer for the reader, not a verdict on the failure."""
+    result is a list of bugs/ paths, possibly empty; it is a pointer for the reader, not a verdict on the failure.
+
+    The job and the file name are split on the SAME separators, `[-_.:]`. They did not used to be — the job name
+    was split on `[-_]` only, while a fanout ITEM's name puts its file after a colon (`bootstrap-stage2-dumps:
+    test_sqlite3_simple.mojo`) and a per-item doc's name carries the dots of the extension — so neither the item
+    nor its parent could ever match the doc that tracked it. Measured at gate c0182fd3: fifty
+    `bootstrap-stage2-dumps:<file>.mojo` docs on disk and the gate still printed `NEW: no bug doc tracks this job`
+    for their parent, which is the signal a reader uses to tell a repeat from a fresh break. `bugs_dir` exists so
+    the matcher can be tested against a synthetic corpus instead of whatever the live bugs/ holds today."""
     import re as _re
-    words = [w for w in _re.split(r'[-_]', name.lower()) if w]
+    words = [w for w in _re.split(r'[-_.:]', name.lower()) if w]
+    bugs = os.path.normpath(bugs_dir or BUGS_DIR)
     hits = []
-    for root, _dirs, files in os.walk(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bugs')):
+    for root, _dirs, files in os.walk(bugs):
         for f in files:
             if not f.endswith('.md') or f.startswith(('OPEN_WORK', 'README')):
                 continue
             path = os.path.normpath(os.path.join(root, f))
-            tokens = set(_re.split(r'[-_.]', f[:-3].lower()))
+            tokens = set(_re.split(r'[-_.:]', f[:-3].lower()))
             if all(w in tokens for w in words):
                 hits.append(path)
                 continue
@@ -6669,8 +6681,8 @@ def known_bugs(name):
                 continue
             if title.startswith('#') and f'`{name}`' in title:    # the title names the job, not a passing mention
                 hits.append(path)
-    rel = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-    return sorted(os.path.relpath(h, rel) for h in hits)
+    base = os.path.dirname(bugs)            # so the answer reads `bugs/<doc>.md` for any corpus handed in
+    return sorted(os.path.relpath(h, base) for h in hits)
 
 
 def _hms(secs):
