@@ -293,7 +293,7 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
     # mojo_iter_word, which consume it from the same position.
     if (not _rebind and not is_decl and gimple_ctypes.TypeLattice.is_list(at)
             and itc.iter_name_escapes_into_call(gen._cur_func_body, name)
-            and gen._elem_of(av) not in (None, 'int64_t')):
+            and not gimple_ctypes.TypeLattice.is_word_or_none(gen._elem_of(av))):
         # An iterator over strings/floats handed to a function: the word the callee
         # gets back from next() carries no kind, so it would print as an integer.
         # Refuse (the module falls back to source) rather than answer wrong.
@@ -521,7 +521,7 @@ def _gen_stmt_VarDecl(gen, node):
             # slot type was thrown away and the value was immediately
             # coerced BACK to int64_t on the store (a `Config *` slot read
             # through `(Config *)` then `(void *)` then `(int64_t)`).
-            if gen.var_types.get(n) in ('int64_t', 'int') and not gimple_ctypes.TypeLattice.is_int_word(et):
+            if gimple_ctypes.TypeLattice.is_int_word(gen.var_types.get(n)) and not gimple_ctypes.TypeLattice.is_int_word(et):
                 _redecl_upgrade_default(gen, n, et)
             gen._declare_var(n, et)
             gen._safe_coerce_emit(et, gen.var_types[n], ev, gen._write_dest(n))

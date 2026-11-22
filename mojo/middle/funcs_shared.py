@@ -375,7 +375,7 @@ def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
         # Apply unanimous container evidence when usage left the slot at the
         # int64_t default, but preserve scalar (char* / double) or struct
         # conclusions.
-        if ctype in ('int64_t', 'int', ''):
+        if gimple_ctypes.TypeLattice.is_int_word_or_unsolved(ctype):
             return _xc
         return _xc
     if ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):

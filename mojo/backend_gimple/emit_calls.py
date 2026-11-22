@@ -5557,8 +5557,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and not gen._locally_binds_name('index')
             and 'index' not in gen.imported_symbols):
         _ix_t, _ix_v = gen.lower_expr(node.args[0])
-        if _ix_t in ('int64_t', 'int', 'uint64_t', 'int32_t', 'uint32_t',
-                     'int16_t', 'uint16_t', 'int8_t', 'uint8_t', '_Bool'):
+        if (gimple_ctypes.TypeLattice.is_int(_ix_t) or gimple_ctypes.TypeLattice.is_bool(_ix_t)):
             return 'int64_t', gen._coerce_to_type(_ix_t, 'int64_t', _ix_v)
     # BUG-2026-028: `addr(x)` had NO real lowering at all — any call fell
     # through to a declared-but-never-defined variadic stub
@@ -6156,7 +6155,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # must be a `MojoList *` (see _lower_bare_list_ctor for the measured
     # integer erasure this replaces).
     if (fname_raw == 'List'
-            and _ctor_rt in ('int64_t', '')
+            and gimple_ctypes.TypeLattice.is_word_or_unsolved(_ctor_rt)
             and fname_raw not in gen.var_types
             and fname_raw not in gen.func_param_types
             and fname_raw not in gen.struct_field_types
@@ -6781,7 +6780,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
             iv = gen._cast('int64_t', obj_val)
             gen._rt_into(res, 'mojo_isinstance_p', [iv, f"{type_id}"])
             return gen._cast('_Bool', res)
-        if obj_type not in ('int64_t', 'void *', ''):
+        if not (gimple_ctypes.TypeLattice.is_word(obj_type) or gimple_ctypes.TypeLattice.is_voidp(obj_type) or gimple_ctypes.TypeLattice.is_unsolved(obj_type)):
             return gen._new_val('_Bool', '(_Bool)0')
     res = gen._new_temp('int')
     if obj_type in ('char *', 'void *', 'MojoDict *', 'MojoList *', 'MojoSet *') or gimple_ctypes.TypeLattice.ends_in_star(obj_type):
@@ -7336,7 +7335,7 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
         bf = 'mojo_bytes_all' if fname_raw == 'all' else 'mojo_bytes_any'
         gen._emit_call('int', t, bf, [('MojoBytes *', av)])
     elif (gimple_ctypes.TypeLattice.is_list(at) or at == 'MojoDict *' or at == 'MojoSet *'
-          or at in ('int64_t', 'int', '_Bool', 'char *', 'MojoStr *')
+          or (gimple_ctypes.TypeLattice.is_int_word_or_bool(at) or gimple_ctypes.TypeLattice.is_cstr(at) or gimple_ctypes.TypeLattice.is_str(at))
           or gimple_ctypes.TypeLattice.ends_in_star(at)):
         # DESIGN.html R1/R5: dict/set materialization (all(d)/any(s) over a
         # dict's keys / a set's elements, not a reinterpret of the header —
@@ -9974,7 +9973,9 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     _capture_types = []
     for _cn in _captured:
         _ct = gen.var_types.get(_cn, 'int64_t')
-        if _ct in ('int', 'int64_t', '_Bool', 'char', 'double') or gimple_ctypes.TypeLattice.ends_in_star(_ct):
+        if (gimple_ctypes.TypeLattice.is_number_scalar(_ct)
+                or gimple_ctypes.TypeLattice.is_char(_ct)
+                or gimple_ctypes.TypeLattice.ends_in_star(_ct)):
             _capture_types.append((_cn, _ct))
         else:
             _capture_types.append((_cn, 'int64_t'))
@@ -10143,8 +10144,9 @@ def _lower_LambdaExpr(gen, node) -> tuple:
                 continue
             _seen_c.add(_cn)
             _ct = _known.get(_cn)
-            if not (_ct in ('int', 'int64_t', '_Bool', 'char', 'double') or
-                    (_ct or '').endswith(' *')):
+            if not (gimple_ctypes.TypeLattice.is_number_scalar(_ct)
+                    or gimple_ctypes.TypeLattice.is_char(_ct)
+                    or (_ct or '').endswith(' *')):
                 _ct = 'int64_t'
             _final.append((_cn, _ct))
         # Dedupe the typedef as a BLOCK, keyed by its closing line — never
@@ -10541,7 +10543,7 @@ def _callee_is_fnptr_value(gen, fname_raw: str) -> bool:
     scope and `print(step(7))` lower the same way."""
     _ctype = gen.var_types.get(fname_raw) or gen._global_var_types.get(fname_raw, '')
     return (fname_raw in gen.var_types) or (
-        _ctype in ('int', 'int64_t', 'void *', '_Bool')
+        (gimple_ctypes.TypeLattice.is_int_word_or_voidp(_ctype) or gimple_ctypes.TypeLattice.is_bool(_ctype))
         and fname_raw not in gen._mangled_funcs
         and fname_raw not in gen.func_return_types)
 
@@ -13938,7 +13940,7 @@ def _ls_list(gen, node: gimple_ctypes.SubscriptExpr, iv, ov) -> tuple[str, str]:
                         gen._elem_types[t] = gen._nested_elem_types[ov]
                     else:
                         gen._elem_types[t] = gen._elem_types.get(ov, 'int64_t')
-                        if gen._elem_types[t] in ('int64_t',) and ov in gen._elem_types:
+                        if gimple_ctypes.TypeLattice.is_word(gen._elem_types[t]) and ov in gen._elem_types:
                             gen._elem_types[cast_t] = gen._elem_types[ov]
                 if _sct == 'MojoDict *' and ov in gen._dict_val_types:
                     gen._dict_val_types[cast_t] = gen._dict_val_types[ov]
@@ -13995,7 +13997,7 @@ def _ls_list(gen, node: gimple_ctypes.SubscriptExpr, iv, ov) -> tuple[str, str]:
                 gen._elem_types[t] = gen._nested_elem_types[ov]
             else:
                 gen._elem_types[t] = gen._elem_types.get(ov, 'int64_t')
-                if gen._elem_types[t] in ('int64_t',) and ov in gen._elem_types:
+                if gimple_ctypes.TypeLattice.is_word(gen._elem_types[t]) and ov in gen._elem_types:
                     gen._elem_types[cast_t] = gen._elem_types[ov]
         # For MojoDict* elements, propagate dict value type from the
         # container (list variable) so subsequent ["key"] subscript
@@ -14310,7 +14312,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # `int64_t` and `_Bool` are already handled just above (their own
     # word/boxed-list arms), so they are not re-routed here.
     if (ot in gimple_ctypes._DTYPE_SCALAR_CTYPES
-            and ot not in ('int64_t', '_Bool')):
+            and not (gimple_ctypes.TypeLattice.is_word(ot) or gimple_ctypes.TypeLattice.is_bool(ot))):
         return ot, ov
     # p[i] via _mojo_at_ helper (ptr arithmetic not allowed in __GIMPLE)
     et = gimple_ctypes._elem_type(ot)

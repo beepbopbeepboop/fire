@@ -985,7 +985,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             it_type, it_val = gen.lower_expr(_int_recv)
         elif (isinstance(it, gimple_ctypes.CallExpr) and isinstance(it.func, gimple_ctypes.IdentExpr)
                 and it.func.name in gen.var_types and it.func.name not in gen.func_return_types
-                and gen.var_types.get(it.func.name) in ('int64_t', 'void *', 'char *')):
+                and (gimple_ctypes.TypeLattice.is_word_or_cstr(gen.var_types.get(it.func.name)) or gimple_ctypes.TypeLattice.is_voidp(gen.var_types.get(it.func.name)))):
             # `for x in f(args):` where `f` is a callable VARIABLE or PARAMETER (`for check in
             # checks: for d, e in check(a):`). The callee may be a compiled GENERATOR, whose
             # call yields a live handle only when dispatched by `mojo_dyn_call` (a plain
@@ -1205,8 +1205,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             # fallthrough (and a comprehension result, and several builtin
             # stubs) produce — and looked for a `void___has_next__` that
             # cannot exist, then REFUSED. That made the boxed runtime
-            # dispatch below, whose own `it_type in ('int', 'int64_t',
-            # 'void *')` test names `void *` explicitly, unreachable for
+            # dispatch below, whose own `is_int_word_or_voidp(it_type)` test
+            # names `void *` explicitly, unreachable for
             # `void *` — the two arms contradicted each other and the
             # narrower one won. `for x in reversed(seq)` therefore ran zero
             # times with a `mojo_unsupported_iter` naming `void *`, which is
@@ -2306,7 +2306,7 @@ def _gen_for_enumerate(gen, node):
             list_ptr = gen._materialize_as_list(lst_type, lst_val)
 
     elem = gen._elem_of(list_ptr)
-    gen._declare_var(idx_var, 'int64_t', force=gen.var_types.get(idx_var) not in (None, 'int64_t'))
+    gen._declare_var(idx_var, 'int64_t', force=not gimple_ctypes.TypeLattice.is_word_or_none(gen.var_types.get(idx_var)))
     star_elem = None
     if val_is_star:
         # The starred slot is a LIST of what follows the index, not the
@@ -3406,7 +3406,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 vn0 = var_names[0]
                 cvn0 = _slot_cnames[0]
                 vt0 = _slot_ctypes[0]
-                if vt0 in ('int64_t', 'int', 'int32_t'):
+                if gimple_ctypes.TypeLattice.is_int(vt0):
                     vp = gen._cast('void *', f"{key_tmp}")
                     box = gen._cast('int64_t', vp)
                     gen._copy(f"{cvn0}", f"{box}")
@@ -3416,7 +3416,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     vn = var_names[_vi]
                     cvn = _slot_cnames[_vi]
                     vt = _slot_ctypes[_vi]
-                    if vt in ('int64_t', 'int', 'int32_t'):
+                    if gimple_ctypes.TypeLattice.is_int(vt):
                         gen._cast_into(cvn, 'int64_t', '0')
                     elif gimple_ctypes.TypeLattice.ends_in_star(vt):
                         gen._emit(f"  {cvn} = ({vt})0;")
@@ -3425,7 +3425,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     else:
         cvar = gen._cname(var)
         vt = gen.var_types.get(var, 'char *')
-        if vt in ('int64_t', 'int', 'int32_t'):
+        if gimple_ctypes.TypeLattice.is_int(vt):
             vp = gen._cast('void *', f"{key_tmp}")
             box = gen._cast('int64_t', vp)
             gen._copy(f"{cvar}", f"{box}")

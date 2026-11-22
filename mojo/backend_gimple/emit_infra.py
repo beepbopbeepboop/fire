@@ -3152,7 +3152,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             else:
                 gen._cast_into(ct, 'int64_t', f"{aval}")
             coerced_args.append(ct)
-        elif gimple_ctypes.TypeLattice.is_cstr(ptype) and atype in ('int', 'int64_t', 'char', 'double', '_Bool'):
+        elif gimple_ctypes.TypeLattice.is_cstr(ptype) and (gimple_ctypes.TypeLattice.is_number_scalar(atype) or gimple_ctypes.TypeLattice.is_char(atype)):
             # A raw single char whose DECLARED type was widened to
             # int64_t (joining another assignment site in the same
             # function — e.g. `qch = stmt[i]` in fire_compiler.py's own
@@ -3356,7 +3356,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             # pointer passed where int64_t expected — cast via int64_t
             ip = gen._cast('int64_t', f"{aval}")
             coerced_args.append(ip)
-        elif ptype == 'int' and atype in ('int64_t', '_Bool'):
+        elif ptype == 'int' and (gimple_ctypes.TypeLattice.is_word(atype) or gimple_ctypes.TypeLattice.is_bool(atype)):
             ct = gen._cast('int', f"{aval}")
             coerced_args.append(ct)
         elif ptype == 'int' and gimple_ctypes.TypeLattice.ends_in_star(atype):
@@ -5940,7 +5940,7 @@ def _list_repr_fn(gen, rav: str) -> str:
     # travel on the value (`mojo_list_set_kinds`), so the kinds-aware helper
     # reads them from the runtime row (see `_list_repr_call`). The single
     # list-wide ctype below is exact only for a list that really is uniform.
-    if gen._word_has_slot_kinds(rav) and et in ('double', 'int64_t'):
+    if gen._word_has_slot_kinds(rav) and (gimple_ctypes.TypeLattice.is_word(et) or gimple_ctypes.TypeLattice.is_double(et)):
         return 'mojo_repr_list_kinds'
     if gimple_ctypes.TypeLattice.is_double(et):
         return 'mojo_repr_list_doubles'
@@ -6287,8 +6287,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         # Python str(True)/str(False) → "True"/"False", not the "1"/"0"
         # the int path below would produce.
         return gen._call_expr('char *', 'mojo_bool_to_str', [('int', ev)])
-    if et in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
-              'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
+    if gimple_ctypes.TypeLattice.is_int(et):
         nv = gen._to_int64(et, ev)
         # A word that may be a box, a tagged dict-slot value, a string pointer
         # held in an int64_t, or a plain integer: str() via the runtime's
@@ -7467,7 +7466,7 @@ def _compr_dict_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     tgt = gen0.target
     vt = gen.var_types.get(tgt, 'char *')
     tgt_c = gen._cname(tgt)
-    if vt in ('int64_t', 'int', 'int32_t'):
+    if gimple_ctypes.TypeLattice.is_int(vt):
         vp = gen._cast('void *', key_tmp)
         box = gen._cast('int64_t', vp)
         gen._copy(f"{tgt_c}", f"{box}")
@@ -9471,7 +9470,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 rv = _own_repr(gen, _fn, gen._call_expr('char *', _fn, _fargs),
                                _owned_reprs)
             gen._rt_void(print_fn, [f"{rv}"])
-        elif gimple_ctypes.TypeLattice.is_bool(atype) or (gimple_ctypes.TypeLattice.is_bool(_stat) and atype in ('int', 'int64_t', 'char *', 'long')):
+        elif gimple_ctypes.TypeLattice.is_bool(atype) or (gimple_ctypes.TypeLattice.is_bool(_stat) and (gimple_ctypes.TypeLattice.is_int_word(atype) or gimple_ctypes.TypeLattice.is_cstr(atype) or gimple_ctypes.TypeLattice.is_c_long(atype))):
             # Python prints True/False; the generic numeric path below would
             # sprintf a _Bool with "%d" and print 1. Also reached for
             # `_Bool`-typed locals, which is how a comparison or a

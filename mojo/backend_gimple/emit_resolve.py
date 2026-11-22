@@ -2361,7 +2361,7 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
     # usual implicit int->_Bool conversion under `-fgimple`'s stricter
     # verifier, same as it doesn't for int->int64_t. Both need the
     # explicit cast.
-    if ctype in ('int64_t', '_Bool') and rhs.lstrip('-').isdigit():
+    if (gimple_ctypes.TypeLattice.is_word(ctype) or gimple_ctypes.TypeLattice.is_bool(ctype)) and rhs.lstrip('-').isdigit():
         if rhs.startswith('-'):
             # A cast applied directly to a NEGATIVE literal
             # (`(int64_t)-1`, or even parenthesized: `(int64_t)(-1)`)
@@ -3073,7 +3073,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             v = gen._ensure_local(s, v)
             sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', v)])
             gen._copy(dest, sv)
-        elif gimple_ctypes.TypeLattice.ends_in_star(d) and s in ('int', 'int64_t', 'char'):
+        elif gimple_ctypes.TypeLattice.ends_in_star(d) and (gimple_ctypes.TypeLattice.is_int_word(s) or gimple_ctypes.TypeLattice.is_char(s)):
             # 'char' here too: a narrower-than-pointer scalar (e.g. a
             # single dereferenced byte from an unresolved generic
             # element access) cast directly to a pointer type is the
@@ -3105,7 +3105,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             # outright ("pointer value used where a floating-point was
             # expected"); it needs the same two-step through the int64_t word
             # that every other pointer-to-number conversion here uses (see the
-            # `s.endswith(' *') and d in ('int', 'int64_t')` branch above,
+            # `ends_in_star(s) and is_int_word(d)` branch above,
             # including the void * intermediate GIMPLE requires).
             #
             # Found through `Array[Float32, buf_len](fill={})` in
@@ -3918,7 +3918,7 @@ def _inferred_arg_mojo_type(gen, arg, ctype):
     call has can move — the List/Span proofs are purely additive."""
     if gimple_ctypes.TypeLattice.is_list(ctype):
         return _list_arg_mojo_type(gen, arg, ctype)
-    if ctype in ('Span *', 'int64_t'):
+    if (gimple_ctypes.TypeLattice.is_word(ctype) or gimple_ctypes.TypeLattice.is_span(ctype)):
         return _proven_span_arg_mojo_type(gen, arg)
     return _constructed_struct_type(gen, arg, ctype)
 

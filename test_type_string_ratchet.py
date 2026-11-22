@@ -42,13 +42,13 @@ PATTERNS = {
 }
 
 BASELINE = {
-    "endswith(' *')": 32,
-    "== 'int64_t'": 59,
-    "in (.., 'int64_t', ..)": 115,
-    "== 'char *'": 70,
-    "== '_Bool'": 6,
-    "== 'double'": 9,
-    "== 'MojoList *'": 31,
+    "endswith(' *')": 16,
+    "== 'int64_t'": 54,
+    "in (.., 'int64_t', ..)": 0,
+    "== 'char *'": 62,
+    "== '_Bool'": 2,
+    "== 'double'": 8,
+    "== 'MojoList *'": 29,
     "gen._emit( text": 266,
     "direct word-set use": 10,
 }
@@ -70,11 +70,30 @@ def counts() -> dict:
     return {k: sum(len(re.findall(v, t)) for t in texts) for k, v in PATTERNS.items()}
 
 
+def per_file(only_stage4: bool = True) -> None:
+    """The census a work packet should be sized from: every file's counts.
+
+    A packet doc's table is a snapshot and goes stale; this is measured."""
+    stage4 = {"endswith(' *')", "== 'int64_t'", "in (.., 'int64_t', ..)",
+              "== 'char *'", "== '_Bool'", "== 'double'", "== 'MojoList *'"}
+    for p in sources():
+        text = open(p).read()
+        nz = [(k, len(re.findall(v, text))) for k, v in PATTERNS.items()
+              if (k in stage4 or not only_stage4)]
+        nz = [(k, n) for k, n in nz if n]
+        if nz:
+            print('%-46s %s' % (os.path.relpath(p, HERE),
+                                ', '.join('%s: %d' % (k, n) for k, n in nz)))
+
+
 def main(argv: list) -> int:
     now = counts()
     if '--counts' in argv:
         for k in PATTERNS:
             print('%-26s %d' % (k, now[k]))
+        return 0
+    if '--per-file' in argv:
+        per_file('--all-patterns' not in argv)
         return 0
     failures = 0
     for k in PATTERNS:
