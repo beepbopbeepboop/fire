@@ -135,3 +135,11 @@ This is a multi-file change to the compiled path. It needs the full stdlib compi
 check after it lands, and it changes C for the programs listed above, so it is not a one-slice
 change. The steps above are ordered so step 1 can land alone as measured infrastructure.
 
+**Step 1 landed (2026-11-22):** `mixed_field_names(struct)` in `mojo/backend_gimple/emit_infra.py` (next
+to `mixed_box_name`) returns the fields that receive a `None` literal and a scalar literal across a
+struct's methods, through nested blocks. `test_gimple_mixed_field_names.py` pins five cases (the
+reduction gives `{s}`; None-only, int-only and non-literal stores give none; a store inside `if` counts).
+No caller yet, so no C changes: `c_oracle` is identical on 285 C and 13 C++ programs, and
+`--closure` reports no new stubs (3 == 3). Steps 2 to 4 (the store, the read, the acceptance) are not
+done.
+

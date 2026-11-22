@@ -8,6 +8,7 @@ the class; cross-module references are qualified.
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 
@@ -4852,6 +4853,63 @@ def boxed_param_names(gen) -> set:
     out |= set(getattr(gen, '_cur_default_none_params', ()) or ())
     gen._cur_boxed_params = out
     return out
+
+
+def _literal_store_kind(value):
+    """The scalar kind a LITERAL value stores, or None (no evidence).
+
+    Only literals count: a call or a name says nothing this pass can rely on,
+    so it is silence, not a second kind (doc/GIR.md stage 5c)."""
+    if isinstance(value, gimple_ctypes.NoneLiteral) \
+            or (isinstance(value, gimple_ctypes.IdentExpr) and value.name == 'None'):
+        # The parser spells `None` either way (infra_infer checks both too).
+        return 'none'
+    if isinstance(value, gimple_ctypes.BoolLiteral):
+        return 'bool'
+    if isinstance(value, gimple_ctypes.IntLiteral):
+        return 'int'
+    if isinstance(value, gimple_ctypes.FloatLiteral):
+        return 'float'
+    if isinstance(value, gimple_ctypes.StringLiteral):
+        return 'str'
+    return None
+
+
+def _self_field_stores(node, out: list) -> None:
+    """Append `(field, literal kind)` for every `self.<field> = <value>` under
+    `node` (a statement, a list of statements, or a nested block)."""
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _self_field_stores(item, out)
+        return
+    if isinstance(node, gimple_ctypes.AssignStmt):
+        t = node.target
+        if isinstance(t, gimple_ctypes.MemberExpr) \
+                and isinstance(t.obj, gimple_ctypes.IdentExpr) \
+                and t.obj.name == 'self':
+            out.append((t.member, _literal_store_kind(node.value)))
+    if dataclasses.is_dataclass(node):
+        for f in dataclasses.fields(node):
+            v = getattr(node, f.name, None)
+            if isinstance(v, (list, tuple)) or dataclasses.is_dataclass(v):
+                _self_field_stores(v, out)
+
+
+def mixed_field_names(struct) -> frozenset:
+    """The fields of `struct` that hold a `None` literal AND a scalar literal
+    across the struct's methods (`self.<f> = None` beside `self.<f> = 42`).
+
+    Such a field is the box-holding kind: a bare word would read the `None`
+    back as the integer 0 (the 2026-11-22 corpus group, doc/GIR.md stage 5c).
+    This is the predicate only; the stores and reads do not consult it yet."""
+    kinds: dict = {}
+    for m in getattr(struct, 'methods', []) or []:
+        found: list = []
+        _self_field_stores(getattr(m, 'body', []), found)
+        for field_name, kind in found:
+            if kind is not None:
+                kinds.setdefault(field_name, set()).add(kind)
+    return frozenset(f for f, ks in kinds.items() if 'none' in ks and (ks - {'none'}))
 
 
 def mixed_box_name(gen, name) -> bool:
