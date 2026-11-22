@@ -241,22 +241,37 @@ def reconcile(st, run_sha, failed, passed, prev):
 
 
 def report_text(job, e, run_sha, log, subj_of):
-    """The body of the ledger section filed in bugs/gate-<job>.md."""
+    """The body of the ledger section filed in bugs/gate-<job>.md.
+
+    The "Skipped" paragraph is a claim that a `disabled=` switch exists, so it is
+    emitted only for the state the ledger actually produced (`e["marked"]`, set
+    from `get_disabled` after `set_disabled` ran), never merely because the job
+    has a registration: a fanout ITEM has none at all, and a registration that
+    already carries an `expect=`/`disabled=` marker somebody wrote is left alone
+    by `set_marker`. Claiming a switch in either case sends the fixer to remove
+    an argument that is not there (2026-11-21: fifty stage2-dumps docs)."""
     def show(sha):
         return "none recorded (no earlier full-gate run covered this job)" if not sha else "`%s` %s" % (sha[:10], subj_of(sha))
     fb = e.get("first_bad")
-    if e.get("registered") is False:
+    if e.get("marked") is not True and e.get("registered") is False:
         # A fanout item (`bootstrap-stage2-dumps:fib_jit.mojo`) is not a
         # registration of its own, so set_disabled wrote nothing and there is no
-        # marker for a fixer to remove. The boilerplate that said there was is
-        # what sent the fifty stage2-dumps docs of 2026-11-21 after an argument
-        # that could not exist.
+        # marker for a fixer to remove.
         skipped = ("- **No marker:** `%s` is one item of the `%s` fanout and "
                    "has no registration of its own, so there is no `disabled=` "
                    "argument to remove: the gate runs it as part of that fanout. "
                    "Fix the cause (when a producer is what is off, its doc is the "
                    "switch), make the item pass, and delete this doc in the same "
                    "commit." % (job, job.split(":", 1)[0]))
+    elif e.get("marked") is not True:
+        # Registered, but the splice wrote no marker: the registration already
+        # carries an expect=/disabled= marker a person wrote, which the ledger
+        # never overwrites. There is still no switch naming this doc to remove.
+        skipped = ("- **No marker:** the ledger wrote no `disabled=` argument naming this doc for `%s` "
+                   "(its registration already carries an `expect=`/`disabled=` marker somebody wrote, which "
+                   "the ledger does not overwrite), so there is no switch to remove: the gate RUNS this job "
+                   "and it fails. Fix the cause (if that existing marker is the switch, it is what has to "
+                   "change), make the job pass, and delete this doc in the same commit." % job)
     else:
         skipped = ("- **Skipped:** the job's registration in `tools/suite.py` carries `disabled='%s'`, so the gate spends no time on it. "
                    "To fix it: remove the `disabled=` argument, make the job pass, and delete this doc in the same commit."

@@ -125,6 +125,17 @@ def write_doc(job, e, sha, log):
     """bugs/gate-<job>.md in VERIFY: created if absent, and its `## Gate ledger` section replaced if present."""
     p = os.path.join(VERIFY, "bugs", "gate-%s.md" % job)
     sect = G.report_text(job, e, sha, log, subject)
+    if e.get("registered") is False:
+        # A fanout ITEM is not a registration: `python3 tools/suite.py <item>` is
+        # rejected before the runner starts (`no such bucket or test`), and
+        # `--only '<item>'` matches nothing. The runnable unit is the parent, and
+        # the item's own verdict is one line in the log.
+        repro = ("Reproduce on master by running its parent fanout (`python3 tools/suite.py %s`) and reading the "
+                 "`%s` line out of `build/suite.log`: an item is expanded out of `fanout(...)` and is not a job "
+                 "in `tools/suite.py`, so it cannot be run by name. Then fix the cause."
+                 % (job.split(":", 1)[0], job))
+    else:
+        repro = "Reproduce on master (`python3 tools/suite.py %s`), then fix the cause." % job
     if os.path.exists(p):
         txt = open(p).read()
         m = re.search(r"^## Gate ledger\n.*?(?=^## |\Z)", txt, re.S | re.M)
@@ -136,8 +147,8 @@ def write_doc(job, e, sha, log):
     else:
         txt = ("# Gate: %s is red on master\n\n**Job:** `%s`. Filed by the full gate at `%s`.\n"
                "**Two states:** this doc exists = the job is red and this is the work. Delete it when the job is green "
-               "on master.\n\nReproduce on master (`python3 tools/suite.py %s`), then fix the cause.\n\n%s"
-               % (job, job, sha[:10], job, sect))
+               "on master.\n\n%s\n\n%s"
+               % (job, job, sha[:10], repro, sect))
     os.makedirs(os.path.dirname(p), exist_ok=True)
     open(p, "w").write(txt)
 
