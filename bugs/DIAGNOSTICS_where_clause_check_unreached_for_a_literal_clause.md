@@ -40,10 +40,15 @@ FAIL test_integer_literal_where_still_enforced   (wants "requirement 'x < 2' is 
 PASS test_unfolderable_alias_clause_stays_accepted
 ```
 
-The check IS wired into the compiler: `monomorphize.instantiate` calls
-`elaborate.check_where_clauses` (`fire.ci`'s `elaborate_check_where_clauses_4d4627`,
-generated from `monomorphize.py:1003`). So the alias spelling reaches it and the
-literal spelling does not, though both are `f[5]()` over the same shape.
+The check IS wired into the compiler in two places: `monomorphize.instantiate`
+(`elaborate.check_where_clauses('', template_src, type_args or {})`, visible as
+`fire.ci`'s `elaborate_check_where_clauses_4d4627`) and
+`module_gen._check_fn_signature_binding_violations`
+(`check_where_clauses(module_src, tmpl, targs)`). Neither is on the obvious
+`f[5]()` call path, and the one that passes a real `module_src` only runs for a
+generic-struct mention in a signature -- so what produces the alias case's
+string is NOT yet pinned down. It is only established that the alias case's
+expected text IS in its output and the literal case's is not.
 
 The refusal the literal case does get is the GIMPLE backend's
 (`invalid call to 'f': violated constraint`, plus the note `expected '(x < Int(2))'`)
@@ -53,10 +58,12 @@ The refusal the literal case does get is the GIMPLE backend's
 ## Two readings, and the step that decides them
 
 1. The check is not reached for a clause over a bound parameter and a literal.
-   Compare what each path hands `check_where_clauses`: `f[5]` passes `5` as a
-   COMPTIME arg, and `instantiate` forwards `type_args` -- so `x` may be absent
-   from the bindings the folder sees, which would make it CONST_UNKNOWN (no raise)
-   while the alias case still resolves `LIMIT` from the module.
+   First pin down what emits the alias case's text (grep the output of
+   `build_refusal` for it and break on `elaborate.py:2913` under a debugger);
+   then compare the bindings each path hands the folder. `f[5]` passes `5` as a
+   COMPTIME arg while `instantiate` forwards `type_args`, so `x` may be absent
+   from what the folder sees -- which would make it CONST_UNKNOWN (no raise)
+   while the alias case still resolves `LIMIT` from the module source.
 2. The test's expectation is the driver/stage2 wording, and the Python path is
    meant to say `violated constraint` -- in which case this case should assert
    that. `test_binding_deferral_diagnostic.py` asserts BOTH strings through
