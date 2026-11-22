@@ -115,6 +115,18 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "mojo/middle/solvers.py::ClosureInfo.__init__": "the solver's own record",
     "mojo/middle/solvers.py::DispatchTable.__init__": "ditto",
     "mojo/middle/solvers.py::DispatchTable.add_method": "ditto",
+    # The stage-5b value record (mojo/middle/valueinfo.py) is the backend's own
+    # per-temp fact table, not an AST node; `kind` is its one word kind (Int /
+    # Erased / DynWord / Box), which happens to share a name with
+    # `Comprehension.kind`. Writing it cannot stale a walk memo.
+    "mojo/middle/valueinfo.py::ValueInfo.__init__": "the value record's own dataclass, not an AST node",
+    "mojo/middle/valueinfo.py::WordFacts.mark_boxed": "ditto",
+    "mojo/middle/valueinfo.py::WordFacts.mark_tagged": "ditto",
+    "mojo/middle/valueinfo.py::WordFacts.mark_dyn": "ditto",
+    "mojo/middle/valueinfo.py::WordFacts.mark_int_word": "ditto",
+    "mojo/middle/valueinfo.py::WordFacts.unmark_int_word": "ditto",
+    "mojo/middle/valueinfo.py::WordFacts.snapshot": "ditto",
+    "mojo/middle/valueinfo.py::WordFacts.carry": "ditto",
 }
 
 
@@ -980,6 +992,140 @@ def box_bystander(d):
             for line in stderr.splitlines()[:6]:
                 print(f"      {line}")
         _FAIL += 1
+
+
+def test_word_facts_one_record_per_temp():
+    """`WordFacts` stores ONE record per temp; the six historical sets are
+    read-only views over it (doc/GIR.md stage 5b step 4).
+
+    This is the storage half of stage 5b. The six name-keyed sets could say
+    `boxed` and `dyn` at once for the same temp, and `boxed` alone meant both
+    "this word may be a heap box, render it by kind" and "this word needs
+    unboxing" — so a copy had to drop the fact (carrying it either way was
+    wrong for some reader). The record has a KIND (Int / Erased / DynWord /
+    Box / Plain) plus the three flags that are not a kind (Tagged,
+    SlotKinds, BoxedContainer), which is what lets a reader ask the question
+    the old sets conflated.
+
+    Box and Tagged do not travel through `WordFacts.carry` AS SUCH: a copied
+    box becomes a `DynWord` (the read-side fact) and the Tagged flag stays
+    with the Box kind. That boundary is measured and recorded in the method's
+    own docstring (carrying the Box kind makes a self-host-closure module
+    refuse to compile, because the bind path reads the value's tag as a
+    decision about the NAME). This test pins that boundary too, so the next
+    step has to change it on purpose.
+
+    Pinned here rather than through a `.mojo` program because the record
+    mostly changes what the backend KNOWS: its C changes on 9 of the 285
+    corpus programs and all 9 were already WRONG/CRASH against CPython, so an
+    end-to-end test cannot tell the record from the facts it stores. The
+    value-carrying half is pinned end to end by `test_gimple_runner.py`'s
+    `test_copy_of_a_dynamic_word_keeps_it`.
+    """
+    global _PASS, _FAIL
+    name = "word_facts_one_record_per_temp"
+    try:
+        from mojo.middle.valueinfo import WordFacts
+    except ImportError as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+        return
+    problems = []
+
+    def want(cond, why):
+        if not cond:
+            problems.append(why)
+
+    empty = WordFacts()
+    want(not empty.may_be_box('x') and not empty.is_tagged('x')
+         and not empty.is_dyn('x') and not empty.is_int_word('x'),
+         "a fresh WordFacts knows nothing")
+    want(empty.boxed == set() and empty.tagged == set()
+         and empty.dyn == set() and empty.int_word == set(),
+         "a read must not create a record")
+
+    # A tagged box: the two facts the old pair of sets needed, in ONE record.
+    w = WordFacts()
+    w.mark_tagged('t')
+    want(w.may_be_box('t'), "a tagged word is a box")
+    want(w.is_tagged('t'), "mark_tagged records the tag")
+    want(w.is_dyn('t'),
+         "a box is a word whose kind only the runtime knows")
+    want(not w.is_int_word('t'), "a box is never a proven integer")
+    want('t' in w.boxed and 't' in w.tagged and 't' not in w.int_word,
+         "the historical sets are views over the record")
+    w.boxed.add('not-a-record')
+    want(not w.may_be_box('not-a-record'),
+         "`boxed` is a READ-ONLY view: adding to it must not create a fact")
+    want('not-a-record' not in w.boxed,
+         "the view is derived from the record on every read")
+
+    # The record picks ONE kind when two marks contradict: a box is an
+    # observation of a heap cell, and an integer proof is about bits a
+    # producer computed, so a box seen at the temp outranks it — in either
+    # order — and a later 'dynamic word' mark does not erase the box.
+    w.mark_dyn('t')
+    want(w.may_be_box('t'), "mark_dyn does not demote a box")
+    w.mark_int_word('i')
+    w.mark_boxed('i')
+    want(w.may_be_box('i') and not w.is_int_word('i'),
+         "a box seen at a temp outranks an earlier integer proof")
+    w.mark_int_word('i')
+    want(w.may_be_box('i') and not w.is_int_word('i'),
+         "a later integer mark cannot unmake a box")
+
+    # The proven-integer half still travels with a copy, and can be withdrawn.
+    w.mark_int_word('n')
+    w.carry('n2', 'n')
+    want(w.is_int_word('n2'), "a copy of a proven integer is proven too")
+    w.unmark_int_word('n2')
+    want(not w.is_int_word('n2'), "unmark_int_word withdraws the proof")
+
+    # The facts that are not a kind travel with a copy as well.
+    w.mark_slot_kinds('k')
+    w.carry('k2', 'k')
+    want(w.has_slot_kinds('k2'), "per-slot kinds travel with a copy")
+    w.mark_boxed_container('c')
+    w.carry('c2', 'c')
+    want(w.is_boxed_container('c2'), "an unknown container kind travels too")
+
+    # THE CARRY BOUNDARY (see `carry`'s docstring): a copy gets the READ-side
+    # half of a box (the runtime decides the kind) but not the BIND-side one
+    # (the copy is not claimed to be a heap box a name must unbox), and the
+    # Tagged flag stays with the Box kind it modifies.
+    w.mark_boxed('b')
+    w.mark_tagged('tb')
+    w.carry('b2', 'b')
+    w.carry('tb2', 'tb')
+    want(w.is_dyn('b2'),
+         "a copy of a box is a word whose kind the runtime decides")
+    want(not w.may_be_box('b2'),
+         "Box itself does not travel through a copy (see carry's docstring)")
+    want(w.is_dyn('tb2') and not w.is_tagged('tb2'),
+         "Tagged does not travel either; the tag belongs to the Box kind")
+
+    # A nested body saves and restores the whole record map.
+    snap = w.snapshot()
+    w.mark_dyn('extra')
+    w.restore_snapshot(snap)
+    want(not w.is_dyn('extra'), "restore_snapshot drops post-snapshot records")
+    want(w.may_be_box('t') and w.is_tagged('t'),
+         "restore_snapshot puts the saved records back")
+
+    # One record per temp, not one per fact: asking the views does not split
+    # a temp across several containers.
+    solo = WordFacts()
+    solo.mark_boxed('v')
+    solo.mark_tagged('v')
+    want(solo.boxed == {'v'} and solo.tagged == {'v'},
+         "one temp is one record, whatever the number of facts")
+
+    if problems:
+        print(f"FAIL  {name}: " + "; ".join(problems))
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}")
+        _PASS += 1
 
 
 def test_gimple_operators_are_actually_gimple():
@@ -2255,6 +2401,8 @@ def main():
     # Same defect, same table family, in the BOX marker that sat next to it
     # with the fix omitted.
     _run_isolated(lambda: test_box_marker_scope(), 'test_box_marker_scope (line 1074)')
+    # Stage 5b step 4: one ValueInfo record per temp; the six sets are views.
+    _run_isolated(lambda: test_word_facts_one_record_per_temp(), 'test_word_facts_one_record_per_temp (line 1076)')
     # `!x` and `a && b` are not GIMPLE, and a `__GIMPLE` body must be.
     _run_isolated(lambda: test_gimple_operators_are_actually_gimple(), 'test_gimple_operators_are_actually_gimple (line 1076)')
     # A local rebound to a different struct has no single pointer type.

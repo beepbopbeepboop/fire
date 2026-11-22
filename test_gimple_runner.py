@@ -16058,6 +16058,7 @@ def main():
                   test_and_chain_with_a_bool_call_and_an_empty_list_caller,
                   test_none_beside_a_scalar_arm_returns_the_tagged_word,
                   test_copy_of_a_tagged_none_keeps_it,
+                  test_copy_of_a_dynamic_word_keeps_it,
                   test_fstring_format_specs_match_cpython,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
@@ -17542,6 +17543,30 @@ def main():
         print(b)
     for c in make(["x", "y"]):
         print(c)
+main()
+""")
+
+
+def test_copy_of_a_dynamic_word_keeps_it():
+    """A word of unknown kind (`_dyn_word_vals`: a slot read from a container
+    whose element kinds only the runtime knows) lost that fact at a copy, so
+    the copy was added as a plain integer. `xs = [1.5, 2, None]` boxes the
+    double; `v = xs[0]; w = v; print(w + 1)` added the BOX POINTER to 1 and
+    printed 4350185905 where CPython prints 2.5. `gen._copy` now carries the
+    word facts (`WordFacts.carry`), so the copy stays dynamic and `+` asks the
+    runtime for the kind (`mojo_add_words`)."""
+    test_gimple_matches_cpython("gimple_copy_of_a_dynamic_word", """\
+def main():
+    xs = [1.5, 2, None]
+    v = xs[0]
+    w = v
+    print(w + 1)
+    u = w
+    print(u + 1)
+    n = xs[1]
+    m = n
+    print(m + 1)
+
 main()
 """)
 

@@ -191,9 +191,9 @@ _INT_ARITH_OPS = frozenset(('+', '-', '*', '/', '&', '|', '^', '~', '<<', '>>', 
 
 def _mark_known_int(gen, operand_vals: list, res_type: str,
                     res_val: str) -> None:
-    """Record `res_val` in `gen._int_word_vals` when every value in
-    `operand_vals` is already recorded there and `res_type` is a plain
-    integer.
+    """Record `res_val` as a proven integer (`gen._word_mark_int_word`) when
+    every value in `operand_vals` is already recorded there and `res_type` is
+    a plain integer.
 
     `_lower_IntLiteral` seeds that set with integer LITERALS, which is enough
     for `d[3000000000] = 1` and for a local bound from one — but not for the
@@ -223,11 +223,10 @@ def _mark_known_int(gen, operand_vals: list, res_type: str,
     """
     if not gimple_ctypes.TypeLattice.is_int_word(res_type):
         return
-    _iwv = gen._words.int_word
     for _v in operand_vals:
-        if _v not in _iwv:
+        if not gen._word_is_int_word(_v):
             return
-    _iwv.add(res_val)
+    gen._word_mark_int_word(res_val)
 
 
 def _lower_IntLiteral(gen, node) -> tuple[str, str]:
@@ -4411,10 +4410,8 @@ def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
     whatever the box holds, and the tail's double arm already gives that."""
     if op not in ginf._FLOAT_PARAM_OPS:
         return None
-    _tagged = gen._words.tagged
-    _boxed = gen._words.boxed
-    _tag_l = lv in _tagged and lv in _boxed
-    _tag_r = rv in _tagged and rv in _boxed
+    _tag_l = gen._word_is_tagged(lv)
+    _tag_r = gen._word_is_tagged(rv)
     if not (_tag_l or _tag_r):
         return None
     if not gimple_ctypes.TypeLattice.is_int_word(lt) or not gimple_ctypes.TypeLattice.is_int_word(rt):
@@ -4456,10 +4453,8 @@ def _tagged_cmp_select(gen, op: str, left_node, lt: str, lv: str,
     temp (`_Bool`), or None when the shape does not apply."""
     if op not in ('<', '<=', '>', '>='):
         return None
-    _tagged = gen._words.tagged
-    _boxed = gen._words.boxed
-    _tag_l = lv in _tagged and lv in _boxed
-    _tag_r = rv in _tagged and rv in _boxed
+    _tag_l = gen._word_is_tagged(lv)
+    _tag_r = gen._word_is_tagged(rv)
     if not (_tag_l or _tag_r):
         return None
     if not gimple_ctypes.TypeLattice.is_int_word(lt) or not gimple_ctypes.TypeLattice.is_int_word(rt):
@@ -4798,7 +4793,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # boxed operand keeps the word compare: a list or tuple slot that is None
     # is a bare NULL word with no box, which the kind read would call "not
     # None" (pinned by `run_tagged_none_identity_tests`).
-    _tagged = gen._words.tagged
     if op in ('==', '!=', 'is', 'is not') and _is_none_literal(left_node) != _is_none_literal(right_node):
         _other = rv if _is_none_literal(left_node) else lv
         _other_t = rt if _is_none_literal(left_node) else lt
@@ -4820,7 +4814,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # A float box answers 0 here, which is the right answer for a float.
         if (gimple_ctypes.TypeLattice.is_int_word(_other_t)
                 and (gen._word_may_be_box(_other) or _mixed_none)
-                and (not _ident or _other in _tagged or _for_tagged or _mixed_none)):
+                and (not _ident or gen._word_is_tagged(_other)
+                     or _for_tagged or _mixed_none)):
             _is_none = gen._call_expr('int', 'mojo_word_is_none', [('int64_t', _other)])
             _cmp = '!= 0' if op in ('==', 'is') else '== 0'
             _t = gen._new_temp('_Bool')
@@ -4982,7 +4977,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # above answers it by the box's kind. The arm below serves what is left:
     # the comparisons and bitwise operators beside an int, which keep the
     # truncating read (`mojo_box_int`).
-    _tagged = gen._words.tagged
     # A tagged word beside an integer under arithmetic: the run-time select
     # by the box's kind (see `_tagged_arith_select`).
     _tsel = _tagged_arith_select(gen, op, left_node, lt, lv, right_node, rt, rv)
@@ -4999,10 +4993,9 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # the integer-operand case. A str operand is not numeric and is excluded:
     # `x + "!"` keeps its concatenation lowering.
     if op in ginf._FLOAT_PARAM_OPS:
-        _boxed = gen._words.boxed
-        if lv in _tagged and lv in _boxed and (gimple_ctypes.TypeLattice.is_int_word(rt) or gimple_ctypes.TypeLattice.is_float(rt)):
+        if gen._word_is_tagged(lv) and (gimple_ctypes.TypeLattice.is_int_word(rt) or gimple_ctypes.TypeLattice.is_float(rt)):
             lv = _none_arith_guard(gen, op, lv, _numeric_type_name(rt), 1)
-        if rv in _tagged and rv in _boxed and (gimple_ctypes.TypeLattice.is_int_word(lt) or gimple_ctypes.TypeLattice.is_float(lt)):
+        if gen._word_is_tagged(rv) and (gimple_ctypes.TypeLattice.is_int_word(lt) or gimple_ctypes.TypeLattice.is_float(lt)):
             rv = _none_arith_guard(gen, op, rv, _numeric_type_name(lt), 0)
     # A BOXED operand beside a str under `+` is a string concatenation, for any
     # boxed value and not only a tagged word: Python's `int + str` and
@@ -5038,7 +5031,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             lv = gen._rt_call('int64_t', 'mojo_box_word', [f"{lv}"])
             lt = 'int64_t'
             gen._word_mark_dyn(lv)
-        elif lv in _tagged and rt not in ('double', 'float'):
+        elif gen._word_is_tagged(lv) and rt not in ('double', 'float'):
             lv = gen._rt_call('int64_t', 'mojo_box_int', [f"{lv}"])
             lt = 'int64_t'
         elif not _lv_ptr_kind:
@@ -5054,7 +5047,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             rv = gen._rt_call('int64_t', 'mojo_box_word', [f"{rv}"])
             rt = 'int64_t'
             gen._word_mark_dyn(rv)
-        elif rv in _tagged and lt not in ('double', 'float'):
+        elif gen._word_is_tagged(rv) and lt not in ('double', 'float'):
             rv = gen._rt_call('int64_t', 'mojo_box_int', [f"{rv}"])
             rt = 'int64_t'
         elif not _rv_ptr_kind:
