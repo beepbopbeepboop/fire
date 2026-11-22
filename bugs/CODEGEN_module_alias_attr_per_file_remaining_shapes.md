@@ -2,7 +2,8 @@
 
 Found 2026-11-21 while extending `test_codegen_module_alias_function_value.py`
 for the `CODEGEN_selfhost_stage2_attributeerror_comptimevar_node` fix (that
-doc is deleted with its fix; this doc is what is LEFT).
+doc stays open until the bootstrap chain it needs is re-enabled; this doc is
+what is LEFT of the same per-file shape).
 
 The path is the per-file compile — `compile_to_gimple(..., do_imports=False)` /
 `build_stdlib_dylib.compile_module_to_c`, the shape every

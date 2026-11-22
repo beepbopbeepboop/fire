@@ -3,8 +3,9 @@
 `import MOD as alias`, in the per-file (`do_imports=False`) single-module
 compile the bootstrap `--dump` stages use.
 
-Bug (fixed here; the `CODEGEN_selfhost_stage2_attributeerror_comptimevar_node`
-doc is deleted with this fix): `_lower_MemberExpr` answered
+Bug (fixed here; `bugs/CODEGEN_selfhost_stage2_attributeerror_comptimevar_node.md`
+stays open until the bootstrap chain it needs is re-enabled, and this file is
+its named quick pin): `_lower_MemberExpr` answered
 "the function `f` as a bare C value" only when `f` was already in
 `func_return_types` — a table that holds THIS module's own `def`s plus the
 defs of modules a whole-program INLINE compile pulled in. A per-file compile
