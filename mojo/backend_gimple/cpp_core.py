@@ -7536,7 +7536,7 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         # else is an honest refusal" fallback (unrecognized await
         # target, socket ops, ...), so no separate check is needed
         # in this branch.
-        return [f"{indent}{gen._cpp_expr(s.value)};"]
+        return [_cpp_ir_line(indent, 'expr', gen._cpp_expr(s.value))]
     # `print(...)`'s `end=`/`flush=` keyword arguments — real Python
     # tools commonly write `print(x, end='')` (suppress the trailing
     # newline) or `print(x, flush=True)` (force an unbuffered write,
@@ -7790,14 +7790,14 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 f"{indent}abort();"]
     # Bare CallExpr as statement: func(args)
     if isinstance(s.value, gimple_ctypes.CallExpr):
-        return [f"{indent}{gen._cpp_expr(s.value)};"]
+        return [_cpp_ir_line(indent, 'expr', gen._cpp_expr(s.value))]
     # Any other expression statement (`1/0`, test_frame's `g`): Python
     # evaluates it for its side effects and discards the value, so the
     # statement is its expression evaluated and cast to void. A bare
     # `1/0` is what raises ZeroDivisionError here — its divisor is a
     # runtime mojo_int_divisor call, not a constant the C++ compiler
     # rejects as a constant-expression division by zero.
-    return [f"{indent}(void)({gen._cpp_expr(s.value)});"]
+    return [_cpp_ir_line(indent, 'expr', f"(void)({gen._cpp_expr(s.value)})")]
 
 
 def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
