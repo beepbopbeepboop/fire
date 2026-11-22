@@ -72,6 +72,12 @@ BASELINE = {
     'myinterpreter.py': 2,
     'recover/save.md': 110,
     'reflect.py': 1,
+    # 2026-11-21: the fanout-skip test pins the ABSENCE of a dropped land doc
+    # (the branch it assessed only edited an item doc master had deleted), so
+    # the deleted filename is the property under test, like the negative
+    # controls above. Raised with --write-baseline and the why restored by hand
+    # because regeneration also drops `test_integrate_probe_loop.py`'s comment.
+    'test_bootstrap_stage2_dumps_skip.py': 1,
     'test_dataclasses_formal.py': 1,
     'test_doc_refs_ratchet_regress.py': 2,
     'test_dunder_repr_pinned.py': 1,
