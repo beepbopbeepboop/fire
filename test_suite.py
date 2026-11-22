@@ -2822,14 +2822,23 @@ def test_a_disabled_test_is_registered_but_never_runs():
     naming the disabled dep and the doc that is the switch, the same shape as
     the dependent of a failed dep. So `needs` skips, and the skip says why.
 
+    `sweep` pins the FANOUT shape, which is the one that actually produced the
+    fifty docs and is not implied by `needs`: a fanout is expanded into one
+    job per item BEFORE the scheduler looks at deps, so "the dependent test
+    skipped" is not the same claim as "none of its items ran". Every item must
+    carry its own skip and its own naming of the doc, because that per-item
+    line is what a reader uses to tell one missing artifact from forty-six.
+
     Which job ran is read from the log's own per-job line, not from its output
     and not from a grep for the command: the runner logs every job's argv, so a
     substring of the command is in the log whether or not the command ran.
     """
     ran = os.path.join(HERE, 'build', 'test-suite-disabled.ran')
+    fan_ran = os.path.join(HERE, 'build', 'test-suite-disabled-fanout.ran')
     log = os.path.join(HERE, 'build', 'test-suite-disabled.log')
-    if os.path.exists(ran):
-        os.unlink(ran)
+    for p in (ran, fan_ran):
+        if os.path.exists(p):
+            os.unlink(p)
     os.makedirs(os.path.dirname(ran), exist_ok=True)
     # A doc that really exists, so the case is the shipped shape and not a
     # marker that only the checker under test would accept.
@@ -2837,9 +2846,15 @@ def test_a_disabled_test_is_registered_but_never_runs():
                           mem='program', disabled=suite.MEM_DEBT_DOC),
                  needs=dict(cmd=ok_cmd('print("ran anyway")'),
                             deps=['off']),
-                 on=dict(cmd=ok_cmd('print("unrelated")'))):
-        rc, out = run(['off', 'needs', 'on'], jobs=3, log=log, quiet=False)
-        jobs, per_test = suite.plan_for(['off', 'needs', 'on'], _FakeOpts())
+                 on=dict(cmd=ok_cmd('print("unrelated")')),
+                 sweep=suite.Fanout(
+                     name='sweep',
+                     cmd=ok_cmd(f'open({fan_ran!r}, "a").write("x")'),
+                     items=['a', 'b'], mem='tiny', deps=['off'])):
+        rc, out = run(['off', 'needs', 'on', 'sweep'], jobs=3, log=log,
+                      quiet=False)
+        jobs, per_test = suite.plan_for(['off', 'needs', 'on', 'sweep'],
+                                        _FakeOpts())
         # The reservation, on the synthetic spec: `reserved_gb` is what the
         # scheduler asks the ledger for, and a disabled job that returned its
         # class would hold 55 GB of a 96 GB budget for a process it never
@@ -2852,7 +2867,7 @@ def test_a_disabled_test_is_registered_but_never_runs():
     check('disabled: the job never started', not os.path.exists(ran),
           'the disabled test ran: this is the whole point of the field')
     check('disabled: it is planned as zero jobs', per_test['off'] == 0
-          and [j.spec.name for j in jobs] == ['needs', 'on'],
+          and [j.spec.name for j in jobs] == ['needs', 'on', 'sweep', 'sweep'],
           f'{per_test} / {[j.spec.name for j in jobs]}')
     check('disabled: it reserves NOTHING from the ledger, not even its class',
           reserved == 0 and ceiling == 55,
@@ -2864,6 +2879,25 @@ def test_a_disabled_test_is_registered_but_never_runs():
           and suite.MEM_DEBT_DOC in text,
           'a disabled producer must stop its dependent with the doc named '
           '(the switch), not let it run into the missing artifact')
+    # The fanout's ITEMS, read out of the PER-TEST table, which is where each
+    # job's verdict is paired with its own skip reason. The progress lines
+    # alone say the items skipped; the reason under each one says why, and a
+    # fix that skipped the fanout wholesale would leave these rows empty.
+    item_reasons = {}
+    for i, line in enumerate(text.splitlines()):
+        m = re.match(r'^ {6}skip\s+sweep:(\w+)\b', line)
+        if m and i + 1 < len(text.splitlines()):
+            item_reasons[m.group(1)] = text.splitlines()[i + 1]
+    check('disabled: a fanout dependent runs NONE of its items',
+          not os.path.exists(fan_ran)
+          and sorted(item_reasons) == ['a', 'b'],
+          f'the fanout ran ({os.path.exists(fan_ran)}); reported items '
+          f'{sorted(item_reasons)}')
+    check('disabled: ...and every item names the doc that is the switch',
+          item_reasons and all('dependency is disabled: off' in r
+                               and suite.MEM_DEBT_DOC in r
+                               for r in item_reasons.values()),
+          f'{item_reasons}')
     check('disabled: it is in the tally as its own status',
           '1 disabled' in out, f'expected a disabled counter: {out!r}')
     check('disabled: ...and it is listed with the doc, in its own section',
