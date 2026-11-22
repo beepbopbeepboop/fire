@@ -2879,6 +2879,43 @@ def test_a_disabled_test_is_registered_but_never_runs():
           'the run log must say the job was skipped on purpose, and that its '
           f'class is a record: {[l for l in text.splitlines() if "plan: off" in l]}')
 
+    # The FANOUT shape, which is the one that actually happened: the case above
+    # is a single dependent job, but the producer that was doc'd off
+    # (bootstrap-stage2-cc) sat above a FIFTY-ITEM fanout, and before
+    # 416ed660c every item ran into the missing artifact and failed in a
+    # second, so one red producer was filed as fifty docs for one bug (gate
+    # c0182fd3). A fanout expands into one job per item, so it is the case
+    # where "the dependent SKIPs" has to hold per item, and where the tally
+    # has to report ONE skipped test rather than three failures.
+    fanned_ran = os.path.join(HERE, 'build', 'test-suite-disabled-fanout.ran')
+    flog = os.path.join(HERE, 'build', 'test-suite-disabled-fanout.log')
+    if os.path.exists(fanned_ran):
+        os.unlink(fanned_ran)
+    with Sandbox(off=dict(cmd=ok_cmd('print("never")'),
+                          mem='program', disabled=suite.MEM_DEBT_DOC),
+                 sweep=suite.Fanout(
+                     name='sweep',
+                     cmd=ok_cmd(f'open({fanned_ran!r}, "a").write("x")'),
+                     items=['a', 'b', 'c'], mem='tiny', deps=['off'])):
+        frc, fout = run(['off', 'sweep'], jobs=3, log=flog, quiet=False)
+        fjobs, fper = suite.plan_for(['off', 'sweep'], _FakeOpts())
+        ftext = open(flog).read() if os.path.exists(flog) else ''
+    check('disabled: a fanout behind it spawns no item',
+          not os.path.exists(fanned_ran),
+          'one disabled producer must not run a fanout into the artifact it '
+          'never built')
+    check('disabled: ...every item SKIPs, naming the doc, not one red apiece',
+          len(re.findall(r'(?m)^\[\s*\d+/\d+\]\s+skip\s+sweep:', ftext)) == 3
+          and ftext.count('dependency is disabled: off') >= 3
+          and suite.MEM_DEBT_DOC in ftext,
+          f'expected three per-item skips naming the switch: '
+          f'{[l for l in ftext.splitlines() if "sweep:" in l]}')
+    check('disabled: ...and the fanout is ONE skipped test, not three failures',
+          frc == 0 and '0 failed' in fout and '1 skipped' in fout
+          and fper['sweep'] == 3 and [j.spec.name for j in fjobs] == ['sweep'] * 3,
+          f'rc={frc}, per_test={fper}, jobs={[j.spec.name for j in fjobs]}, '
+          f'out={fout!r}')
+
     # The real-registry half: disabled jobs in the registry are known-red and
     # too expensive or otherwise inappropriate to run, so each must be named
     # here and have its reserves-0 / --list / --dry-run properties re-asserted.
