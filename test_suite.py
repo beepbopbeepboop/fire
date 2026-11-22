@@ -256,6 +256,33 @@ def test_reject_pattern():
               'mojo_unsupported_iter' in out or True, '')
 
 
+def test_known_bugs_matches_a_fanout_item_and_its_parent():
+    """A per-item gate doc is found from the ITEM name and from its parent.
+
+    Regression: `known_bugs` split the job name on `[-_]` but the file name on
+    `[-_.]`, so a fanout item (`<parent>:<file>`) matched neither its own
+    `bugs/gate-<parent>:<file>.md` doc nor, as the parent, any of them. At gate
+    c0182fd3 fifty per-item docs were on disk and the gate printed
+    `NEW: no bug doc tracks this job` for the parent -- the signal that tells a
+    reader a red is a repeat rather than a fresh break.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        bugs = os.path.join(d, 'bugs')
+        os.makedirs(bugs)
+        for f in ('gate-bootstrap-stage2-dumps:test_sqlite3_simple.mojo.md',
+                  'gate-gimple.md'):
+            open(os.path.join(bugs, f), 'w').write('# Gate: something is red\n')
+        got = suite.known_bugs('bootstrap-stage2-dumps:test_sqlite3_simple.mojo',
+                               bugs_dir=bugs)
+        check('known_bugs: a fanout item finds its own doc',
+              got == ['bugs/gate-bootstrap-stage2-dumps:test_sqlite3_simple.mojo.md'], got)
+        got = suite.known_bugs('bootstrap-stage2-dumps', bugs_dir=bugs)
+        check('known_bugs: the parent finds its items docs',
+              got == ['bugs/gate-bootstrap-stage2-dumps:test_sqlite3_simple.mojo.md'], got)
+        check('known_bugs: an unrelated doc is still not claimed',
+              suite.known_bugs('formal-json', bugs_dir=bugs) == [], got)
+
+
 def test_mem_driver():
     """A mem job that breaches is RESOURCE, not FAIL — and a mem job inside
     its ceiling passes, with the ceiling in the log."""
@@ -7353,7 +7380,9 @@ def test_apply_peaks_rewrites_the_table_from_a_log_and_trusts_only_real_runs():
 
 
 def main():
-    for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
+    for fn in (test_cmd_driver, test_reject_pattern,
+               test_known_bugs_matches_a_fanout_item_and_its_parent,
+               test_mem_driver,
                test_make_driver, test_j_forwarded,
                test_deps_order_and_skip,
                test_a_cascade_skip_is_a_skip_not_an_error,
