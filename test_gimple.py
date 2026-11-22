@@ -8267,6 +8267,52 @@ def root_cas_hash_call(parts) -> str:
 
     _run_isolated(lambda: test_known_function_not_shadowed_by_global_fnptr(), 'test_known_function_not_shadowed_by_global_fnptr (line 6740)')
 
+    def test_import_cas_does_not_inline_the_compiler_closure():
+        """A compile whose ONLY import is `cas` must not inline the compiler.
+
+        Regression for the `gimple` job's 6.5-6.8 GB peak (its class is `tiny`,
+        4 GB): `cas.stdlib_fingerprint()` used a FUNCTION-SCOPED
+        `from module_loader import STDLIB_PATH`, and this compiler inlines a
+        function-scoped import's whole module — so this four-line snippet
+        inlined all 78 compiler sources (123 MB of generated C, 6.5 GB peak).
+        The finder lives in the leaf `stdlib_path` module now; the closure must
+        stay proportional to `cas` instead.
+        """
+        global _PASS, _FAIL
+        name = "import_cas_does_not_inline_the_compiler_closure"
+        src = """\
+import cas
+def root_cas_hash_call(parts) -> str:
+    return cas._hash(*parts)
+"""
+        try:
+            c_src = compile_to_gimple(
+                src, do_imports=True,
+                filename=os.path.join(_PROJECT_DIR, "fire.py"))
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        problems = []
+        # `#line` names every source a statement was emitted from, so this is a
+        # test on the emitted code, not on a comment marker.
+        for mod in ('module_loader.py', 'gimple_codegen.py'):
+            if f'"{os.path.join(_PROJECT_DIR, mod)}"' in c_src:
+                problems.append(f'{mod} is in the closure of `import cas`')
+        # 123 MB before the fix, 0.5 MB after; the ceiling only has to distinguish
+        # "cas and its two leaf imports" from "the whole compiler".
+        if len(c_src) > 8_000_000:
+            problems.append(f'{len(c_src)} bytes of C for `import cas`')
+        if problems:
+            print(f"FAIL  {name}: " + '; '.join(problems))
+            _FAIL += 1
+        else:
+            print(f"PASS  {name}  {len(c_src)} bytes")
+            _PASS += 1
+
+    _run_isolated(lambda: test_import_cas_does_not_inline_the_compiler_closure(),
+                  'import_cas_does_not_inline_the_compiler_closure')
+
     def test_inherited_method_line_directive_names_its_own_module():
         """The inheritance merge copies a base class's method node into the
         subclass, which then emits that body a SECOND time as

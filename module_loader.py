@@ -521,58 +521,18 @@ class _ReflectTable(ctypes.Structure):
                 ('n_syms', ctypes.c_uint32), ('reserved', ctypes.c_uint32),
                 ('syms', ctypes.POINTER(_ReflectSym))]
 
-# The Mojo library checkouts this tree can be built against, most-preferred
-# first.
-_STDLIB_CHECKOUTS = (
-    ('new-modular', 'Mojo/stdlib'),
-    ('modular', 'mojo/stdlib'),
-)
-
-
-def _is_stdlib_root(path):
-    """True if `path` is a Mojo stdlib root rather than some same-named dir.
-
-    Both checkouts keep the importable package tree under `stdlib/std`, so that
-    subdirectory is what distinguishes a real root from, say, a build output
-    directory that happens to be called `stdlib`.
-    """
-    return os.path.isdir(os.path.join(path, 'std'))
-
-
-def _find_stdlib_path() -> str:
-    """Find stdlib path using multiple strategies.
-
-    1. Check MOJO_STDLIB environment variable
-    2. Try each known checkout location (see _STDLIB_CHECKOUTS)
-    3. Search upward from current directory
-    4. Return the first candidate (runtime handles a missing stdlib gracefully)
-    """
-    # Strategy 1: Environment variable override
-    if 'MOJO_STDLIB' in os.environ:
-        path = os.environ['MOJO_STDLIB']
-        if os.path.isdir(path):
-            return path
-
-    # Strategy 2: Known checkout locations, most-preferred first
-    for checkout, rel in _STDLIB_CHECKOUTS:
-        abs_path = f'/Users/mrs/net/chatgpt/claude/{checkout}/{rel}'
-        if _is_stdlib_root(abs_path):
-            return abs_path
-
-    # Strategy 3: Search upward from current working directory
-    cwd = os.path.abspath(os.getcwd())
-    for _ in range(10):  # Search up to 10 levels
-        for checkout, rel in _STDLIB_CHECKOUTS:
-            candidate = os.path.join(cwd, checkout, *rel.split('/'))
-            if _is_stdlib_root(candidate):
-                return candidate
-        cwd = os.path.dirname(cwd)
-        if cwd == '/':
-            break
-
-    # Fallback: return the preferred path (runtime will handle missing stdlib gracefully)
-    return f'/Users/mrs/net/chatgpt/claude/{_STDLIB_CHECKOUTS[0][0]}/{_STDLIB_CHECKOUTS[0][1]}'
-
+# The stdlib path's finder lives in the LEAF module `stdlib_path` (which imports
+# only `os`), not here, and the three finder names are re-exported so every
+# existing caller — tests, tools — keeps importing them from the module it always
+# did; `STDLIB_PATH` is computed here from that finder exactly as before.
+# `cas.stdlib_fingerprint` needs the path too, and it must NOT drag this module
+# into a compile: this module is part of the compiler's own import closure, so a
+# function-scoped `from module_loader import STDLIB_PATH` there inlined the WHOLE
+# compiler (123 MB of C, 6.5 GB peak) into any compile that touched `cas`,
+# RESOURCE-killing the `gimple` job at its 4 GB class. See stdlib_path.py's
+# docstring.
+from stdlib_path import (_STDLIB_CHECKOUTS, _find_stdlib_path,  # noqa: F401  (re-export)
+                         _is_stdlib_root)
 STDLIB_PATH = _find_stdlib_path()
 TEST_PATH = os.path.join(HERE, 'runtime')  # For test modules
 
