@@ -35,6 +35,7 @@ import ast_rewriter
 import regex_compile
 import mlir
 import mojo.middle.types as gimple_ctypes
+import mojo.ir.build as build
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
@@ -131,7 +132,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     outer_closures = dict(sorted(_outer_closures_map.items(), key=lambda _x: _as_str(_x[0])))
     ci = outer_closures.get(node.name)
     if ci is None:
-        gen._emit(f"  /* TODO: closure '{node.name}' (no pre-pass info) */")
+        build.comment(gen, f"/* TODO: closure '{node.name}' (no pre-pass info) */")
         return
     # `len(...) > 0`, not a bare `if ci.captures`: a non-capturing nested
     # `def` has `ci.captures == []`, and an empty MojoList is a non-null
@@ -171,8 +172,9 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 # `Tools/wasm/wasi/__main__.py`'s
                 # `subdir` -> `decorator` -> `wrapper` chain, whose
                 # `wrapper` declares `nonlocal working_dir`).
-                gen._emit(
-                    f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {_own_mut_ptr};")
+                build.assign(
+                    gen, f"{env_var}->{gimple_ctypes._c_field_name(vname)}",
+                    _own_mut_ptr)
             elif vname in ci.mut_names and not (vname in gen._captures and gen._env_param):
                 # `{mut}`-capture-spec closure (ClosureInfo.mut_names):
                 # store the local's own POINTER (not its dereferenced
@@ -199,7 +201,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 # falls through to the by-value branch below rather than
                 # emit something silently wrong.
                 ptr_val = gen._new_val(_fct, gen._cname(vname))
-                gen._emit(f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {ptr_val};")
+                build.assign(gen, f'{env_var}->{gimple_ctypes._c_field_name(vname)}', f'{ptr_val}')
             # If vname is captured in the current function's own env, read from _env->vname.
             elif vname in gen._captures and gen._env_param:
                 # GIMPLE: cannot use component_ref directly as RHS of struct store;
@@ -214,7 +216,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                     tmp = gen._new_val(_fct, f'&{_boxed}')
                 else:
                     tmp = gen._new_val(_fct, f"{gen._env_param}->{gimple_ctypes._c_field_name(vname)}")
-                gen._emit(f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {tmp};")
+                build.assign(gen, f'{env_var}->{gimple_ctypes._c_field_name(vname)}', f'{tmp}')
             else:
                 # Use _safe_coerce_emit to handle int→int64_t and other conversions.
                 # A heap-boxed local's var_types entry is the BOX's pointer type,
@@ -289,7 +291,7 @@ def _gen_stmt_ImportStmt(gen, node):
             # own `import struct`.
             # GIMPLE: an int64_t lvalue needs an int64_t-typed constant, not a
             # bare `0` (which is `int`) — that is a non-trivial integer_cst.
-            gen._emit(f"  {gen._cname(local_name)} = (int64_t)0;  /* module marker */")
+            build.assign(gen, f'{gen._cname(local_name)}', f'(int64_t)0', f'  /* module marker */')
 
 
 
@@ -394,8 +396,8 @@ def _gen_stmt_FromImportStmt(gen, node):
                 # comment: route through _cname so the assignment
                 # targets the same (possibly C-keyword-renamed) local
                 # _declare_var just declared.
-                gen._emit(f"  {gen._cname(symbol_name)} = (int64_t)0;  "
-                           f"/* module marker (from-import submodule) */")
+                build.assign(gen, gen._cname(symbol_name), '(int64_t)0',
+                             '  /* module marker (from-import submodule) */')
             continue
         # A module-level VALUE imported from a module that is inline-compiled
         # into this same whole-program unit (`def test(): from ctypes import

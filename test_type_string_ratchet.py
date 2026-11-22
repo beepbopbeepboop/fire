@@ -53,7 +53,9 @@ BASELINE = {
     "== '_Bool'": 6,
     "== 'double'": 9,
     "== 'MojoList *'": 31,
-    "gen._emit( text": 235,
+    # Stage 2b is landed: every statement the lowering writes is a builder
+    # call, and `build.raw` is the only text channel left (its own baseline).
+    "gen._emit( text": 0,
     "build.raw( text": 1,
     "direct word-set use": 10,
 }

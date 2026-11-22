@@ -2388,7 +2388,7 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
             # "toplevel_comptime_const_visible_everywhere".
             mag = gen._new_temp(ctype)
             gen._cast_into(mag, ctype, f"{rhs[1:]}")
-            gen._emit(f'  {t} = -{mag};')
+            build.assign(gen, t, f'-{mag}')
         else:
             gen._cast_into(t, ctype, rhs)
     else:
@@ -2769,8 +2769,7 @@ def _goto(gen, label: str) -> None:
 def _cond_goto(gen, cond: str, then_label: str, else_label: str) -> None:
     """`if (cond) goto then_label; else goto else_label;` -- THE way to emit a
     conditional jump.  `cond` is a `_Bool` temp (or a bare comparison)."""
-    gen._emit('  if (' + _as_str(cond) + ') goto ' + _as_str(then_label)
-              + '; else goto ' + _as_str(else_label) + ';')
+    build.cond_br(gen, _as_str(cond), _as_str(then_label), _as_str(else_label))
 
 
 def _ret(gen, val: str) -> None:
@@ -3014,7 +3013,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
                 _rv = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{_lp}", _idx])
                 if not gimple_ctypes.TypeLattice.is_word(_fc):
                     _rv = gen._cast(_fc, _rv)
-            gen._emit(f'  {dest}.{_fn} = {_rv};')
+            build.assign(gen, f'{dest}.{_fn}', _rv)
         return
     if True:
         literal = v.lstrip('-').isdigit()
@@ -3026,7 +3025,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             elif d == 'uint32_t':
                 gen._rt_into(dest, 'mojo_uint32_from_int64', [f"{v}LL"])
             elif d == 'uint64_t':
-                gen._emit(f'  {dest} = {v}ULL;')
+                build.assign(gen, dest, f'{v}ULL')
             elif d == 'int8_t':
                 gen._rt_into(dest, 'mojo_int8_from_int64', [f"{v}LL"])
             elif d == 'int16_t':
@@ -3034,7 +3033,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             elif d == 'int32_t':
                 gen._rt_into(dest, 'mojo_int32_from_int64', [f"{v}LL"])
             elif gimple_ctypes.TypeLattice.is_word(d):
-                gen._emit(f'  {dest} = {v}LL;')
+                build.assign(gen, dest, f'{v}LL')
             elif gimple_ctypes.TypeLattice.is_bool(d):
                 gen._cast_into(dest, '_Bool', f"{v}")
             else:
@@ -3401,7 +3400,7 @@ def _stub_result(gen, ctype: str, value: str, note: str) -> tuple[str, str]:
     """
     gimple_ctypes._debug_note('stubbed operation', note)
     t = gen._new_temp(ctype)
-    gen._emit(f"  {t} = {value};  /* {note} */")
+    build.assign(gen, t, value, f"  /* {note} */")
     return ctype, t
 
 
@@ -4838,11 +4837,11 @@ def _coerce_span_args(gen, params, arg_pairs, span_proofs=None):
             # generalization dropped it on the strength of the (wrong) note
             # that `MojoList._data` is already `char *`.
             _data = gen._new_temp('int64_t *')
-            gen._emit(f"  {_data} = {val}->data;")
+            build.assign(gen, _data, f"{val}->data")
             _len = gen._new_temp('int64_t')
-            gen._emit(f"  {_len} = {val}->len;")
-            gen._emit(f"  {sp}->_data = (char *) {_data};")
-            gen._emit(f"  {sp}->_len = {_len};")
+            build.assign(gen, _len, f"{val}->len")
+            build.assign(gen, f"{sp}->_data", f"(char *) {_data}")
+            build.assign(gen, f"{sp}->_len", _len)
             arg_pairs[i] = ('Span *', sp)
         elif gimple_ctypes.TypeLattice.is_word(ctype) and span_proofs is not None and span_proofs[i]:
             # A Span carried in a boxed word — `List[Span[X, o]].pop()` and
@@ -4855,7 +4854,7 @@ def _coerce_span_args(gen, params, arg_pairs, span_proofs=None):
             # same address). An unproved `int64_t` deliberately keeps the
             # old ABI/diagnostic rather than casting a guess.
             sp = gen._new_temp('Span *')
-            gen._emit(f"  {sp} = (Span *) {val};")
+            build.assign(gen, sp, f"(Span *) {val}")
             arg_pairs[i] = ('Span *', sp)
     return arg_pairs
 
@@ -4908,7 +4907,7 @@ def _emit_generic_instantiation(gen, info, arg_pairs, span_proofs=None):
     if info['ret'] == 'void':
         gen._emit_call('', '', sym, arg_pairs)
         t = gen._new_temp('int')
-        gen._emit(f"  {t} = 0;  /* void generic call */")
+        build.assign(gen, t, "0", "  /* void generic call */")
         return 'int', t
     t = gen._call_expr(info['ret'], sym, arg_pairs)
     return info['ret'], t
@@ -4921,7 +4920,7 @@ def _as_ptr(gen, ctype: str, val: str) -> tuple[str, str]:
         return ctype, val
     pv = gen._new_temp('int64_t *')
     v64 = gen._ensure_local(ctype, val)
-    gen._emit(f"  {pv} = (int64_t *) {v64};")
+    build.assign(gen, pv, f"(int64_t *) {v64}")
     return 'int64_t *', pv
 
 
@@ -5042,7 +5041,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
         if target_type and not gimple_ctypes.TypeLattice.is_word(target_type):
             gen._safe_coerce_emit('int64_t', target_type, raw64, val_c)
         else:
-            gen._emit(f"  {val_c} = (int64_t) {raw64};")
+            build.assign(gen, val_c, f"(int64_t) {raw64}")
     if val_names is not None:
         # Unpack the nested tuple slot bound above into its own names, with
         # the accessor matching the inner tuple's recorded slot type.

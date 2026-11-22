@@ -420,24 +420,31 @@ def test_boxed_span_arg_is_cast_to_a_span_only_when_proven():
     cast is a consequence of the proof, not a guess from the ABI.
     """
     import mojo.backend_gimple.emit_resolve as er
+    import mojo.ir.build as build
 
     class G:
+        # The lowering calls the BUILDER now (doc/GIR.md stage 2b), so this
+        # fake emitter carries the three fields `build.append` touches
+        # instead of a text `_emit`.
         _struct_allocs_needed = set()
 
         def __init__(self):
             self.n = 0
             self.lines = []
+            self.body_lines = []
+            self._stmt_line_directive = None
+            self._last_was_terminal = False
 
         def _new_temp(self, ctype):
             self.n += 1
             self.lines.append(f'/* temp {ctype} */')
             return f'_t{self.n}'
 
-        def _emit(self, text):
-            self.lines.append(text)
+        def text(self):
+            return '\n'.join(self.lines + ginf.body_text(self))
 
         def _rt_into(self, dest, name, args):
-            self.lines.append(f'  {dest} = {name}();')
+            build.call_into(self, dest, name, args)
 
     problems = []
     g = G()
@@ -446,8 +453,8 @@ def test_boxed_span_arg_is_cast_to_a_span_only_when_proven():
     if out != [('Span *', '_t1')]:
         problems.append(f'proved boxed Span became {out!r}, '
                         f'want [(Span *, _t1)]')
-    if not any('(Span *) interval' in ln for ln in g.lines):
-        problems.append(f'the cast is missing from {g.lines!r}')
+    if '(Span *) interval' not in g.text():
+        problems.append(f'the cast is missing from {g.text()!r}')
     g = G()
     out = er._coerce_span_args(g, ['Span *'], [('int64_t', 'interval')],
                                span_proofs=[False])
@@ -465,7 +472,7 @@ def test_boxed_span_arg_is_cast_to_a_span_only_when_proven():
     out = er._coerce_span_args(g, ['Span *'], [('MojoList *', 'items')])
     if out[0][0] != 'Span *':
         problems.append(f'a List argument was not converted: {out!r}')
-    text = '\n'.join(g.lines)
+    text = g.text()
     if '->_len = items->len' in text or '->_data = (char *) items->data' in text:
         problems.append(f'the span store uses a raw component_ref: {text!r}')
     # The `_data` store may carry the `(char *)` cast, but only over the TEMP
