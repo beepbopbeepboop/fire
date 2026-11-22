@@ -1,8 +1,8 @@
 # CODEGEN: module-alias attribute reads that still fall through in a per-file compile
 
 Found 2026-11-21 while extending `test_codegen_module_alias_function_value.py`
-for the `CODEGEN_selfhost_stage2_attributeerror_comptimevar_node` fix (that
-doc stays open until the bootstrap chain it needs is re-enabled; this doc is
+for the stage2 `AttributeError: _as_comptimevar_node` module-alias value fix
+(that bug's doc was deleted on the branch once its pin passed; this doc is
 what is LEFT of the same per-file shape).
 
 The path is the per-file compile — `compile_to_gimple(..., do_imports=False)` /
