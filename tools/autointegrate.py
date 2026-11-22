@@ -8,6 +8,9 @@ breaks, and land everything when it is green. One run clears the whole backlog; 
              just those jobs (right track / wrong track, minutes, no side effects), then half of what is left, ... ~log2(n)
              probes name the first bad branch. That branch is set aside and handed to a fixer; everything else is
              re-batched and lands in one gate. Each red batch removes at least one culprit, so it always terminates.
+             A probe's answer is the suite's per-job verdict, not an exit code: a run that did not run the jobs (a SKIP
+             behind a disabled dep, a name the runner refuses) is NO EVIDENCE, which stops the bisect instead of blaming
+             every branch (the fifty-doc `bootstrap-stage2-dumps:<item>` cascade, 2026-11-21).
   3. FAST LANE  test-infrastructure-only branches skip the project gate (owner's policy) and land first.
 
 Conflicting branches are not blockers: integrate.py leaves them out and queues a merge fixer for each, and they join a
@@ -90,24 +93,43 @@ def parse(out, key):
 
 
 def probe(prefix, failed_jobs_):
-    """Right track / wrong track: merge exactly `prefix` and run ONLY the jobs that failed. Minutes, no side effects."""
-    rc, out = run_integrate("--only", *prefix, "--jobs", *failed_jobs_, "--no-fixers")
-    return rc == 0 and "--jobs run finished" in out
+    """'green' / 'red' / 'no-evidence': merge exactly `prefix` and run ONLY the jobs that failed. Minutes, no side
+    effects.
+
+    The verdict is the SUITE's per-job verdict for EVERY requested job, from the run's own build/suite.log — never
+    the process exit code. A selection that SKIPs behind a disabled dep exits 0, so `rc == 0` once scored a job that
+    never ran as "right track"; and a run that never reached the suite (a refused probe, a merge conflict) leaves the
+    previous log in place, which `since` refuses as evidence. `green` therefore takes BOTH a clean run and a PASS line
+    for every job; anything less than that is not evidence that the jobs pass."""
+    since = time.time()
+    rc, _out = run_integrate("--only", *prefix, "--jobs", *failed_jobs_, "--no-fixers")
+    logf = os.path.join(I.INTEG, "build", "suite.log")
+    verdicts = [I.job_verdict(logf, j, since=since) for j in failed_jobs_]
+    if any(v == "red" for v in verdicts):
+        return "red"
+    if rc == 0 and verdicts and all(v == "green" for v in verdicts):
+        return "green"
+    return "no-evidence"
 
 
 def bisect_first_bad(merged, failed_jobs_):
     """`merged` (ordered) fails `failed_jobs_` as a whole. Return k with merged[:k] passing them and merged[:k+1] failing:
     merged[k] is the first branch that breaks them. Each probe tests half of what is left (100%, 50%, 25%, 12%, ...), so ~log2(n)
-    probes of just the failing jobs find it."""
+    probes of just the failing jobs find it. None when a probe produced NO EVIDENCE (a job that did not run): no branch is
+    blamed on a run that answered nothing."""
     lo, hi = 0, len(merged)            # invariant: prefix lo passes (the empty one does), prefix hi fails
     while hi - lo > 1:
         mid = (lo + hi) // 2
-        ok = probe(merged[:mid], failed_jobs_)
-        log("  probe %d/%d branches on %s: %s" % (mid, len(merged), ",".join(failed_jobs_), "right track" if ok else "WRONG track"))
-        if ok:
+        v = probe(merged[:mid], failed_jobs_)
+        log("  probe %d/%d branches on %s: %s" % (mid, len(merged), ",".join(failed_jobs_),
+                                                  {"green": "right track", "red": "WRONG track",
+                                                   "no-evidence": "NO EVIDENCE (a failing job did not run)"}[v]))
+        if v == "green":
             lo = mid
-        else:
+        elif v == "red":
             hi = mid
+        else:
+            return None
     return lo
 
 
@@ -207,7 +229,12 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=180):
         tasks = C.load()
         prev = tasks[fixname]["branch"]
         log("PIECE-FIX attempt %d: %s has %d commit(s); probing just the failing jobs on it" % (attempt, fixname, C.ahead(tasks[fixname])))
-        if not probe([fixname], failed):
+        v = probe([fixname], failed)
+        if v == "no-evidence":
+            log("  NO EVIDENCE: the failing jobs did not run on %s (a SKIP, a disabled job or a resource cap); not "
+                "re-running the whole batch on a guess" % fixname)
+            return False
+        if v != "green":
             log("  the fixes do not yet make %s pass" % ",".join(failed))
             continue
         log("  right track: the failing jobs pass. Full gate on the whole batch + fixes now.")
@@ -264,19 +291,32 @@ def settle(st, red, merged, failed, rc, out):
             log("PIECE-FIX landed the whole batch (%d branches + the fixes)" % len(merged))
         else:
             log("piece-fix did not get it green: isolating the one hard issue")
-            if SUSPECT and SUSPECT in merged and probe([n for n in merged if n != SUSPECT], failed):
-                k = merged.index(SUSPECT)
-                log("confirmed: without %s the failing jobs pass" % SUSPECT)
+            k = None
+            if SUSPECT and SUSPECT in merged:
+                v = probe([n for n in merged if n != SUSPECT], failed)
+                if v == "green":
+                    k = merged.index(SUSPECT)
+                    log("confirmed: without %s the failing jobs pass" % SUSPECT)
+                elif v == "red":
+                    k = bisect_first_bad(merged, failed)      # the suspect is exonerated: bisect the rest
+                else:
+                    log("the probe without %s produced NO EVIDENCE: not blaming a branch" % SUSPECT)
             else:
                 k = bisect_first_bad(merged, failed)
-            culprit = merged[k]
-            log("first bad branch: %s (the %d before it pass %s)" % (culprit, k, ",".join(failed)))
-            red[culprit] = head_sha(culprit)
-            why = "breaks " + ",".join(failed) + " when merged after " + (merged[k - 1] if k else "master")
-            try:
-                enqueue_fixer(culprit, why + "\n" + failed_jobs(os.path.join(I.INTEG, "gate.log")))
-            except Exception as e:
-                log("could not queue a fixer for %s: %s" % (culprit, e))
+            if k is None:
+                log("NO EVIDENCE for the failing jobs (%s): a probe could not run them, so no branch is blamed; the "
+                    "whole batch is set aside for a human" % ",".join(failed))
+                for n in merged:
+                    red[n] = head_sha(n)
+            else:
+                culprit = merged[k]
+                log("first bad branch: %s (the %d before it pass %s)" % (culprit, k, ",".join(failed)))
+                red[culprit] = head_sha(culprit)
+                why = "breaks " + ",".join(failed) + " when merged after " + (merged[k - 1] if k else "master")
+                try:
+                    enqueue_fixer(culprit, why + "\n" + failed_jobs(os.path.join(I.INTEG, "gate.log")))
+                except Exception as e:
+                    log("could not queue a fixer for %s: %s" % (culprit, e))
         json.dump(st, open(STATE, "w"))
     return False
 
