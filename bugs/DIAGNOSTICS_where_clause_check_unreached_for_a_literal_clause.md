@@ -40,35 +40,55 @@ FAIL test_integer_literal_where_still_enforced   (wants "requirement 'x < 2' is 
 PASS test_unfolderable_alias_clause_stays_accepted
 ```
 
-The check IS wired into the compiler in two places: `monomorphize.instantiate`
-(`elaborate.check_where_clauses('', template_src, type_args or {})`, visible as
-`fire.ci`'s `elaborate_check_where_clauses_4d4627`) and
-`module_gen._check_fn_signature_binding_violations`
-(`check_where_clauses(module_src, tmpl, targs)`). Neither is on the obvious
-`f[5]()` call path, and the one that passes a real `module_src` only runs for a
-generic-struct mention in a signature -- so what produces the alias case's
-string is NOT yet pinned down. It is only established that the alias case's
-expected text IS in its output and the literal case's is not.
+The mechanism IS pinned. `fire.py build` routes the two spellings through
+different engines:
 
-The refusal the literal case does get is the GIMPLE backend's
-(`invalid call to 'f': violated constraint`, plus the note `expected '(x < Int(2))'`)
--- which is modular's own wording (`mojo/lib/MojoParser/Constraints.cpp`:
-`diag << "violated constraint"`).
+```
+literal  -> myinterpreter.check_where_clause: interp.eval_expr(x < 2) folds (x is a
+            comptime param in scope) -> _ConstraintViolation -> where_violation_record
+            (myinterpreter.py:955) -> "error: invalid call to 'f': violated constraint"
+            + "note: constraint declared here evaluated to False, expected '(x < Int(2))'"
+alias    -> interp.eval_expr(x < LIMIT) raises (LIMIT is a module-level alias, not in
+            the function's comptime scope) -> `except Exception: ok = True` -> the
+            clause is left alone -> the call falls through to the compile path, whose
+            elaborate check raises WhereConformanceError, surfaced by
+            emit_resolve.py:4259 as "note: WhereConformanceError: requirement 'x < LIMIT'
+            is not satisfied"
+```
 
-## Two readings, and the step that decides them
+So the literal spelling gets the interpreter's wording and the alias spelling gets
+the compiler's, for the same construct. The interpreter's is modular's own
+(`mojo/lib/MojoParser/Constraints.cpp`: `violated constraint` + the
+`constraint declared here evaluated to False, expected <prop>` note), and
+`test_static_call_diagnostics.py` pins that wording for `where n > 0`. The
+`WhereConformanceError` note is this repo's wrapper leaking.
 
-1. The check is not reached for a clause over a bound parameter and a literal.
-   First pin down what emits the alias case's text (grep the output of
-   `build_refusal` for it and break on `elaborate.py:2913` under a debugger);
-   then compare the bindings each path hands the folder. `f[5]` passes `5` as a
-   COMPTIME arg while `instantiate` forwards `type_args`, so `x` may be absent
-   from what the folder sees -- which would make it CONST_UNKNOWN (no raise)
-   while the alias case still resolves `LIMIT` from the module source.
-2. The test's expectation is the driver/stage2 wording, and the Python path is
-   meant to say `violated constraint` -- in which case this case should assert
-   that. `test_binding_deferral_diagnostic.py` asserts BOTH strings through
-   `driver.compile_program` and passes, so it is the model for what a single
-   refusal may carry.
+The alias spelling's output begins `Error building:`, the literal one does not --
+so for the alias spelling the interpreter DECLINED the call and `fire.py build`
+fell back to the compiler. It is not the `alias` declaration itself: a module
+with `alias LIMIT = 2` and a trivial `main` builds cleanly (`Error building`
+absent, rc 0). It is the clause evaluation --
+`check_where_clause` sets `interp.scope = scope` (the function's comptime
+parameters) before `interp.eval_expr(cond)`, and `LIMIT` lives in the MODULE
+scope, so the name is not reachable from there and the handler's
+`except Exception: ok = True` declines.
 
-Either way `test_integer_literal_where_still_enforced` is the case to fix, and
-`python3 test_where_alias_diagnostic.py` should end at 9/9.
+Consequence for the test: `test_integer_literal_where_still_enforced` asserts the
+COMPILER's wording against the INTERPRETER's output. Its sibling
+`test_function_where_alias_violated_fails` passes only because that spelling
+happens to reach the compiler.
+
+## The fix, and what it moves
+
+Make the module's top-level names reachable from the scope `check_where_clause`
+evaluates in: either give that scope the module scope as a parent, or resolve an
+unbound name against the module bindings before the `except Exception` declines
+it. Then both spellings stay on the interpreter and get its wording, which is
+modular's.
+
+Consequence: the two message-expecting cases in
+`test_where_alias_diagnostic.py` (`test_function_where_alias_violated_fails`,
+`test_integer_literal_where_still_enforced`) both move to the interpreter's
+wording, which is what `test_static_call_diagnostics.py` already pins for
+`where n > 0`. The job `reg-where-alias-diagnostic` is green when
+`python3 test_where_alias_diagnostic.py` is 9/9.
