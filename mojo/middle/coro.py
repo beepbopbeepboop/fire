@@ -1677,6 +1677,17 @@ class _ParamFlow:
         at every call site of `fd`, and is consumed boxed inside `fd`."""
         return self.sources_ok(fd, pidx, visiting, consumed=True) == 'fed'
 
+    def boxed_consumer_ok(self, fd, pidx: int, visiting: set) -> bool:
+        """True when `fd`'s parameter `pidx` is never fed a non-generator value
+        and is consumed boxed. Unlike `source_ok` this does not require a real
+        `g(...)` to reach it: inside `use_ok`, a pass-through whose only way
+        back is a cycle already on the path (`'cycle'`) is no obstacle, because
+        the cycle's own sources are decided at the top of the chain. Requiring
+        'fed' here made `inner(it)` inside `use(it)` look unconsumable whenever
+        `use` was reached from `inner`'s own check, refusing
+        `use(g())` -> `inner(it)` (test_gimple_generator_runner.py)."""
+        return self.sources_ok(fd, pidx, visiting, consumed=True) is not False
+
     def sources_ok(self, fd, pidx: int, visiting: set, consumed: bool):
         """The source half of `source_ok`: the tagged generator at every call
         site of `fd`. With `consumed` it also requires the boxed-consumer check
@@ -1774,7 +1785,7 @@ class _ParamFlow:
                     continue
                 for q, a in enumerate(n.args):
                     if _is_name(a, pname) and q < len(h.params) \
-                            and self.source_ok(h, q, visiting):
+                            and self.boxed_consumer_ok(h, q, visiting):
                         ok_ids.add(id(a))
         for n in _walk(fd):
             if isinstance(n, N.IdentExpr) and n.name == pname and id(n) not in ok_ids:
