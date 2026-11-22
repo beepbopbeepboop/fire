@@ -30,6 +30,62 @@ Stage 7's remaining half, in this order:
    `python3 tools/extract_arm.py --list mojo/backend_gimple/cpp_core.py <parent> 25`, which now
    prints `0 lines can be moved` for all five printers.
 
+## Status 2026-11-22 (planning round, eleventh): measured remainder and the ordered port plan
+
+Measured on `ef2094112` (`python3` over `cpp_core.py`, counting `f"{indent}` statement lines and
+expression f-strings):
+
+| arm | lines | text sites | kind |
+|---|---|---|---|
+| `_cpf_named_target` | 876 | 80 | statement lines (the largest single arm) |
+| `_cps_assign_stmt` | 804 | 46 | statement lines (container, tuple, class-attr forms) |
+| `_cps_expr_stmt` | 384 | 28 | statement lines (`printf` and call forms) |
+| `_cpy_handle_local` | 50 | 13 | statement lines |
+| `_cpf_call_iterable` / `_cpf_word_iterable` / `_cpf_param_call` / `_cpf_simple_target_call_iterable` / `_cpf_list_iter_cursor` / `_cpy_unsupported_shape` | 42-179 | 5-10 each | statement lines |
+| `_cpw_async_with` | 93 | 4 | statement lines |
+| `_cpf_generator_handle` | 35 | 3 | statement lines |
+| `_cps_aug_assign`, `_cps_while_stmt` | 41, 59 | 2, 1 | statement lines (one or two left) |
+| 11 `_cpx_*` expression arms | 32-2215 | expression f-strings | C++ **expressions**, not lines |
+
+So: 0 of 30 arms are fully on the IR; 14 still build statement text; 11 build expression text (no
+`{indent}` lines, so they are not counted above). Expression arms need an Ex printer for C++ (casts,
+receivers, runtime-stub calls), which is a different job from the statement shapes.
+
+**Ordered plan (each step one measured change, oracle identical, closure checked):**
+
+1. `_cps_expr_stmt`'s `printf` and call lines (28 sites): a `call` Ex with `ex_text` arguments and the
+   `fflush` line as a second `expr` (`build.call_void` is the existing builder for `f(args);`).
+2. `_cps_assign_stmt`'s container forms (`mojo_list_set_*`, `mojo_dict_set_*`, `mojo_list_clear`,
+   `mojo_list_extend`, `mojo_class_setattr`) as `call_void` shapes (46 sites; the tuple-unpack forms
+   `mojo_list_get_int` / `mojo_iter_word` after).
+3. `_cpy_handle_local`, `_cpy_unsupported_shape`, `_cpw_async_with`, `_cpf_generator_handle`, and the
+   five small `_cpf_*` arms (about 40 sites together).
+4. `_cpf_named_target` (80 sites, 876 lines): first split it with `tools/extract_arm.py` along its
+   target kinds, then port each extracted arm as in steps 1-3. Do not port it whole.
+5. The 11 expression arms, smallest first: `_cpx_slice_expr` (32), `_cpx_unary_op` (33),
+   `_cpx_walrus` (42), `_cpx_compare_chain` (45), `_cpx_await_expr`, `_cpx_subscript_expr`,
+   `_cpx_member_expr`, `_cpx_ident_expr`, `_cpx_binary_op`, `_cpx_lambda_expr`, and `_cpx_call_expr`
+   (2215 lines) last. Each needs Ex shapes for the C++ forms it produces (a `cast` and a `call`
+   with a receiver are already in `mojo/ir/instr.py`; a C++ `addr`/`index` shape may need adding).
+
+Acceptance for the stage: every printer arm's return is built from `mojo/ir/instr.py` shapes, the
+arms test pins 0 text sites, the oracle is identical on all 285 C and 13 coroutine programs, and the
+closure stub set is unchanged.
+
+**Stage 5c: the call-site analysis (planning, not built).** The fact the stored `None` and the scalar
+store need is: for each unannotated parameter `p` of a function `f`, the kinds passed at every call of
+`f` (`none`, a scalar literal kind, a struct instance, other). `mojo/middle/infra_infer.py` already has the
+shape of this: `callsite_tagged_literal_params` (near line 2035) walks every bare-name call to a
+module-level `def` and records the bool/None literal arguments. The extension is to record the kind of
+every argument for every such parameter, and then to mark a field stored from `p` as scalar-only
+(box-eligible) only when every call site passes a scalar literal, and as pointer (excluded) when any
+call site passes a struct instance or an object of a class.
+
+Acceptance (from the 5c doc): the reduction prints `42` and `None` under the runner; `pydiff` OK on
+`classes/03_none_field_later_set.py`; `classes/12_linked_list_nodes.py` and
+`classes/13_binary_tree_inorder.py` are not CRASH (WRONG is no worse than before); the oracle changes
+only the programs that store `None` into a scalar-only word field.
+
 ## Status 2026-11-22 (ninth and tenth rounds): more statement headers on the IR
 
 - `_cps_multi_assign_stmt` prints each `name = value;` through `_cpp_assign_line`.
