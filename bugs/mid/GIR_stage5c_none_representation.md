@@ -180,3 +180,13 @@ session scratchpad). Next measured step: find where a parameter's scalar-vs-poin
 field store (the constructor's argument binding), and make a pointer-valued store exclude the field from
 mixed. Re-measure 12 and 13 against the runner before any landing.
 
+**Second measurement of the step 2-3 experiment (2026-11-22).** `classes/12_linked_list_nodes.py` under
+the runner: the first line matches, then `LinkedList.to_list` goes wrong. `LinkedList.head` holds
+`None` and the struct pointer from `Node(value, self.head)`; the constructor-call store is a pointer
+(syntactically known), so it could be excluded, but `Node.next` is assigned an unannotated parameter
+(`next_node`, default `None`) that can hold a pointer. Excluding constructor calls alone does not fix 12.
+The runtime `mojo_word_is_none` already answers 0 for a non-box pointer, so the earlier "AttributeError"
+is the wrong answer reaching a later dereference, not a runtime fault. The remaining fact needed is what
+an unannotated parameter holds at each call site, which is a call-site (interprocedural) question.
+The experiment is stashed again (`stash@{0}`).
+
