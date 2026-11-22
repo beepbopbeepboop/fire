@@ -290,7 +290,7 @@ def _emit_starred_slot_list(gen, list_ptr: str, name: str, start: str,
     if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
         _rd = gen._rt_call('char *', 'mojo_list_get_str', [_lp, _i])
         gen._void_call('mojo_list_append_str', [('MojoList *', _dst), ('char *', _rd)])
-    elif gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'double':
+    elif gimple_ctypes.TypeLattice.is_double(gimple_ctypes.TypeLattice.list_suffix(slot_elem)):
         _rd = gen._rt_call('double', 'mojo_list_get_double', [_lp, _i])
         gen._void_call('mojo_list_append_double', [('MojoList *', _dst), ('double', _rd)])
     else:
@@ -326,7 +326,7 @@ def _emit_starred_slot_from_value(gen, name: str, value_ctype: str,
     if gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'str':
         gen._void_call('mojo_list_append_str',
                        [('MojoList *', _dst), ('char *', _as_str(value))])
-    elif gimple_ctypes.TypeLattice.list_suffix(slot_elem) == 'double':
+    elif gimple_ctypes.TypeLattice.is_double(gimple_ctypes.TypeLattice.list_suffix(slot_elem)):
         gen._void_call('mojo_list_append_double',
                        [('MojoList *', _dst), ('double', _as_str(value))])
     else:

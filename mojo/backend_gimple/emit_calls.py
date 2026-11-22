@@ -2728,7 +2728,7 @@ def _lc_sum_one(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if not gimple_ctypes.TypeLattice.is_list(at):
         av = gen._materialize_as_list(at, av)
         at = 'MojoList *'
-    if gen._elem_types.get(av) == 'double':
+    if gimple_ctypes.TypeLattice.is_double(gen._elem_types.get(av)):
         acast = av if at == 'void *' else gen._cast('void *', f"{av}")
         return 'double', gen._call_expr('double', 'mojo_sum_double', [('void *', acast)])
     acast = av if at == 'void *' else gen._cast('void *', f"{av}")
@@ -7824,7 +7824,7 @@ def _build_sort_keys(gen, av: str, elem: str, key_expr) -> str:
         # `finally`, below), so `_quick_type` sees the same `char *`
         # `s` the call itself was just made with.
         if (isinstance(key_expr, gimple_ctypes.LambdaExpr) and not gimple_ctypes.TypeLattice.is_cstr(kret_t)
-                and gen._quick_type(key_expr.body) == 'char *'):
+                and gimple_ctypes.TypeLattice.is_cstr(gen._quick_type(key_expr.body))):
             kret_v = gen._coerce_to_type(kret_t, 'char *', kret_v)
             kret_t = 'char *'
     finally:
@@ -8062,7 +8062,7 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
         t = gen._call_expr('MojoList *', 'mojo_bytes_sorted_list', [(at, av)])
         gen._elem_types[t] = 'int64_t'
         return 'MojoList *', t
-    if gimple_ctypes.TypeLattice.is_list(at) and gen._elem_of(av) == 'char *':
+    if gimple_ctypes.TypeLattice.is_list(at) and gimple_ctypes.TypeLattice.is_cstr(gen._elem_of(av)):
         t = gen._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
     else:
         # The element contract is evidence the CONTAINER kind does not give:
@@ -9105,7 +9105,7 @@ def _lower_opaque_ctor(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tup
     # never ran (a real `StringRef("")` stage1-vs-stage2 divergence).
     _ctor_kw = getattr(node, 'kwargs', None) or []
     if (len(node.args) == 1 and len(_ctor_kw) == 0
-            and gen._quick_type(node.args[0]) == 'char *'):
+            and gimple_ctypes.TypeLattice.is_cstr(gen._quick_type(node.args[0]))):
         at, av = gen.lower_expr(node.args[0])
         return at, av
     ctor_args = [gen.lower_expr(a) for a in node.args]
@@ -10168,7 +10168,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
             _ct = _known.get(_cn)
             if not (gimple_ctypes.TypeLattice.is_number_scalar(_ct)
                     or gimple_ctypes.TypeLattice.is_char(_ct)
-                    or (_ct or '').endswith(' *')):
+                    or gimple_ctypes.TypeLattice.ends_in_star(_ct or '')):
                 _ct = 'int64_t'
             _final.append((_cn, _ct))
         # Dedupe the typedef as a BLOCK, keyed by its closing line — never
@@ -11697,7 +11697,7 @@ def _lnc_int(gen, arg_pairs: list) -> tuple[str, str] | None:
     # statically-char* `int("42")` case this special case already
     # handles. Real repro: Tools/scripts/summarize_stats.py's
     # load_raw_data: `stats[key.strip()] += int(value)`.
-    if gimple_ctypes.TypeLattice.is_int_word_or_bool(at) and gen._actual_types.get(av) == 'char *':
+    if gimple_ctypes.TypeLattice.is_int_word_or_bool(at) and gimple_ctypes.TypeLattice.is_cstr(gen._actual_types.get(av)):
         cp = gen._cast('char *', f"{av}")
         return 'int64_t', gen._call_expr('int64_t', 'mojo_make_int', [('char *', cp)])
     if gimple_ctypes.TypeLattice.is_double(at):
@@ -11757,7 +11757,7 @@ def _lnc_minmax(gen, fname_raw: str, arg_pairs: list) -> tuple[str, str] | None:
         # `min(a_dict)`/`max(a_set)` is real Python (min/max KEY, or
         # element) — DESIGN.html R1/R5, shares _materialize_as_list.
         lp = gen._materialize_as_list(at, av)
-        if gen._elem_of(av) == 'double':
+        if gimple_ctypes.TypeLattice.is_double(gen._elem_of(av)):
             return 'double', gen._call_expr(
                 'double', f"mojo_{fname_raw}_double", [('void *', lp)])
         return 'int64_t', gen._call_expr(
@@ -12824,7 +12824,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         at, av = arg_pairs[0]
         # Same boxed-string trap as int() above: `(double)<char*>` casts
         # pointer BITS, silently producing garbage; parse instead.
-        if gimple_ctypes.TypeLattice.is_int_word_or_bool(at) and gen._actual_types.get(av) == 'char *':
+        if gimple_ctypes.TypeLattice.is_int_word_or_bool(at) and gimple_ctypes.TypeLattice.is_cstr(gen._actual_types.get(av)):
             cp = gen._cast('char *', f"{av}")
             return 'double', gen._call_expr('double', 'mojo_make_float', [('char *', cp)])
         # A tagged/boxed word: `mojo_box_double` returns the double a 'd' box
@@ -13254,13 +13254,13 @@ def _lower_struct_constructor(gen, struct_name: str,
     if (struct_name == 'Span' and not _did_init_call
             and _n_args == 1 and _n_kw == 0):
         _sat, _sav = gen.lower_expr(args[0])
-        if gen._get_actual_type(_sat, _sav) == 'MojoList *':
+        if gimple_ctypes.TypeLattice.is_list(gen._get_actual_type(_sat, _sav)):
             _span_list = _sav
     elif (struct_name == 'Span' and not _did_init_call
             and _n_args == 0 and _n_kw == 1
             and _as_str((kwargs or [('', '')])[0][0]) == 'list'):
         _sat, _sav = gen.lower_expr((kwargs or [('', '')])[0][1])
-        if gen._get_actual_type(_sat, _sav) == 'MojoList *':
+        if gimple_ctypes.TypeLattice.is_list(gen._get_actual_type(_sat, _sav)):
             _span_list = _sav
     if (not _did_init_call) and (_span_list is None) and (_n_kw > 0 or _n_args > 0):
         # Positional args + keyword args — assign fields by position then by
@@ -13726,7 +13726,7 @@ def _ls_scalar_word(gen, idx_type, iv, ot, ov) -> tuple[str, str]:
     # fell to the MojoList* fallback below, reinterpreting the dict
     # header as a list and faulting inside mojo_list_get_int.
     _idx_is_str = (idx_type in ('char *', 'MojoStr *')
-                   or gen._get_actual_type(idx_type, iv) == 'char *')
+                   or gimple_ctypes.TypeLattice.is_cstr(gen._get_actual_type(idx_type, iv)))
     if actual_type == 'MojoDict *' or (_idx_is_str and actual_type not in ('MojoList *', 'MojoSet *')):
         # Dict subscript: int64_t → MojoDict *
         dp = gen._coerce_to_type(ot, 'MojoDict *', gen._ensure_local(ot, ov))
