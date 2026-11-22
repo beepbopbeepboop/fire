@@ -23,9 +23,15 @@ Instr.kind
   'assign' lhs, rhs
   'expr'   rhs                        a call for effect
   'goto'   label
-  'cgoto'  rhs (condition), label, label2
+  'cgoto'  rhs (condition), label, label2   label2 '' = one-armed
   'return' rhs (kind 'none' Ex when there is no value)
   'label'  label
+  'comment' text                      a `/* ... */` line; never a statement
+  'if'     rhs (condition)            `if (c) {` -- opens a block
+  'else'                              `else {`
+  'elseif' rhs (condition)            `else if (c) {`
+  'end'                               `}` -- closes a block
+  'ifbody' rhs (condition), body      `if (c) <body>` -- one-statement body
   'opaque' text                       not three-address; not checked
 """
 from __future__ import annotations
@@ -42,6 +48,7 @@ class Ex:
         self.ival: int = 0
         self.suffix: str = ''
         self.arrow: bool = False
+        self.tight: bool = False    # `f(...)` rather than `f (...)`
         self.ty: Type = VOID
         self.a: Ex = self          # self = "absent"; keeps the field typed
         self.b: Ex = self
@@ -70,7 +77,8 @@ class Ex:
             parts: list[str] = []
             for x in self.args:
                 parts.append(x.show())
-            return self.a.show() + ' (' + ', '.join(parts) + ')'
+            gap = '' if self.tight else ' '
+            return self.a.show() + gap + '(' + ', '.join(parts) + ')'
         if k == 'bin':
             return self.a.show() + ' ' + self.op + ' ' + self.b.show()
         if k == 'cond':
@@ -95,29 +103,49 @@ class Instr:
         self.kind: str = kind
         self.lhs: Ex = ex_none()
         self.rhs: Ex = ex_none()
+        self.body: Instr = self     # self = "absent"; keeps the field typed
         self.label: str = ''
         self.label2: str = ''
         self.text: str = ''
+        self.note: str = ''         # trailing comment, `  /* ... */`
+        # Statement indent.  A block's body is still a flat list of
+        # instructions here (an emitting site opens it and closes it), so the
+        # one thing a nested statement needs from the IR is its depth.
+        self.indent: int = 2
         self.src_line: int = 0      # source (#line) line
         self.out_line: int = 0      # physical line in the .ci
 
     def show(self) -> str:
         k = self.kind
         if k == 'assign':
-            return self.lhs.show() + ' = ' + self.rhs.show() + ';'
+            return self.lhs.show() + ' = ' + self.rhs.show() + ';' + self.note
         if k == 'expr':
-            return self.rhs.show() + ';'
+            return self.rhs.show() + ';' + self.note
         if k == 'goto':
             return 'goto ' + self.label + ';'
         if k == 'cgoto':
-            return ('if (' + self.rhs.show() + ') goto ' + self.label
-                    + '; else goto ' + self.label2 + ';')
+            if self.label2:
+                return ('if (' + self.rhs.show() + ') goto ' + self.label
+                        + '; else goto ' + self.label2 + ';')
+            return 'if (' + self.rhs.show() + ') goto ' + self.label + ';'
         if k == 'return':
             if self.rhs.kind == 'none':
                 return 'return;'
             return 'return ' + self.rhs.show() + ';'
         if k == 'label':
             return self.label + ':'
+        if k == 'comment':
+            return self.text
+        if k == 'if':
+            return 'if (' + self.rhs.show() + ') {'
+        if k == 'else':
+            return 'else {'
+        if k == 'elseif':
+            return 'else if (' + self.rhs.show() + ') {'
+        if k == 'end':
+            return '}'
+        if k == 'ifbody':
+            return 'if (' + self.rhs.show() + ') ' + self.body.show()
         return self.text
 
     def line(self) -> str:
@@ -127,8 +155,9 @@ class Instr:
         around it, so the function-assembly sites print a body with one rule
         instead of one rule per statement kind:
 
-          - a modelled statement is indented two spaces, the statement
-            indentation of every `__GIMPLE` body this backend writes;
+          - a modelled statement is indented `indent` spaces (two for a
+            statement at the body's own depth), the statement indentation of
+            every `__GIMPLE` body this backend writes;
           - 'opaque' text is printed verbatim (it carries its own indentation
             and may be anything a statement lowers to);
           - a label is at column 0 and starts its own block, which is why the
@@ -137,7 +166,7 @@ class Instr:
             return self.text
         if self.kind == 'label':
             return '\n' + self.show() + self.text
-        return '  ' + self.show()
+        return ' ' * self.indent + self.show()
 
 
 class Sig:

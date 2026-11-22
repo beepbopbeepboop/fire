@@ -72,6 +72,36 @@ def test_shapes_render_as_the_backend_spelled_them():
     check(_last(gen) == '  i64 = mojo_len_int ();', 'call with no argument')
     build.call_void(gen, 'mojo_print_int', ['i64'])
     check(_last(gen) == '  mojo_print_int (i64);', 'call for effect')
+    build.call_void(gen, 'memcpy', ['a', 'b', 'n'], True)
+    check(_last(gen) == '  memcpy(a, b, n);', 'a call spelled tight, as libc is')
+    build.assign(gen, 'i64', '0LL')
+    check(_last(gen) == '  i64 = 0LL;', 'plain assignment')
+    build.assign(gen, 'p->field', 'i32', '  /* the note */')
+    check(_last(gen) == '  p->field = i32;  /* the note */',
+          'assignment to a field, with its trailing comment')
+    build.assign(gen, 'a[i]', '*p')
+    check(_last(gen) == '  a[i] = *p;', 'assignment through an index and a deref')
+    build.assign(gen, 'inner', 'v', '', 4)
+    check(_last(gen) == '    inner = v;', 'a statement inside a block')
+    build.comment(gen, '/* dir() stubbed */')
+    check(_last(gen) == '  /* dir() stubbed */', 'a comment line')
+    build.cond_br(gen, 'c', 'bb_9', 'bb_10')
+    check(_last(gen) == '  if (c) goto bb_9; else goto bb_10;',
+          'two-armed conditional branch')
+    build.cond_br(gen, 'c', 'bb_9')
+    check(_last(gen) == '  if (c) goto bb_9;', 'one-armed conditional branch')
+    build.if_block(gen, 'c')
+    check(_last(gen) == '  if (c) {', 'block open')
+    build.call_void(gen, 'free', ['b'], False, 4)
+    check(_last(gen) == '    free (b);', 'a call inside the block')
+    build.end_block(gen)
+    check(_last(gen) == '  }', 'block close')
+    build.else_if_block(gen, 'd')
+    check(_last(gen) == '  else if (d) {', 'else-if block open')
+    build.else_block(gen)
+    check(_last(gen) == '  else {', 'else block open')
+    build.if_call(gen, 'b', 'free', ['b'])
+    check(_last(gen) == '  if (b) free (b);', 'one-statement conditional call')
     build.label(gen, 'bb_12')
     check(_last(gen) == '\nbb_12:', 'label on its own line, after a blank one')
     build.label(gen, 'bb_13', 'count(guessed_local(10))')
@@ -79,6 +109,28 @@ def test_shapes_render_as_the_backend_spelled_them():
           'label with its trip-count comment')
     build.raw(gen, '    free (_v);')
     check(_last(gen) == '    free (_v);', 'opaque text is printed verbatim')
+
+
+def test_a_statement_is_reachable_again():
+    """Every modelled statement clears `gen._last_was_terminal`, exactly as
+    the text emitter did. The readers of the flag emit the implicit return and
+    the scope-exit frees, so a family that left a jump's True in place dropped
+    an emitted `goto` in a try/finally's unreachable tail: measured on
+    tools/pydiff_corpus/flow/15_try_finally_order.py, where `bb_17`'s teardown
+    prints are followed by `goto bb_6;`, and the call family's move silently
+    deleted the goto (byte-diff found by tools/c_oracle.py against master)."""
+    print('the terminal flag')
+    gen = _gen()
+    gen._last_was_terminal = True
+    build.assign(gen, 'i64', '0LL')
+    check(gen._last_was_terminal is False, 'an assignment is reachable again')
+    gen._last_was_terminal = True
+    build.call_void(gen, 'mojo_print_int', ['i64'])
+    check(gen._last_was_terminal is False, 'a call is reachable again')
+    gen._last_was_terminal = True
+    build.comment(gen, '/* x */')
+    check(gen._last_was_terminal is False, 'a comment is reachable again')
+
 
 
 def test_line_directive_rule():
@@ -202,6 +254,7 @@ def test_type_named():
 
 def main() -> int:
     test_shapes_render_as_the_backend_spelled_them()
+    test_a_statement_is_reachable_again()
     test_line_directive_rule()
     test_body_lines_hold_instr()
     test_compiled_function_keeps_its_shape()
