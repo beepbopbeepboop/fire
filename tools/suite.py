@@ -4835,8 +4835,7 @@ test('interp-list-ctor', [PY, 'test_interp_list_ctor.py'], cache=True, mem='tiny
      desc='interpreter List(...) copies its iterable, length=/fill= build')
 test('module-globals-compiled', [PY, 'test_module_globals_compiled.py'],
      cache=True, mem='tiny', extra=['test_module_globals_compiled.py'],
-     desc='module-scope globals() matches CPython in the compiled path',
-     disabled='bugs/gate-module-globals-compiled.md')
+     desc='module-scope globals() matches CPython in the compiled path')
 test('mojoc-precompile-signature', [PY, 'test_mojoc_precompile_signature.py'],
      cache=True, mem='tiny', extra=['test_mojoc_precompile_signature.py'],
      desc='precompile a package to a .mojoc signature artifact and read it back')
