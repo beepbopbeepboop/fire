@@ -9,7 +9,7 @@ from __future__ import annotations
 from __future__ import annotations
 import dataclasses
 import re
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_dict, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node, _sms_key
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_dict, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node, _as_funcdef_node, _sms_key
 import regex_compile
 import mlir
 import ownership_destruct
@@ -2009,54 +2009,189 @@ def param_default_is_none(func, pname: str) -> bool:
     return isinstance(_d, IdentExpr) and _as_str(_d.name) == 'None'
 
 
-def param_default_none_names(gen, func, func_key: str = None) -> set:
-    """The UNANNOTATED parameters of `func` declared `= None`.
+def param_default_is_bool(func, pname: str) -> bool:
+    """Is `pname`'s declared default a bool literal (`recursive=False`)?
 
-    They are optionally-None values: the declared default is `None`, so the
-    slot has to be able to hold both None and a real value, and the integer 0
-    must not be the same word as None (`def label(value=None): if value is
-    None: ...; if value == 0: ...`). Such a parameter is the TAGGED word, the
-    representation the runtime already has (`mojo_box_none` / `mojo_box_int`,
-    read by `mojo_word_is_none`, `mojo_repr_boxed`, `mojo_truthy_word`): a
-    call site boxes the argument by its kind and the body's stores and reads
-    dispatch on the box's kind.
+    A bool default is the same kind of evidence as `= None`: the value the
+    omitted argument pads is a Python bool, and the bare word it pads with is
+    the integer 0 / 1, which prints as that integer (`f(1)` answered `0` for
+    `recursive=False`, CPython `False`)."""
+    _d = (getattr(func, 'param_defaults', None) or {}).get(_as_str(pname).lstrip('*'))
+    return isinstance(_d, BoolLiteral)
+
+
+def _is_bool_or_none_literal(expr) -> bool:
+    """A call argument whose value is a bool or None literal: the two kinds
+    the `int64_t` word cannot carry (True is 1, None is 0)."""
+    if isinstance(expr, (BoolLiteral, NoneLiteral)):
+        return True
+    return isinstance(expr, IdentExpr) and _as_str(expr.name) == 'None'
+
+
+def callsite_tagged_literal_params(module_stmts, all_functions,
+                                   all_structs_for_methods) -> dict:
+    """Whole-module call-site evidence for the tagged word: `{callee name:
+    {parameter name}}` for every bare-name call to an ORDINARY module-level
+    `def` that passes a bool or None LITERAL for one of its parameters.
+
+    The callee's own body cannot know this: `f(True)` and `f(1)` reach an
+    unannotated `v` as the same bits, so the kind has to be tagged at the
+    call site and read back by the body. A name defined twice is dropped
+    (no single callee to map arguments onto). Methods are not resolved by
+    name, so a `obj.m(True)` call is not seen here; that is a known gap, not
+    a claim that the parameter is untagged. A `*expr` / `**expr` unpack makes
+    the call's arguments unmappable, so that call contributes nothing.
+    `module_stmts` is the whole module (its top-level calls are call sites
+    too); `all_functions` / `all_structs_for_methods` supply the callees."""
+    defs: dict = {}
+    dups: set = set()
+    # Every call in the module is a root: a top-level `print(g(True))` lives
+    # in `module_stmts`, outside any function body.
+    bodies: list = [module_stmts]
+    for s in all_functions:
+        if isinstance(s, FunctionDef):
+            _fd = _as_funcdef_node(s)
+            _nm = _as_str(_fd.name)
+            if _nm in defs:
+                dups.add(_nm)
+            defs[_nm] = _fd
+            bodies.append(_fd.body)
+    for s in all_structs_for_methods:
+        if isinstance(s, StructDef):
+            for m in s.methods:
+                bodies.append(_as_funcdef_node(m).body)
+    for _nm in dups:
+        defs.pop(_nm, None)
+    out: dict = {}
+    for _body in bodies:
+        for _n in gimple_exprtypes._walk_ast(_body):
+            if not isinstance(_n, CallExpr):
+                continue
+            _cn = _as_callexpr_node(_n)
+            if not isinstance(_cn.func, IdentExpr):
+                continue
+            _cname = _as_str(_as_ident_node(_cn.func).name)
+            _fd = defs.get(_cname)
+            if _fd is None:
+                continue
+            _tag_literal_call_args(_fd, _cn, out)
+    return out
+
+
+def _tag_literal_call_args(fd, cn, out: dict) -> None:
+    """Record into `out` the parameters of `fd` that call `cn` binds a bool or
+    None literal to (positionally, then by keyword name)."""
+    for _a in (cn.args or []):
+        if isinstance(_a, UnaryOp) and _as_str(_a.op) in ('*', '**'):
+            return
+    for _kw in (cn.kwargs or []):
+        if isinstance(_kw[1], UnaryOp) and _as_str(_kw[1].op) == '**':
+            return
+    _params = list(getattr(fd, 'params', None) or [])
+    _pairs: list = []
+    for _i, _a in enumerate(cn.args or []):
+        if _i >= len(_params):
+            break
+        _pn = _as_str(_params[_i][0] if isinstance(_params[_i], (tuple, list))
+                      else _params[_i])
+        if _pn.startswith('*'):
+            break
+        _pairs.append((_pn, _a))
+    for _kw in (cn.kwargs or []):
+        _pairs.append((_as_str(_kw[0]), _kw[1]))
+    for _pn, _node in _pairs:
+        if _is_bool_or_none_literal(_node):
+            out.setdefault(_as_str(fd.name), set()).add(_pn)
+
+
+def param_tagged_defaults(func, names) -> dict:
+    """`{parameter name: default expression}` for each of `names` that has a
+    declared default. `emit_infra._box_param_call_args` boxes an OMITTED
+    argument's padded default by this node, so the pad is the same box a
+    passed value of that kind would be."""
+    _defs = getattr(func, 'param_defaults', None) or {}
+    out: dict = {}
+    for _pn in (names or ()):
+        _d = _defs.get(_as_str(_pn).lstrip('*'))
+        if _d is not None:
+            out[_as_str(_pn)] = _d
+    return out
+
+
+def param_default_none_names(gen, func, func_key: str = None) -> set:
+    """The UNANNOTATED parameters of `func` that must hold the TAGGED word.
+
+    The tagged word is the representation the runtime already has
+    (`mojo_box_none` / `mojo_box_int` / `mojo_box_from_bool`, read by
+    `mojo_word_is_none`, `mojo_repr_boxed`, `mojo_truthy_word`): a call site
+    boxes the argument by its kind and the body's stores and reads dispatch on
+    the box's kind. Three sources of evidence put a parameter in the set:
+
+      * declared `= None`: None and the integer 0 are the same bits, and
+        `if value is None` / `== 0` must tell them apart;
+      * declared a bool literal (`recursive=False`): an omitted argument pads
+        the bare 0/1 and `str()` of it prints the integer;
+      * a call site in the module passes a bool or None LITERAL for it
+        (`callsite_tagged_literal_params`): `g(True)` must reach the body
+        as a True, not as the 1 that `str()` would print.
+
+    The two later sources apply only to ordinary functions: a generator or
+    async def has a coroutine ABI whose slots the coro tables own.
 
     Excluded when the parameter resolved to a declared C type that already has
-    a distinct absent value: an annotated parameter keeps its annotation, and
+    a distinct absent value (an annotated parameter keeps its annotation, and
     an UNANNOTATED one that usage inference or its call sites resolved to a
-    pointer/container (a nullable `char *`, where None is NULL) keeps that
-    type. Only a slot that would otherwise be the plain `int64_t` word — where
-    None and 0 are the same bits — is boxed."""
+    pointer/container, a nullable `char *` where None is NULL, keeps that
+    type). Only a slot that would otherwise be the plain `int64_t` word is
+    boxed."""
     out: set = set()
+    _fname = _as_str(getattr(func, 'name', ''))
+    _key = _as_str(func_key) if func_key is not None else _fname
     _ann = {_as_str(_p[0]): (_p[1] if isinstance(_p, (tuple, list)) and len(_p) > 1 else None)
             for _p in (getattr(func, 'params', None) or [])
             if isinstance(_p, (tuple, list))}
-    _inferred = (getattr(gen, '_inferred_param_types', None) or {}).get(
-        _as_str(func_key) if func_key is not None
-        else _as_str(getattr(func, 'name', ''))) or {}
+    _coro_fn = bool(getattr(func, 'is_generator', False)
+                    or getattr(func, 'is_async', False))
+    _calls = (getattr(gen, '_callsite_tagged_params', None) or {}).get(_key) or ()
     for _pn in _ann:
         if _ann[_pn] is not None or _as_str(_pn).startswith('*'):
             continue
-        if not param_default_is_none(func, _pn):
+        _none = param_default_is_none(func, _pn)
+        if not _none:
+            if _coro_fn:
+                continue
+            if not (param_default_is_bool(func, _pn) or _pn in _calls):
+                continue
+        if not _plain_word_slot(gen, func, _key, _pn):
             continue
-        _ct = _inferred.get(_as_str(_pn)) if hasattr(_inferred, 'get') else None
-        if isinstance(_ct, str) and not gimple_ctypes.TypeLattice.is_int_word(_ct):
-            continue
-        if not isinstance(_ct, str):
-            # The other resolver `_param_ctype` consults for an unannotated
-            # parameter is the whole-module call-site kind scan. A slot every
-            # call site passes a str/float for is that type, not the box.
-            try:
-                import mojo.middle.coro as _coro
-                _ck = _coro._CALLSITE_PARAM_KINDS.get(
-                    _as_str(getattr(func, 'name', '')), {}).get(_as_str(_pn))
-                if isinstance(_ck, str) and not gimple_ctypes.TypeLattice.is_int_word_or_none(_coro._KIND_TO_SLOT_CTYPE.get(
-                        _ck)):
-                    continue
-            except Exception:
-                pass
         out.add(_as_str(_pn))
     return out
+
+
+def _plain_word_slot(gen, func, key, pname) -> bool:
+    """True when an unannotated parameter's resolved C type is the plain
+    `int64_t` word (or still unresolved), i.e. the slot a tagged word may take.
+    A slot usage inference or the call-site kind scan typed as a pointer or
+    container keeps that type."""
+    _all = getattr(gen, '_inferred_param_types', None) or {}
+    _fn_types = _all.get(_as_str(key)) if hasattr(_all, 'get') else None
+    _ct = _fn_types.get(_as_str(pname)) if hasattr(_fn_types, 'get') else None
+    if isinstance(_ct, str) and not gimple_ctypes.TypeLattice.is_int_word(_ct):
+        return False
+    if not isinstance(_ct, str):
+        # The other resolver `_param_ctype` consults for an unannotated
+        # parameter is the whole-module call-site kind scan. A slot every
+        # call site passes a str/float for is that type, not the box.
+        try:
+            import mojo.middle.coro as _coro
+            _ck = _coro._CALLSITE_PARAM_KINDS.get(
+                _as_str(getattr(func, 'name', '')), {}).get(_as_str(pname))
+            if isinstance(_ck, str) and not gimple_ctypes.TypeLattice.is_int_word_or_none(_coro._KIND_TO_SLOT_CTYPE.get(
+                    _ck)):
+                return False
+        except Exception:
+            pass
+    return True
 
 
 # The value kind an `isinstance(p, T)` type argument names, by the BUILTIN
