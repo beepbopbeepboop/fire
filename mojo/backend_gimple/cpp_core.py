@@ -8849,20 +8849,20 @@ def _cps_if_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         cond = f"mojo_truthy_word((int64_t)(intptr_t)({cond}))"
     else:
         cond = _cpp_untyped_word_truth(gen, cond_node, cond)
-    lines.append(f"{indent}if ({cond}) {{")
+    lines.append(_cpp_ir_line(indent, 'if', cond))
     for inner in s.then_body:
         lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-    lines.append(f"{indent}}}")
+    lines.append(_cpp_ir_line(indent, 'end'))
     for econd, ebody in s.elifs:
-        lines.append(f"{indent}else if ({gen._cpp_expr(econd)}) {{")
+        lines.append(_cpp_ir_line(indent, 'elseif', gen._cpp_expr(econd)))
         for inner in ebody:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-        lines.append(f"{indent}}}")
+        lines.append(_cpp_ir_line(indent, 'end'))
     if s.else_body:
-        lines.append(f"{indent}else {{")
+        lines.append(_cpp_ir_line(indent, 'else'))
         for inner in s.else_body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-        lines.append(f"{indent}}}")
+        lines.append(_cpp_ir_line(indent, 'end'))
     return lines
 
 

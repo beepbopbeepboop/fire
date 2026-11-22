@@ -30,6 +30,17 @@ Stage 7's remaining half, in this order:
    `python3 tools/extract_arm.py --list mojo/backend_gimple/cpp_core.py <parent> 25`, which now
    prints `0 lines can be moved` for all five printers.
 
+## Status 2026-11-22 (ninth and tenth rounds): more statement headers on the IR
+
+- `_cps_multi_assign_stmt` prints each `name = value;` through `_cpp_assign_line`.
+- `_cps_if_stmt` builds its `if`, `else if`, `else` headers and every closing brace through
+  `_cpp_ir_line` (`if` / `elseif` / `else` / `end` shapes, which `mojo/ir/instr.py` already had).
+- Verified each against its base: `test_gimple_cpp_core_arms.py` 30/0; `c_oracle` identical on all 285 C
+  programs and all 13 coroutine C++ companions; `--closure` no new stubs (3 == 3).
+- Still text: the expression arms (`_cpx_*`, which are f-string expressions, not statement lines, so they
+  need expression shapes, not headers), and the statement arms' bodies in `_cps_assign_stmt` (72 text
+  lines), `_cps_expr_stmt` (30), and the `_cpf_*`/`_cpw_*`/`_cpy_*` arms.
+
 ## Status 2026-11-22 (eighth round): `_cps_while_stmt`'s header, guard and closers are on the IR
 
 - `mojo/ir/instr.py` gained `while` (`while (<cond>) {`) and `break` (`break;`) shapes; `if` and `end` were
