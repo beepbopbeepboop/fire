@@ -19,21 +19,25 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from gimple_codegen import compile_to_gimple
+from gimple_codegen import compile_linked, compile_to_gimple
 import elaborate
 
 _SRC = ('fn f[T: DType](x: T) -> Bool where T.is_floating_point():\n'
         '    return True\n')
 
 
-def _compile(src):
+def _write(src):
     # The elaborator reads the file at `filename`, so the source must live in
     # a real file for the generic template to be found.
     d = tempfile.mkdtemp(prefix='where_clause_')
     p = os.path.join(d, 't.mojo')
     with open(p, 'w') as fh:
         fh.write(src)
-    return compile_to_gimple(src, do_imports=True, filename=p)
+    return p
+
+
+def _compile(src):
+    return compile_to_gimple(src, do_imports=True, filename=_write(src))
 
 
 def test_violated_where_clause_fails():
@@ -46,7 +50,23 @@ def test_violated_where_clause_fails():
 
 
 def test_satisfied_where_clause_passes():
-    _compile(_SRC + '\nfn main():\n    print(f[DType.float32](1.0))\n')
+    """A satisfied where clause lets the bracketed call through. The call
+    instantiates the generic, which only link mode does (the single-unit path
+    refuses it: `_refuse_in_process_bracket_call`), so the pass is checked in
+    link mode, where the instance must come out as its own object. The
+    in-process compile must refuse with the link-mode message, not with a
+    where-clause error, so the refusal is not mistaken for a rejection of the
+    constraint."""
+    src = _SRC + '\nfn main():\n    print(f[DType.float32](1.0))\n'
+    _c, _dylibs, objects, _cpp, _cxx = compile_linked(src, _write(src))
+    assert len(objects) >= 1, 'satisfied call produced no generic instance'
+    try:
+        _compile(src)
+    except RuntimeError as e:
+        assert 'violated constraint' not in str(e), e
+        assert 'link mode' in str(e), e
+        return
+    raise AssertionError('in-process compile accepted a bracketed generic call')
 
 
 def test_dot_relative_dtype_satisfies_a_dtype_where_clause():
