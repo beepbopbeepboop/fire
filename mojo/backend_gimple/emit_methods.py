@@ -34,6 +34,7 @@ import mlir
 import mojo.backend_gimple.emit_funcs as _ggf
 from fire_compiler import _as_set
 import mojo.middle.types as gimple_ctypes
+import mojo.ir.build as build
 from mojo.middle.exprtypes import _walk_ast
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -476,13 +477,13 @@ def _cattr_instance_read(gen, ov, ot, aname, gname, gtype):
         _classval = gen._new_val(gtype, f'*{_p}')
     if not gimple_ctypes.TypeLattice.ends_in_star(ot):
         return _classval
-    gen._emit("  _mojo_getattr_missed = 0;")
-    gen._emit("  _mojo_getattr_nothrow = 1;")
+    build.assign(gen, f'_mojo_getattr_missed', f'0')
+    build.assign(gen, f'_mojo_getattr_nothrow', f'1')
     _vp = gen._cast('void *', f"{ov}")
     _name = gen._new_val('char *', gen._intern_string(aname))
     _raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                           [('void *', _vp), ('char *', _name)])
-    gen._emit("  _mojo_getattr_nothrow = 0;")
+    build.assign(gen, f'_mojo_getattr_nothrow', f'0')
     _missed = gen._new_val('int', '_mojo_getattr_missed')
     _cond = gen._cmp(_missed, '!=', '0')
     _hit = gen._cast(gtype, _raw)
@@ -502,11 +503,11 @@ def _cattr_instance_dyn_read(gen, ov, ot, aname, gname, gtype):
     The hit value comes back as the runtime's int64 word and is cast to the
     class attribute's C type."""
     _vp = gen._cast('void *', f"{ov}")
-    gen._emit("  _mojo_getattr_missed = 0;")
-    gen._emit("  _mojo_getattr_nothrow = 1;")
+    build.assign(gen, f'_mojo_getattr_missed', f'0')
+    build.assign(gen, f'_mojo_getattr_nothrow', f'1')
     _r = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                         [('void *', _vp), ('char *', gen._intern_string(aname))])
-    gen._emit("  _mojo_getattr_nothrow = 0;")
+    build.assign(gen, f'_mojo_getattr_nothrow', f'0')
     _missed = gen._new_val('int', '_mojo_getattr_missed')
     _hit = gen._cmp(_missed, '==', '0')
     t = gen._new_temp(gtype)
@@ -2082,7 +2083,7 @@ def _lower_float_bit_accessor(gen, ov_local, ot, method):
         if method == '_to_bits_signed':
             bits = f'(int64_t)(int32_t)({bits})'
     t = gen._new_temp('int64_t')
-    gen._emit(f'  {t} = (int64_t)({bits});')
+    build.assign(gen, f'{t}', f'(int64_t)({bits})')
     return 'int64_t', t
 
 
@@ -2283,7 +2284,7 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
             # cast store is "non-register as LHS of unary operation" —
             # the same two-step temp pattern the loop emitters use).
             z = gen._new_temp(ot)
-            gen._emit(f'  {z} = ({ot})0;')
+            build.assign(gen, f'{z}', f'({ot})0')
             gen._copy(_ut_lv, z)
             # PART 6 (2026-10-22, family C): the consume clears the
             # field, so a TAGGED-Optional field's side-band must clear
@@ -2304,9 +2305,9 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
             if (_ut_struct in gen._tagged_optional_fields
                     and _ut_field in gen._tagged_optional_fields[_ut_struct]):
                 _zb = gen._new_val('_Bool', '0')
-                gen._emit(
-                    f'  {_ut_var}->{gimple_ctypes._safe_field(_ut_field)}'
-                    f'_is_some = {_zb};')
+                build.assign(gen,
+                             f'{_ut_var}->{gimple_ctypes._safe_field(_ut_field)}_is_some',
+                             _zb)
             return ot, t
     # `.__bool__()` on an integer-scalar receiver — the boxed
     # PythonObject truthiness (2026-10-21 part 4, further,
@@ -2429,13 +2430,13 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
                             b1 = gen._new_temp('int64_t')
                             gen._rt_into(b0, 'mojo_list_get_int', [bv, '0'])
                             gen._rt_into(b1, 'mojo_list_get_int', [bv, '1'])
-                            gen._emit(f'  {result} = (({ot})(({b0} & 255LL) << 8)) | (({ot})({b1} & 255LL));')
+                            build.assign(gen, f'{result}', f'(({ot})(({b0} & 255LL) << 8)) | (({ot})({b1} & 255LL))')
                         else:
                             b0 = gen._new_temp('int64_t')
                             b1 = gen._new_temp('int64_t')
                             gen._rt_into(b0, 'mojo_list_get_int', [bv, '0'])
                             gen._rt_into(b1, 'mojo_list_get_int', [bv, '1'])
-                            gen._emit(f'  {result} = (({ot})({b0} & 255LL)) | (({ot})(({b1} & 255LL) << 8));')
+                            build.assign(gen, f'{result}', f'(({ot})({b0} & 255LL)) | (({ot})(({b1} & 255LL) << 8))')
                         return ot, result
                     elif ot in ('uint32_t', 'int32_t', 'unsigned int', 'int'):
                         if is_big:
@@ -2443,13 +2444,13 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
                             b1 = gen._new_temp('int64_t'); gen._rt_into(b1, 'mojo_list_get_int', [bv, '1'])
                             b2 = gen._new_temp('int64_t'); gen._rt_into(b2, 'mojo_list_get_int', [bv, '2'])
                             b3 = gen._new_temp('int64_t'); gen._rt_into(b3, 'mojo_list_get_int', [bv, '3'])
-                            gen._emit(f'  {result} = (({ot})(({b0}&255LL)<<24)) | (({ot})(({b1}&255LL)<<16)) | (({ot})(({b2}&255LL)<<8)) | (({ot})({b3}&255LL));')
+                            build.assign(gen, f'{result}', f'(({ot})(({b0}&255LL)<<24)) | (({ot})(({b1}&255LL)<<16)) | (({ot})(({b2}&255LL)<<8)) | (({ot})({b3}&255LL))')
                         else:
                             b0 = gen._new_temp('int64_t'); gen._rt_into(b0, 'mojo_list_get_int', [bv, '0'])
                             b1 = gen._new_temp('int64_t'); gen._rt_into(b1, 'mojo_list_get_int', [bv, '1'])
                             b2 = gen._new_temp('int64_t'); gen._rt_into(b2, 'mojo_list_get_int', [bv, '2'])
                             b3 = gen._new_temp('int64_t'); gen._rt_into(b3, 'mojo_list_get_int', [bv, '3'])
-                            gen._emit(f'  {result} = (({ot})({b0}&255LL)) | (({ot})(({b1}&255LL)<<8)) | (({ot})(({b2}&255LL)<<16)) | (({ot})(({b3}&255LL)<<24));')
+                            build.assign(gen, f'{result}', f'(({ot})({b0}&255LL)) | (({ot})(({b1}&255LL)<<8)) | (({ot})(({b2}&255LL)<<16)) | (({ot})(({b3}&255LL)<<24))')
                         return ot, result
             except Exception:
                 pass
@@ -2745,7 +2746,7 @@ def _lmc_word_remove_clear(gen, node: gimple_ctypes.CallExpr, method: str, ot: s
         gen._emit_label(bb_dict)
         dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
         gen._rt_void('mojo_dict_clear', [dp])
-        gen._emit(f"  {result} = 0;")
+        build.assign(gen, f'{result}', f'0')
         gen._goto(bb_after)
         gen._emit_label(bb_not_dict)
         iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', ip)])
@@ -2753,12 +2754,12 @@ def _lmc_word_remove_clear(gen, node: gimple_ctypes.CallExpr, method: str, ot: s
         gen._emit_label(bb_set)
         sp = gen._coerce_to_type('int64_t', 'MojoSet *', ip)
         gen._rt_void('mojo_set_clear', [sp])
-        gen._emit(f"  {result} = 0;")
+        build.assign(gen, f'{result}', f'0')
         gen._goto(bb_after)
         gen._emit_label(bb_not_set)
         lp = gen._coerce_to_type('int64_t', 'MojoList *', ip)
         gen._rt_void('mojo_list_clear', [lp])
-        gen._emit(f"  {result} = 0;")
+        build.assign(gen, f'{result}', f'0')
         gen._emit_label(bb_after)
         return 'int', result
     # method == 'remove'
@@ -2775,7 +2776,7 @@ def _lmc_word_remove_clear(gen, node: gimple_ctypes.CallExpr, method: str, ot: s
     else:
         av64 = gen._to_int64(at, av)
         gen._emit_call('void', '', 'mojo_set_discard_int', [('MojoSet *', sp), ('int64_t', av64)])
-    gen._emit(f"  {result} = 0;")
+    build.assign(gen, f'{result}', f'0')
     gen._goto(bb_after)
     gen._emit_label(bb_not_set)
     lp = gen._coerce_to_type('int64_t', 'MojoList *', ip)
@@ -2783,7 +2784,7 @@ def _lmc_word_remove_clear(gen, node: gimple_ctypes.CallExpr, method: str, ot: s
         gen._emit_call('void', '', 'mojo_list_remove_str', [('MojoList *', lp), ('char *', av)])
     else:
         gen._emit_call('void', '', 'mojo_list_remove_int', [('MojoList *', lp), (at, av)])
-    gen._emit(f"  {result} = 0;")
+    build.assign(gen, f'{result}', f'0')
     gen._emit_label(bb_after)
     return 'int', result
 
@@ -2870,7 +2871,7 @@ def _emit_fieldwise_copy_into(gen, dst, src_local, sname, depth):
         _fnm = gimple_ctypes._safe_field(_as_str(_fn))
         _ft = _as_str((gen.struct_field_types.get(sname) or {})[_fn])
         _fv = gen._new_temp(_ft)
-        gen._emit(f"  {_fv} = {src_local}->{_fnm};")
+        build.assign(gen, f'{_fv}', f'{src_local}->{_fnm}')
         _cpy = _IMPLICIT_COPY_RUNTIME.get(_ft)
         if _cpy is not None:
             _fv = gen._call_expr(_ft, _cpy, [(_ft, _fv)])
@@ -2906,7 +2907,7 @@ def _emit_fieldwise_copy_into(gen, dst, src_local, sname, depth):
             else:
                 _emit_fieldwise_copy_into(gen, _sub, _fv, _fsn, depth + 1)
             _fv = _sub
-        gen._emit(f"  {dst}->{_fnm} = {_fv};")
+        build.assign(gen, f'{dst}->{_fnm}', f'{_fv}')
         # PART 6 (2026-10-22, family C): a TAGGED-Optional field's is_some
         # side-band is a layout-only member (module_gen's typedef renderer
         # adds it; it is NOT in struct_field_types), so this fieldwise loop
@@ -2917,8 +2918,8 @@ def _emit_fieldwise_copy_into(gen, dst, src_local, sname, depth):
         _tagged_f = gen._tagged_optional_fields.get(sname)
         if _tagged_f and _as_str(_fn) in _tagged_f:
             _sv = gen._new_temp('_Bool')
-            gen._emit(f"  {_sv} = {src_local}->{_fnm}_is_some;")
-            gen._emit(f"  {dst}->{_fnm}_is_some = {_sv};")
+            build.assign(gen, f'{_sv}', f'{src_local}->{_fnm}_is_some')
+            build.assign(gen, f'{dst}->{_fnm}_is_some', f'{_sv}')
     # The presence words are not in struct_field_types (see
     # StructDef.presence_fields), so the loop above never copies them: a
     # copy of an object that had a minted field set must keep answering
@@ -4487,7 +4488,7 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
             # *p into a char temp, then compare (a bare `_t = (*p ==
             # '/')` is rejected: "expected expression before '('").
             ch = gen._new_temp('char')
-            gen._emit(f'  {ch} = *{arg_val};')
+            build.assign(gen, f'{ch}', f'*{arg_val}')
             # GIMPLE: compare as ints (a char-vs-char-literal compare
             # is a "mismatching comparison operand types").
             ci = gen._cast('int', ch)
@@ -4808,11 +4809,11 @@ def _lmc_async_wait(gen, _wait_obj) -> tuple[str, str]:
         # honest runtime abort() instead of trying to call
         # nonexistent extern "C" API functions for a `base` that
         # was never generated.
-        gen._emit(
-            '  fprintf(stderr, "mojo: .wait() reached on a stub '
+        build.call_void(gen, 'fprintf', ['stderr',
+            '"mojo: .wait() reached on a stub '
             'create_task/create_raising_task handle (deliberate '
             'stub -- see gimple_codegen.py\'s _lower_call comment) '
-            '-- aborting\\n");')
+            '-- aborting\\n"'], True)
         gen._rt_void('abort', [])
         result = gen._new_val('int64_t', '(int64_t)0')
         return 'int64_t', result
@@ -6658,7 +6659,7 @@ def _ldm_get(gen, ov: str, args: list) -> tuple:
                 # `func_return_types.get(m, func_return_types.get(b, None))`
                 # then typed every unknown method call's result `0`.
                 _dm = gen._new_temp('char *')
-                gen._emit(f"  {_dm} = (char *)0;")
+                build.assign(gen, f'{_dm}', f'(char *)0')
             else:
                 _dm = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', gen._to_int64(default_ty, default_val))])
@@ -7473,7 +7474,7 @@ def _lower_pointer_method(gen, ov: str, ot: str, method: str, args: list) -> tup
         ovl = gen._ensure_local(ot, ov)
         sv = gen._new_temp(elem)
         gen._safe_coerce_emit(gen._quick_type(args[0]), elem, av, sv)
-        gen._emit(f"  *{ovl} = {sv};")
+        build.assign(gen, f'*{ovl}', f'{sv}')
         return 'int', gen._new_val('int', '0')
     if method == 'offset' and args:
         _, nv = gen.lower_expr(args[0])
@@ -7492,7 +7493,7 @@ def _lower_pointer_method(gen, ov: str, ot: str, method: str, args: list) -> tup
                   '_get_ref_with_unsafe_interior_origin',
                   'get_ref_with_origin', '_get_ref_with_origin'):
         t = gen._new_temp(ot)
-        gen._emit(f"  {t} = {ov};  /* {method}: pass-through */")
+        build.assign(gen, f'{t}', f'{ov}', f'  /* {method}: pass-through */')
         return ot, t
     if method in ('destroy_pointee', 'take_pointee', 'initialize_pointee',
                   'init_pointee_copy', 'init_pointee_move', 'init_pointee_explicit_copy'):
@@ -7513,14 +7514,14 @@ def _lower_pointer_method(gen, ov: str, ot: str, method: str, args: list) -> tup
                 # dereference here, not a cast.
                 elem_ptr = elem + ' *'
                 av_ptr = av if at == elem_ptr else gen._cast(elem_ptr, av)
-                gen._emit(f"  *{ovl} = *{av_ptr};")
+                build.assign(gen, f'*{ovl}', f'*{av_ptr}')
             else:
                 # Spill the value too: a pointer→int64_t coercion is a
                 # double cast `(int64_t)(void*)x` that GIMPLE rejects
                 # inside `*p = ...`.
                 sv = gen._new_temp(elem)
                 gen._safe_coerce_emit(at, elem, av, sv)
-                gen._emit(f"  *{ovl} = {sv};")
+                build.assign(gen, f'*{ovl}', f'{sv}')
         return 'int', gen._new_val('int', '0')
     if method in ('strided_load', 'gather'):
         return gen._stub_result(elem, f'*{ov}', f'TODO: {method}')
@@ -7705,7 +7706,7 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
             iter_val = gen._materialize_as_list(iter_type, iter_val)
             return 'char *', gen._call_expr('char *', 'mojo_str_join', [('char *', cstr_ov), ('MojoList *', iter_val)])
         t = gen._new_temp('char *')
-        gen._emit(f"  {t} = {cstr_ov};  /* join: no iterable */")
+        build.assign(gen, f'{t}', f'{cstr_ov}', f'  /* join: no iterable */')
         return 'char *', t
     # ── the `[start[, end]]` window family ───────────────────────────────────
     # startswith/endswith/find/index/rfind/rindex/count all take an optional
@@ -8385,7 +8386,7 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
             _conv = gen._rt_call('MojoList *', 'mojo_list_new', [])
             _jlen = gen._rt_call('int64_t', 'mojo_list_len', [f"{it}"])
             _ji = gen._new_temp('int64_t')
-            gen._emit(f"  {_ji} = 0;")
+            build.assign(gen, f'{_ji}', f'0')
             _bc = gen._new_bb(); _bb = gen._new_bb(); _ba = gen._new_bb()
             gen._goto(_bc)
             gen._emit_label(_bc)
@@ -9082,7 +9083,7 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
             )
         if not _has_concrete and not (getattr(node, 'args', None) or getattr(node, 'kwargs', None)):
             t = gen._new_temp(ot)
-            gen._emit(f"  {t} = {ov};  /* {method}: pass-through */")
+            build.assign(gen, f'{t}', f'{ov}', f'  /* {method}: pass-through */')
             return ot, t
     is_class_ref = False
     # `cls.method(...)` inside a @classmethod: the receiver `cls` (in `ov`)

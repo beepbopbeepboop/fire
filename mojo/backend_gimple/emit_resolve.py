@@ -47,6 +47,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.float8_dtype as _float8_dtype
 import gimple_codegen
 import mojo.middle.rt_call as rt_call
+import mojo.ir.build as build
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_infra as ginf
@@ -2387,7 +2388,7 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
             # "toplevel_comptime_const_visible_everywhere".
             mag = gen._new_temp(ctype)
             gen._cast_into(mag, ctype, f"{rhs[1:]}")
-            gen._emit(f'  {t} = -{mag};')
+            build.assign(gen, t, f'-{mag}')
         else:
             gen._cast_into(t, ctype, rhs)
     else:
@@ -2529,8 +2530,9 @@ def _bool_and(gen, left: str, right: str) -> str:
     return t
 
 
-def _rt_args(gen, fname: str, args: list) -> str:
-    """Spell the argument list of a call to runtime function `fname`.
+def _rt_args(gen, fname: str, args: list) -> list:
+    """The argument list of a call to runtime function `fname`, one spelling
+    per argument.
 
     `args` are VALUES (temp or variable names, or literal text), not
     `(ctype, value)` pairs: a call site states what it passes and never what
@@ -2541,10 +2543,10 @@ def _rt_args(gen, fname: str, args: list) -> str:
     step `_emit_call` takes, so a runtime call is converted the same way
     whichever of the two spells it."""
     fixed: list = ginf._repr_fix_args(gen, fname, args)
-    parts: list[str] = []
+    parts: list = []
     for a in fixed:
         parts.append(_as_str(a))
-    return ', '.join(parts)
+    return parts
 
 
 def _rt_call(gen, ret_type: str, fname: str, args: list) -> str:
@@ -2552,24 +2554,25 @@ def _rt_call(gen, ret_type: str, fname: str, args: list) -> str:
 
     THE way to call a runtime function for its value.  Do not spell the call
     as text inside `gen._new_val(...)` (doc/GIR.md, stage 2)."""
-    rhs: str = fname + ' (' + _rt_args(gen, fname, args) + ')'
+    fixed: list = _rt_args(gen, fname, args)
+    rhs: str = fname + ' (' + ', '.join(fixed) + ')'
     if _dtrace.enabled():
         _dtrace.note(_dtrace.str_hash(_as_str(ret_type)) ^ _dtrace.str_hash(rhs))
     t: str = gen._new_temp(ret_type)
     ginf.note_call_result(gen, t, fname)
-    gen._emit('  ' + t + ' = ' + rhs + ';')
+    build.call_into(gen, t, fname, fixed)
     return t
 
 
 def _rt_into(gen, dst: str, fname: str, args: list) -> None:
     """`dst = fname (args);` for a runtime function, into an existing temp."""
     ginf.note_call_result(gen, _as_str(dst).strip(), fname)
-    gen._emit('  ' + _as_str(dst) + ' = ' + fname + ' (' + _rt_args(gen, fname, args) + ');')
+    build.call_into(gen, _as_str(dst), fname, _rt_args(gen, fname, args))
 
 
 def _rt_void(gen, fname: str, args: list) -> None:
     """`fname (args);` for a runtime function called for its effect."""
-    gen._emit('  ' + fname + ' (' + _rt_args(gen, fname, args) + ');')
+    build.call_void(gen, fname, _rt_args(gen, fname, args))
 
 
 def _cast(gen, ctype: str, val: str) -> str:
@@ -2587,7 +2590,7 @@ def _cast(gen, ctype: str, val: str) -> str:
 def _cast_into(gen, dst: str, ctype: str, val: str) -> None:
     """`dst = (ctype) val;` into an existing temp, which must be declared
     `ctype`."""
-    gen._emit('  ' + _as_str(dst) + ' = (' + _as_str(ctype) + ')' + _as_str(val) + ';')
+    build.cast_into(gen, _as_str(dst), _as_str(ctype), _as_str(val))
 
 
 _C_COMPARE_OPS: dict[str, bool] = {'==': True, '!=': True, '<': True, '>': True,
@@ -2612,13 +2615,17 @@ def _widen_operand(gen, want: str, v: str) -> str:
     return v
 
 
-def _binop_text(gen, ctype: str, a: str, op: str, b: str) -> str:
-    """The right-hand side `a op b`, operands converted as GIMPLE requires.
+def _binop_operands(gen, ctype: str, a: str, op: str, b: str) -> list:
+    """The two operand spellings of `a op b`, converted as GIMPLE requires.
 
     Arithmetic: both operands must have the result's type, so a narrower or
     differently-classed variable is widened to `ctype`.  Comparison: the two
     operands must have each other's type, so the narrower is widened to the
-    wider (and an integer to a `double`); `ctype` (`_Bool`) is not consulted."""
+    wider (and an integer to a `double`); `ctype` (`_Bool`) is not consulted.
+
+    Returned as a list rather than joined text so the builder can make the
+    operation a statement shape; `_binop_text` is the joined form for the
+    statements that are still text."""
     a = _as_str(a)
     b = _as_str(b)
     if op in _C_COMPARE_OPS:
@@ -2644,7 +2651,16 @@ def _binop_text(gen, ctype: str, a: str, op: str, b: str) -> str:
     elif ctype != '':
         a = _widen_operand(gen, ctype, a)
         b = _widen_operand(gen, ctype, b)
-    return a + ' ' + op + ' ' + b
+    parts: list = []
+    parts.append(a)
+    parts.append(b)
+    return parts
+
+
+def _binop_text(gen, ctype: str, a: str, op: str, b: str) -> str:
+    """`a op b` as text; see `_binop_operands`."""
+    parts: list = _binop_operands(gen, ctype, a, op, b)
+    return parts[0] + ' ' + op + ' ' + parts[1]
 
 
 def _binop(gen, ctype: str, a: str, op: str, b: str) -> str:
@@ -2665,7 +2681,8 @@ def _binop_into(gen, dst: str, a: str, op: str, b: str) -> None:
     dst = _as_str(dst)
     dt = gen.var_types.get(dst)
     dts: str = '' if dt is None else _as_str(dt)
-    gen._emit('  ' + dst + ' = ' + _binop_text(gen, dts, a, op, b) + ';')
+    parts: list = _binop_operands(gen, dts, a, op, b)
+    build.binop_into(gen, dst, parts[0], op, parts[1])
 
 
 def _loop_head(gen, idx: str, n: str, bb_cond: str, bb_body: str,
@@ -2736,11 +2753,11 @@ def _copy(gen, dst: str, src: str) -> None:
         dts: str = _as_str(dt)
         sts: str = _as_str(st)
         if rt_call.copy_needs_cast(dts, sts):
-            gen._emit('  ' + dst + ' = (' + dts + ')' + src + ';')
+            build.copy(gen, dst, src, dts)
             return
         if dts == sts:
             ginf.carry_value_info(gen, dst, src)
-    gen._emit('  ' + dst + ' = ' + src + ';')
+    build.copy(gen, dst, src)
 
 
 def _goto(gen, label: str) -> None:
@@ -2752,8 +2769,7 @@ def _goto(gen, label: str) -> None:
 def _cond_goto(gen, cond: str, then_label: str, else_label: str) -> None:
     """`if (cond) goto then_label; else goto else_label;` -- THE way to emit a
     conditional jump.  `cond` is a `_Bool` temp (or a bare comparison)."""
-    gen._emit('  if (' + _as_str(cond) + ') goto ' + _as_str(then_label)
-              + '; else goto ' + _as_str(else_label) + ';')
+    build.cond_br(gen, _as_str(cond), _as_str(then_label), _as_str(else_label))
 
 
 def _ret(gen, val: str) -> None:
@@ -2774,8 +2790,7 @@ def _void_call(gen, fname: str, arg_pairs: list) -> tuple:
 
 
 def _emit_label(gen, label: str, freq_hint: str = ''):
-    ann = f'  /* {freq_hint} */' if freq_hint else ''
-    gen.body_lines.append(f"\n{label}:{ann}")
+    build.label(gen, label, freq_hint)
     gen._last_was_terminal = False
 
 
@@ -2935,7 +2950,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             _bl = getattr(gen, 'body_lines', None) or []
             _k = len(_bl) - 1
             while _k >= 0 and _k > len(_bl) - 400:
-                _ln = _bl[_k]
+                _ln = _bl[_k].line()
                 if _ln.startswith('#line '):
                     _parts = _ln.split()
                     if len(_parts) >= 2 and _parts[1].isdigit():
@@ -2952,7 +2967,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         _bl2 = getattr(gen, 'body_lines', None) or []
         _k2 = len(_bl2) - 1
         while _k2 >= 0 and len(_ctx) < 6 and _k2 > len(_bl2) - 200:
-            _l2 = _bl2[_k2].strip()
+            _l2 = _bl2[_k2].line().strip()
             if _l2 and not _l2.startswith('#'):
                 _ctx.append(_l2)
             _k2 -= 1
@@ -2998,7 +3013,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
                 _rv = gen._rt_call('int64_t', 'mojo_list_get_int', [f"{_lp}", _idx])
                 if not gimple_ctypes.TypeLattice.is_word(_fc):
                     _rv = gen._cast(_fc, _rv)
-            gen._emit(f'  {dest}.{_fn} = {_rv};')
+            build.assign(gen, f'{dest}.{_fn}', _rv)
         return
     if True:
         literal = v.lstrip('-').isdigit()
@@ -3010,7 +3025,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             elif d == 'uint32_t':
                 gen._rt_into(dest, 'mojo_uint32_from_int64', [f"{v}LL"])
             elif d == 'uint64_t':
-                gen._emit(f'  {dest} = {v}ULL;')
+                build.assign(gen, dest, f'{v}ULL')
             elif d == 'int8_t':
                 gen._rt_into(dest, 'mojo_int8_from_int64', [f"{v}LL"])
             elif d == 'int16_t':
@@ -3018,7 +3033,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             elif d == 'int32_t':
                 gen._rt_into(dest, 'mojo_int32_from_int64', [f"{v}LL"])
             elif gimple_ctypes.TypeLattice.is_word(d):
-                gen._emit(f'  {dest} = {v}LL;')
+                build.assign(gen, dest, f'{v}LL')
             elif gimple_ctypes.TypeLattice.is_bool(d):
                 gen._cast_into(dest, '_Bool', f"{v}")
             else:
@@ -3385,7 +3400,7 @@ def _stub_result(gen, ctype: str, value: str, note: str) -> tuple[str, str]:
     """
     gimple_ctypes._debug_note('stubbed operation', note)
     t = gen._new_temp(ctype)
-    gen._emit(f"  {t} = {value};  /* {note} */")
+    build.assign(gen, t, value, f"  /* {note} */")
     return ctype, t
 
 
@@ -4822,11 +4837,11 @@ def _coerce_span_args(gen, params, arg_pairs, span_proofs=None):
             # generalization dropped it on the strength of the (wrong) note
             # that `MojoList._data` is already `char *`.
             _data = gen._new_temp('int64_t *')
-            gen._emit(f"  {_data} = {val}->data;")
+            build.assign(gen, _data, f"{val}->data")
             _len = gen._new_temp('int64_t')
-            gen._emit(f"  {_len} = {val}->len;")
-            gen._emit(f"  {sp}->_data = (char *) {_data};")
-            gen._emit(f"  {sp}->_len = {_len};")
+            build.assign(gen, _len, f"{val}->len")
+            build.assign(gen, f"{sp}->_data", f"(char *) {_data}")
+            build.assign(gen, f"{sp}->_len", _len)
             arg_pairs[i] = ('Span *', sp)
         elif gimple_ctypes.TypeLattice.is_word(ctype) and span_proofs is not None and span_proofs[i]:
             # A Span carried in a boxed word — `List[Span[X, o]].pop()` and
@@ -4839,7 +4854,7 @@ def _coerce_span_args(gen, params, arg_pairs, span_proofs=None):
             # same address). An unproved `int64_t` deliberately keeps the
             # old ABI/diagnostic rather than casting a guess.
             sp = gen._new_temp('Span *')
-            gen._emit(f"  {sp} = (Span *) {val};")
+            build.assign(gen, sp, f"(Span *) {val}")
             arg_pairs[i] = ('Span *', sp)
     return arg_pairs
 
@@ -4892,7 +4907,7 @@ def _emit_generic_instantiation(gen, info, arg_pairs, span_proofs=None):
     if info['ret'] == 'void':
         gen._emit_call('', '', sym, arg_pairs)
         t = gen._new_temp('int')
-        gen._emit(f"  {t} = 0;  /* void generic call */")
+        build.assign(gen, t, "0", "  /* void generic call */")
         return 'int', t
     t = gen._call_expr(info['ret'], sym, arg_pairs)
     return info['ret'], t
@@ -4905,7 +4920,7 @@ def _as_ptr(gen, ctype: str, val: str) -> tuple[str, str]:
         return ctype, val
     pv = gen._new_temp('int64_t *')
     v64 = gen._ensure_local(ctype, val)
-    gen._emit(f"  {pv} = (int64_t *) {v64};")
+    build.assign(gen, pv, f"(int64_t *) {v64}")
     return 'int64_t *', pv
 
 
@@ -5026,7 +5041,7 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
         if target_type and not gimple_ctypes.TypeLattice.is_word(target_type):
             gen._safe_coerce_emit('int64_t', target_type, raw64, val_c)
         else:
-            gen._emit(f"  {val_c} = (int64_t) {raw64};")
+            build.assign(gen, val_c, f"(int64_t) {raw64}")
     if val_names is not None:
         # Unpack the nested tuple slot bound above into its own names, with
         # the accessor matching the inner tuple's recorded slot type.

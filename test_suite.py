@@ -5316,6 +5316,22 @@ UNREGISTERED = {
         'the tree kill and memcap\'s printed verdict, tested directly.',
     'test_zip_loop_target_rebind_regress.py': _BATCH_REGRESSION_REASON,
 
+    # The GIR builder / `Instr` body landing (doc/GIR.md stages 2b and 3c) ran
+    # under a task that says not to register anything. Cheap (one small
+    # compile, ~0.4 s, no build), so it wants a bucket; listed here so the
+    # estate check can see the tree. It pins what a corpus diff cannot see:
+    # each builder shape renders exactly the C text the backend used to
+    # concatenate, `gen.body_lines` holds `Instr`, the `#line` stamping rule,
+    # and `types.type_named`'s spellings. Run directly:
+    # `python3 test_gir_builder.py`.
+    'test_gir_builder.py': 'The GIR builder (mojo/ir/build.py) and stage 3c '
+        '(`gen.body_lines` holds `Instr`): the statement shapes the backend '
+        'now builds instead of spelling as text, the `#line` stamping rule, '
+        'and the type-spelling bridge the builder needs. Unregistered because '
+        "this session's task says not to register anything; the corpus-wide "
+        'byte-identity oracle is `tools/pydiff_corpus` plus the ratchet in '
+        'test_type_string_ratchet.py.',
+
     # Landed with 313513c45 (2026-10-28, while this gate triage was running —
     # the estate re-baseline of the 46 above now has to account for it too):
     # `control.py`'s own test for the status/prune half, a throwaway-repo unit
