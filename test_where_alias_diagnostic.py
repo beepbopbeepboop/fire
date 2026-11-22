@@ -151,3 +151,45 @@ if __name__ == '__main__':
     test_integer_literal_where_still_enforced()
     test_integer_literal_where_still_compiles()
     print('ok')
+
+
+# --- `alias` declarations run under the interpreter ---
+#
+# The parser marks an `alias NAME = value` binding with `is_alias` and emits
+# nothing else for the keyword. The interpreter used to see a stray
+# `ExprStmt(IdentExpr('alias'))` sentinel before it and fail with "use of
+# unknown declaration 'alias'", while the compiled path ran the same program.
+# These run the program through the real `fire.py run` CLI, the path that
+# reported the error.
+
+import subprocess
+
+
+def _run_program(src):
+    d = tempfile.mkdtemp(prefix='alias_run_')
+    p = os.path.join(d, 't.mojo')
+    with open(p, 'w') as fh:
+        fh.write(src)
+    r = subprocess.run([sys.executable, os.path.join(HERE, 'fire.py'), 'run', p],
+                       capture_output=True, text=True, timeout=120)
+    return r.returncode, r.stdout + r.stderr
+
+
+def test_module_alias_runs_under_interpreter():
+    rc, out = _run_program(
+        'alias LIMIT = 2\n'
+        'def main():\n'
+        '    print(LIMIT)\n')
+    assert rc == 0, out
+    assert '2' in out.split(), out
+    assert 'unknown declaration' not in out, out
+
+
+def test_local_alias_runs_under_interpreter():
+    rc, out = _run_program(
+        'def main():\n'
+        '    alias x = 5\n'
+        '    print(x)\n')
+    assert rc == 0, out
+    assert '5' in out.split(), out
+    assert 'unknown declaration' not in out, out
