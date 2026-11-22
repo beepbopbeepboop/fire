@@ -7078,9 +7078,9 @@ def _lower_in_impl(gen, node: gimple_ctypes.BinaryOp, negate: bool) -> tuple[str
     # is now correct, but the declared local is still int64_t at the C
     # level, so callees expecting a real char*/pointer need an explicit
     # cast, not just the corrected bookkeeping type.
-    if gimple_ctypes.TypeLattice.is_cstr(xt) and gen.var_types.get(xv) == 'int64_t':
+    if gimple_ctypes.TypeLattice.is_cstr(xt) and gimple_ctypes.TypeLattice.is_word(gen.var_types.get(xv)):
         xv = gen._cast('char *', xv)
-    elif gimple_ctypes.TypeLattice.ends_in_star(xt) and not gimple_ctypes.TypeLattice.is_cstr(xt) and gen.var_types.get(xv) == 'int64_t':
+    elif gimple_ctypes.TypeLattice.ends_in_star(xt) and not gimple_ctypes.TypeLattice.is_cstr(xt) and gimple_ctypes.TypeLattice.is_word(gen.var_types.get(xv)):
         xv = gen._cast(xt, xv)
     return gen._lower_in_impl_values(xt, xv, node.right, negate,
                                      x_is_none=is_none_needle(gen, node.left),
@@ -7190,7 +7190,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
     # rv itself is still declared int64_t at the C level even after the
     # logical-type resolution above (only the bookkeeping dict changed) —
     # cast it to the real pointer type, same idiom as _gen_for_set/_gen_for_dict.
-    if gimple_ctypes.TypeLattice.ends_in_star(rt) and gen.var_types.get(rv) == 'int64_t':
+    if gimple_ctypes.TypeLattice.ends_in_star(rt) and gimple_ctypes.TypeLattice.is_word(gen.var_types.get(rv)):
         rv = gen._cast(rt, rv)
     # A BOX-HOLDING needle (`x_is_word`: a mixed-kind local or a parameter
     # whose annotation the body contradicts) carries its kind in the box, and
@@ -7905,7 +7905,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # policy, because nothing there says it reaches a mixed parameter.
     for _nl_el, _nl_et, _nl_ev in lowered:
         if (isinstance(_nl_el, ListExpr)
-                and _as_str(gen._elem_types.get(_as_str(_nl_ev))) == 'char *'):
+                and gimple_ctypes.TypeLattice.is_cstr(_as_str(gen._elem_types.get(_as_str(_nl_ev))))):
             gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
                            [('MojoList *', _as_str(_nl_ev)), ('char', "'p'")])
     # A literal that contains a spread must record its statically-known
