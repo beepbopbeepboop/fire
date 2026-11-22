@@ -2966,6 +2966,69 @@ def test_a_disabled_test_is_registered_but_never_runs():
               f'{plan!r}')
 
 
+def test_a_fanout_behind_a_disabled_producer_spawns_no_item():
+    """The fanout half of the disabled-dep skip, and the shape that filed
+    fifty bug docs for ONE missing artifact (gate `c0182fd3`, 2026-11-21).
+
+    `bootstrap-stage2-cc` was doc'd off, so `stage2/mojo` had never been built;
+    its dependent, the 49-item `bootstrap-stage2-dumps` fanout, ran anyway and
+    every item died in a second on `FileNotFoundError: ./mojo`. The gate filed
+    one doc per item — 49 of them for a cause none of the files named — and a
+    fanout item has no registration of its own, so a per-item `disabled=`
+    marker (the thing those docs told workers to remove) could not have covered
+    them even in principle.
+
+    The single dependent is pinned in the test above; this is the fanout shape,
+    which is the one that multiplies. The scheduler must spawn zero item
+    processes, settle each item as a SKIP naming the producer and the doc that
+    is the switch, and exit 0 — the artifact is missing, which is a fact about
+    the producer, not a verdict on any item.
+
+    Fails before 416ed660c: there the dependents of a disabled producer ran
+    (the counter file below exists), which is exactly the fifty-reds shape.
+    """
+    ran = os.path.join(HERE, 'build', 'test-suite-disabled-fanout.ran')
+    log = os.path.join(HERE, 'build', 'test-suite-disabled-fanout.log')
+    for path in (ran, log):
+        if os.path.exists(path):
+            os.unlink(path)
+    os.makedirs(os.path.dirname(ran), exist_ok=True)
+    items = ['a.mojo', 'b.mojo', 'c.mojo']
+    with Sandbox(producer=dict(cmd=ok_cmd('print("produced")'),
+                               mem='program', disabled=suite.MEM_DEBT_DOC),
+                 sweep=suite.Fanout(
+                     name='sweep',
+                     cmd=ok_cmd(f'open({ran!r}, "a").write("x")'),
+                     items=items, deps=['producer'], mem='tiny')):
+        rc, out = run(['producer', 'sweep'], jobs=3, log=log)
+        jobs, per_test = suite.plan_for(['producer', 'sweep'], _FakeOpts())
+    text = open(log).read() if os.path.exists(log) else ''
+
+    check('disabled fanout: no item process started', not os.path.exists(ran),
+          'the items ran behind a disabled producer: one missing artifact must '
+          'not become one red per item')
+    check('disabled fanout: every item is planned, as its own job key',
+          per_test['sweep'] == len(items)
+          and [j.label for j in jobs if j.spec.name == 'sweep'] == items,
+          f'{per_test} / {[j.key for j in jobs]}')
+    check('disabled fanout: every item SKIPs, naming the producer and its doc',
+          all(re.search(rf'(?m)^\s+skip\s+sweep:{re.escape(i)}\b', text)
+              for i in items)
+          and text.count('dependency is disabled: producer') == len(items)
+          and suite.MEM_DEBT_DOC in text,
+          'each item must settle SKIP with the switch named; a fanout item has '
+          f'no marker of its own: {[l for l in text.splitlines() if "sweep:" in l]}')
+    check('disabled fanout: no item is FAIL or ERROR',
+          re.search(r'(?m)^\s+(fail|error)\s+sweep:', text) is None,
+          text[-400:])
+    check('disabled fanout: the test itself is a skip, not a red',
+          re.search(r'(?m)^\s+skip\s+sweep\s+3 job\(s\)', text) is not None,
+          f'{[l for l in text.splitlines() if l.strip().startswith("skip")]}')
+    check('disabled fanout: the run still exits 0, one skip and one disabled',
+          rc == 0 and '1 skipped' in out and '1 disabled' in out
+          and '0 failed' in out, f'rc={rc} out={out!r}')
+
+
 def test_the_disabled_markers_in_the_registry_are_honest():
     """The anti-rot, and the two ways to get a marker wrong, on synthetic
     registries — plus the real one.
@@ -7238,6 +7301,7 @@ def main():
                test_a_message_a_test_pins_is_still_a_message_the_tree_can_say,
                test_the_needle_census_fails_on_a_needle_nothing_says,
                test_a_disabled_test_is_registered_but_never_runs,
+               test_a_fanout_behind_a_disabled_producer_spawns_no_item,
                test_the_disabled_markers_in_the_registry_are_honest,
                test_bucket_dedup, test_missing_dep_is_reported,
                test_named_test_brings_its_deps,
