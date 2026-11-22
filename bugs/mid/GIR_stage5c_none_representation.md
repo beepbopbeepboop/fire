@@ -99,3 +99,39 @@ runner, `pydiff` on `classes/03_none_field_later_set.py` is OK, and the oracle s
 everywhere else (the change alters C only for classes that store `None` into a word field, so it should
 change the C of only those programs; confirm the changed set by hash).
 
+## Plan (sixth-round planning output, 2026-11-22): the field-level box
+
+Read in code, not yet changed. The box decision for a name is `ginf.mixed_box_name(gen, name)`
+(`mojo/backend_gimple/emit_infra.py`, ~line 4857): a name is box-holding if it is in
+`mixed_scalar_locals` (bound to more than one scalar kind), `mixed_value_locals`, `boxed_param_names`,
+or `tagged_mixed_name`. Stores go through `box_mixed_store` (emit_infra ~4915) and reads by kind.
+
+The reduction's field `self.s` has NO such classification. Its type comes from
+`module_gen.py` (the `struct_field_types` writers around lines 8309, 8553, 8645), where the
+`can_override` rule only widens `int`->pointer and self-struct pointers; a `None` store never joins
+the field. A store `self.s = None` (MemberExpr target, `emit_stmts.py` ~1536-1560 handles only IdentExpr
+targets) therefore writes the NULL word, and a read `r = self.s` gives `r` a single kind, so
+`mixed_scalar_locals` never sees a second kind.
+
+Steps, each a separate measured change:
+
+1. **Field join.** In `module_gen.py`, when a class's stores into `self.<f>` include a `None`
+   literal and an int/str/float store, record the field as mixed (a new `mixed_field_names(struct)`
+   next to `mixed_box_name`, in emit_infra.py). Pin it with a test that asks the predicate for the
+   reduction's `C.s`.
+2. **Store.** In `emit_stmts.py`'s MemberExpr store path (the attribute arm; find it by the
+   `FRAME_SETTABLE_IDS` / `mojo_frame_set_attr` neighbourhood, ~line 1500), call
+   `ginf.box_mixed_store` when the field is mixed, exactly as the IdentExpr arm does at ~1742.
+3. **Read.** A read of a mixed field (`self.s` as an expression, `_quick_type` / `lower_expr`
+   for MemberExpr) returns the box word, and the local it binds to (`r = self.s`) is added to
+   `mixed_scalar_locals` by the same per-function walk that already adds names bound to two kinds.
+4. **Acceptance.** The reduction prints `42` and `None` under the runner; `pydiff` on
+   `tools/pydiff_corpus/classes/03_none_field_later_set.py` is OK; the byte-identical oracle is
+   unchanged for every program that stores no `None` into a word field (confirm with
+   `c_oracle check`, which will list the changed programs; they should be exactly the
+   None-into-word-field ones).
+
+This is a multi-file change to the compiled path. It needs the full stdlib compile and the closure
+check after it lands, and it changes C for the programs listed above, so it is not a one-slice
+change. The steps above are ordered so step 1 can land alone as measured infrastructure.
+
