@@ -598,6 +598,17 @@ def norm_claim(c):
     return "bug:" + m.group(1)
 
 
+def doc_claims(base):
+    """The claims a worker on bug doc BASE (a stem, e.g. `gate-stdlib-dylib`) holds. A gate ledger doc (`gate-<job>`)
+    is also the subject of the `gate:<job>` repair the verifier queues for that job, so its lane claims that too: one
+    item for scheduling, and `conflicts` then refuses either to start while the other is live, in both directions.
+    Two gate jobs share no claim, because the mapping is exact (the job is the whole rest of the stem), not a prefix."""
+    claims = ["bug:" + base]
+    if base.startswith("gate-") and len(base) > len("gate-"):
+        claims.append("gate:" + base[len("gate-"):])
+    return claims
+
+
 def external_conflicts(claims, skip=None):
     return [(n, c, oc) for n, e in external().items() if n != skip for c in claims for oc in e["claims"] if conflicts(c, oc)]
 
