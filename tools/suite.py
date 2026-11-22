@@ -1964,8 +1964,7 @@ test('linkmode', [PY, 'test_link_mode.py'], cache=True, mem='tiny',
      timeout=7200,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'driver.py', 'test_link_mode.py'],
-     desc='the real driver.compile_program link-mode pipeline',
-     disabled='bugs/gate-linkmode.md')
+     desc='the real driver.compile_program link-mode pipeline')
 test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
      mem='tiny', extra=GIMPLE_SOURCES + ['test_no_new_container_casts.py'],
      desc='grow-only allowlist on ad-hoc container casts (text scan)')

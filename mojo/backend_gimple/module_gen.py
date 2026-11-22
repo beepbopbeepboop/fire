@@ -14152,23 +14152,31 @@ def _gmp_emit_toplevel_function(self, func_parts: list[str], has_toplevel_code: 
         if self._lambda_parts:
             func_parts.extend(self._lambda_parts)
             self._lambda_parts = []
-    # A standalone library module ALWAYS exports `<module>_init()` (and its
-    # constructor), even when it has no top-level statements. An importer
+    # A standalone NAMED library module ALWAYS exports `<module>_init()` (and
+    # its constructor), even when it has no top-level statements. An importer
     # that does `from M import f` calls `M_init()` for every local sibling it
     # imports from (`_toplevel_dep_init_modules`, emit_funcs' prelude), so a
     # def-only `M` that emitted nothing left that call an undefined symbol at
     # link time. The empty body is the whole of such a module's init.
+    #
+    # Only a NAMED module has that importer. An unnamed standalone unit is a
+    # generic instantiation (monomorphize.instantiate): every `scale[2]` and
+    # `scale[3]` is its own translation unit with the empty module name, so an
+    # always-emitted `___toplevel`/`__init` collided at link time (duplicate
+    # symbol, two instantiation objects of one template). Such a unit defines
+    # the toplevel only when it has top-level code of its own.
     if not self.emit_entry_points:
         sub_fn = _module_toplevel_name(self.module_name)
+        _library_unit = bool(self.module_name)
         # Register `<mod>_toplevel` for the root's `main()` ONLY when this
-        # translation unit defines it: top-level code, or a standalone
+        # translation unit defines it: top-level code, or a standalone named
         # library compile (which emits the empty body below). A `do_imports`
         # inline build of a def-only module defines no such body, so the root's
         # `main()` calling it was an undefined symbol at link time.
-        defines_toplevel = has_toplevel_code or not self.do_imports
+        defines_toplevel = has_toplevel_code or (not self.do_imports and _library_unit)
         if defines_toplevel and sub_fn not in self._sub_toplevels:
             self._sub_toplevels.append(sub_fn)
-        if not self.do_imports:
+        if not self.do_imports and (has_toplevel_code or _library_unit):
             if not has_toplevel_code:
                 func_parts.append(f"void {sub_fn} (void)")
                 func_parts.append("{")
