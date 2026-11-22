@@ -11,7 +11,7 @@ Plan source: `doc/GIR.md`, Stage 6 (counted loops, arms of the giant functions, 
   arm at a time onto the stage-2b builder (`mojo/ir/build.py`) is what remains, and that file still
   does not exist in the tree — it is the W2 lane's work (the stage-2b builder, another lane's claim),
   not this one's.
-- The W1 write-set line: `bugs/GIR_W1_cpp_core.md` still carries its `STOP: claimed` line.
+- The W1 write-set line: the W1 `cpp_core` packet, which carried the `STOP: claimed` line on `cpp_core.py`, landed 2026-11-22 (its doc is deleted), so the write set is free.
   `python3 tools/control.py claims` lists no live holder, and this round's edit does not touch any
   of the 35 type-string sites the packet is about (counts unchanged: 11 / 12 / 12), so the packet
   can still run on top of it; only the orchestrator removes the line.
@@ -109,17 +109,9 @@ Output: a planning guide (no code change). Re-measured with `tools/extract_arm.p
 | `_cpp_for_stmt` | **1,425** | 6 movable of 9 listed | the 363-line `for_target_is_tuple` arm is `NO` (binds `target`), so it is not in the count |
 | `_cpp_yield_from` | **126** | 2 | needs `call` annotation |
 
-**The blocker is the write set, not the tool.** `bugs/GIR_W1_cpp_core.md` still carries a live
-`STOP: claimed by the Claude W1 wave` line for `cpp_core.py`, and `doc/GIR_WORKERS.md` (W1, stage-4 tail)
-assigns the same file (39 C-type string-test sites). `python3 tools/control.py claims` lists no live holder,
-so that line looks stale, but only the orchestrator may remove it. Moving any `cpp_core.py` arm now would put
-two lanes in one file. **Decision needed from the controller:**
-
-1. Release the W1 `cpp_core` STOP line (orchestrator), then this lane runs the shape step on `cpp_core.py`
-   exactly as Next step 1 says; or
-2. Keep W1, and this lane takes the stage-2b route instead (the builder lane's work), which
-   is another lane's claim and is not in this worker's claim set. `mojo/ir/` today holds `instr.py`, `reader.py`,
-   `types.py`, `verify.py` but **no `build.py`**.
+**The write-set blocker is resolved (2026-11-22).** The W1 `cpp_core` packet landed and its doc is
+deleted, so `cpp_core.py` is no longer claimed by it. The decision this lane was waiting on (option 1,
+release the STOP line, then run the shape step on `cpp_core.py`) is taken; the plan below is the one to run.
 
 **Plan once released (option 1), so the next round needs no re-investigation:**
 

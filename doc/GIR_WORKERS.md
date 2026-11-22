@@ -88,7 +88,7 @@ Status 2026-11-21: items 1, 2 and 4 landed. `tools/c_oracle.py` (corpus hashing 
 programs with `-j 6`, so every worker can afford it); nine tuple predicates in `TypeLattice` and the tuple
 table in `tools/type_string_codemod.py` (294 -> 115 tuple tests, C byte-identical on 285 programs); the
 ratchet no longer counts `mojo/middle/types.py`, where the predicates are defined; eight W1 packets
-(`bugs/GIR_W1_*.md`, 322 sites). The 2026-11-21 stage-4 tail (two rounds) added the
+(322 sites; landed 2026-11-22, one commit per packet, each packet doc deleted with its commit). The 2026-11-21 stage-4 tail (two rounds) added the
 representation-class predicates (`is_dict`/`is_set`/`is_bytes`/`is_uword`/`is_char`/
 `is_voidp`/`is_boxable`/`is_word_value`/`is_c_scalar`/`is_number_scalar`), taught the codemod to emit
 a disjunction of classes, to read a tuple wrapped across lines, and to rewrite a module that imports
@@ -108,14 +108,14 @@ re-measured. Item 3 (the None decision) is the owner's.
    (`('int', 'int64_t', '_Bool')` -> `is_int_word_or_bool`, ...) and add those
    predicates to `TypeLattice`, each with exactly the tuple's membership.
 3. Get the owner's decision on the None representation (§6).
-4. Write the packet docs for W1 (`bugs/GIR_W1_*.md`, easy class, one per file).
+4. Write the packet docs for W1 (easy class, one per file; landed and deleted 2026-11-22).
 
 ### W1 — stage 4 tail (Haiku x up to 6)
 
 The 322 type-string tests the codemod cannot match (a left side it does not
 accept, or a tuple with no predicate), in eight packets that never share a
-file: `bugs/GIR_W1_{cpp_core,exprtypes,emit_loops,emit_calls,emit_exprs,
-emit_stmts,module_gen,emit_methods}.md`. `gimple_codegen.py` (6 sites) stays
+file (cpp_core, exprtypes, emit_loops, emit_calls, emit_exprs, emit_stmts, module_gen, emit_methods;
+LANDED 2026-11-22, one commit each). `gimple_codegen.py` (6 sites) stays
 with the orchestrator. Acceptance: oracle byte-identical, the file's counts
 fall; the orchestrator lowers the baselines at merge and runs the closure check
 once on the merged tree.

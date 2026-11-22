@@ -48,13 +48,13 @@ PATTERNS = {
 }
 
 BASELINE = {
-    "endswith(' *')": 16,
-    "== 'int64_t'": 54,
+    "endswith(' *')": 12,
+    "== 'int64_t'": 12,
     "in (.., 'int64_t', ..)": 0,
-    "== 'char *'": 62,
-    "== '_Bool'": 2,
-    "== 'double'": 8,
-    "== 'MojoList *'": 29,
+    "== 'char *'": 5,
+    "== '_Bool'": 0,
+    "== 'double'": 0,
+    "== 'MojoList *'": 9,
     # Stage 2b is landed: every statement the lowering writes is a builder
     # call, and `build.raw` is the only text channel left (its own baseline).
     "gen._emit( text": 0,

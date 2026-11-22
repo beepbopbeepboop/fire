@@ -2476,8 +2476,8 @@ test('bootstrap-stage2-dumps-t-print', [PY, 'test_bootstrap_stage2_dumps_t_print
             'bugs/mid/gate-bootstrap-stage2-cc.md'],
      desc='bootstrap-stage2-dumps fanout skips behind disabled bootstrap-stage2-cc '
           '(pinned against the registry and its doc)')
-# The GIR stage-4 type-lattice predicates over mojo/middle/types.py; the GIR_W1_*
-# docs run this file by name.
+# The GIR stage-4 type-lattice predicates over mojo/middle/types.py; the GIR W1
+# tail (landed 2026-11-22) checks its rewrites against this file.
 test('type-lattice-predicates', [PY, 'test_type_lattice_predicates.py'], cache=True,
      mem='tiny',
      extra=['test_type_lattice_predicates.py', 'mojo/middle/types.py',

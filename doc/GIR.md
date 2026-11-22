@@ -287,6 +287,11 @@ stage 7 has an oracle before it has a builder.
   `test_type_lattice_predicates.py` pins each predicate's exact membership and each codemod table
   entry. The remaining `==` tests are the ones whose left side is an expression the codemod
   deliberately does not accept; the tuple pattern can only shrink from here.
+  *Measured 2026-11-22 after the W1 tail* (eight packets, one commit each, the packet docs deleted with
+  them): `== 'int64_t'` 12, `== 'char *'` 5, `== 'MojoList *'` 9, `endswith(' *')` 12, `== '_Bool'` 0,
+  `== 'double'` 0. The live remainder is comments that quote a test, `endswith(' *')` on a receiver that
+  may be `None` (left alone: `ends_in_star(None)` is False where `.endswith` raises), and `rt_call.py`, which
+  has no `gimple_ctypes` import and so stays as it was. The ratchet baseline is lowered to these counts.
 - **Stage 5a (landed 2026-11-14). A value's facts travel with a copy.**
   `carry_value_info(gen, dst, src)` (`emit_infra.py`) copies what the backend
   knows about a VALUE from one name to another, and `gen._copy` calls it for
