@@ -79,6 +79,25 @@ def _module_generic_function_names(gen) -> set:
     return names
 
 
+def _refuse_in_process_bracket_call(gen, node) -> None:
+    """Raise for a bracketed call `f[...](...)` to a generic FUNCTION of this
+    module, compiled in the single-unit path (not link mode).
+
+    Link mode instantiates the generic; the single-unit path cannot deliver
+    the instance (its text has no definition, and the instance object is not
+    part of the returned C), and a stub `0` here would be a silent wrong
+    answer (`print(f[1]())` printed 0, the build prints 2). Refusing names
+    link mode, which is the path that does instantiate it."""
+    if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and not getattr(gen, 'link_imports', False)
+            and node.func.obj.name in _module_generic_function_names(gen)):
+        raise RuntimeError(
+            f"cannot compile in-process: a bracketed call "
+            f"{node.func.obj.name}[...]() needs the generic instantiated, which "
+            f"the single-unit path does not do; link mode (fire build) does")
+
+
 def _generator_star_slot(api: dict, node) -> int | None:
     """The C-signature slot of a generator's `*args` parameter, when this
     call packs its positional arguments into it, else None.
@@ -3396,18 +3415,9 @@ def _lc_non_ident_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             raise RuntimeError(
                 f"cannot compile module: a bracketed call {_base_name}[...]() "
                 f"needs link-mode specialisation, which this build does not do")
-    # A bracketed call to a generic FUNCTION of this module, in the
-    # single-unit path (not link mode), is not instantiated there: the stub
-    # below is `0`, a silent wrong answer (`print(f[1]())` printed 0, the
-    # build prints 2). Link mode instantiates it, so the refusal names that.
-    if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
-            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-            and not getattr(gen, 'link_imports', False)
-            and node.func.obj.name in _module_generic_function_names(gen)):
-        raise RuntimeError(
-            f"cannot compile in-process: a bracketed call "
-            f"{node.func.obj.name}[...]() needs the generic instantiated, which "
-            f"the single-unit path does not do; link mode (fire build) does")
+    # Declined elaboration of a bracketed call to this module's own generic:
+    # the same refusal, for the calls elaboration did not take.
+    _refuse_in_process_bracket_call(gen, node)
     # A SELF-RECURSIVE generic call (`self_recursion[i + 1]()` inside the
     # monomorphized `self_recursion`) cannot be materialized, and stubbing
     # it to 0 (below) would be a silent wrong answer. Refuse loudly.
@@ -4935,8 +4945,18 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     and node.func.obj.name in _sib) \
         or (_bare is not None and _bare in _sib and not _bare_self)
     if _gen:
+        # Elaboration runs first: it is where an instance's own diagnostics
+        # (a failing `comptime assert` in its body) are raised. When it
+        # succeeds for a bracketed call to this module's OWN generic, the
+        # instance is compiled into its own object (recorded on
+        # `gen._link_objects`), which this single-unit text cannot carry, so
+        # the call would reach an undefined symbol. Refuse then. An elaborated
+        # instantiation keeps elaborating its module's sibling generics
+        # (`_sibling_generic_paths`): that is its own instance chain.
         res = gen._elaborate_generic_call(node)
         if res is not None:
+            if not getattr(gen, '_is_elaborated_instantiation', False):
+                _refuse_in_process_bracket_call(gen, node)
             return res
     # Bracket call to a nested async function/closure with its OWN
     # comptime bracket parameter(s), e.g. test_asyncrt.mojo's
