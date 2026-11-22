@@ -2982,11 +2982,15 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # here and have its reserves-0 / --list / --dry-run properties re-asserted.
     real = [n for n, s in suite.REGISTRY.items() if suite.is_disabled(s)]
     # The census the check compares the registry against, so it tracks the
-    # tree rather than freezing it. Measured 2026-11-21 (this tree): five jobs
+    # tree rather than freezing it. Measured 2026-11-21 (this tree): four jobs
     # carry `disabled=`, each with its gate doc in bugs/ as the switch. A
     # disabled job is a DECISION: the checks below re-assert that it reserves
     # 0 GB, is listed with its doc, and plans as DISABLED, so a job cannot be
-    # silently switched off. `stdlib-dylib` left the census here: its lone
+    # silently switched off. `rthdrscan` left the census here: the gate ledger
+    # switched the job off on a non-bisected report (2be2c1a49) after its
+    # census had already been synced, so the job was green; the marker and its
+    # doc are gone and `python3 tools/suite.py rthdrscan` passes.
+    # `stdlib-dylib` left the census here: its lone
     # unexpected skip (std/math/math.mojo) was the monomorphized `_ldexp_impl`
     # instance whose comptime `FPUtils[dtype]` references erased to `float`,
     # fixed by 244efdbef and pinned by test_stdlib_dylib_degraded_module.py,
@@ -2994,7 +2998,6 @@ def test_a_disabled_test_is_registered_but_never_runs():
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
-        'rthdrscan',
         'stdlib-syntax',
         'suite-self-test',
     ]
@@ -3197,17 +3200,18 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     check('disabled markers: the real registry has no stale or wrong marker',
           not suite.disabled_problems(),
           f'{suite.disabled_problems()}')
-    # The same five-name census as the `disabled:` section above -- the two
+    # The same four-name census as the `disabled:` section above -- the two
     # sections ask different questions of the same registry (reservations and
     # listing there, marker truth here) and must not drift apart. This list is
     # the census the check compares the registry against, so it tracks the tree
     # rather than freezing it; measured 2026-11-21 (this tree) when
-    # `stdlib-dylib` left it (its monomorphized `_ldexp_impl` skip is fixed by
+    # `rthdrscan` left it with the stale gate-ledger switch-off (2be2c1a49;
+    # its census was already synced and the job passes) and `stdlib-dylib`
+    # left it (its monomorphized `_ldexp_impl` skip is fixed by
     # 244efdbef, pinned by test_stdlib_dylib_degraded_module.py).
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
-        'rthdrscan',
         'stdlib-syntax',
         'suite-self-test',
     ]
