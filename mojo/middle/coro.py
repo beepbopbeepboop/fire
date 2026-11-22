@@ -1675,18 +1675,34 @@ class _ParamFlow:
     def source_ok(self, fd, pidx: int, visiting: set) -> bool:
         """True when parameter `pidx` of plain def `fd` is the tagged generator
         at every call site of `fd`, and is consumed boxed inside `fd`."""
-        return self.sources_ok(fd, pidx, visiting, consumed=True)
+        return self.sources_ok(fd, pidx, visiting, consumed=True) == 'fed'
 
-    def sources_ok(self, fd, pidx: int, visiting: set, consumed: bool) -> bool:
+    def sources_ok(self, fd, pidx: int, visiting: set, consumed: bool):
         """The source half of `source_ok`: the tagged generator at every call
         site of `fd`. With `consumed` it also requires the boxed-consumer check
         in `fd`'s body (`use_ok`). The per-kind split asks the source half alone:
         a callee that is not yet split can fail the consumer check only through
-        a call site the split is about to separate."""
+        a call site the split is about to separate.
+
+        Returns False when some call site is not the generator, else one of:
+          'fed'    a call site reaches a real `g(...)` through the pass-throughs;
+          'cycle'  every site is a pass-through and the only way back is a
+                   cycle already on the path, so no site hands in the generator.
+        Only 'fed' makes `source_ok` true. `visiting` is the path of
+        `(callee, parameter, consumed)` keys being answered right now: a key
+        met again on that path is a cycle, and it is popped when its answer is
+        returned, so the same callee reached by two sibling paths is answered
+        from each path rather than from whichever ran first."""
         key = (fd.name, pidx, consumed)
         if key in visiting:
-            return True     # a pass-through cycle contributes no other value
+            return 'cycle'
         visiting.add(key)
+        try:
+            return self._sources_ok(fd, pidx, visiting, consumed)
+        finally:
+            visiting.discard(key)
+
+    def _sources_ok(self, fd, pidx: int, visiting: set, consumed: bool):
         if (fd.comptime_params or fd.kwonly or pidx >= len(fd.params)
                 or fd.params[pidx][0].startswith('*')):
             return False
@@ -1694,6 +1710,7 @@ class _ParamFlow:
         sites = self._sites_of(fd.name)
         if not sites:
             return False
+        fed = False
         for c in sites:
             if any(isinstance(a, N.UnaryOp) and a.op in ('*', '**') for a in c.args) \
                     or c.kwargs or pidx >= len(c.args):
@@ -1701,20 +1718,25 @@ class _ParamFlow:
             a = c.args[pidx]
             if (isinstance(a, N.CallExpr) and isinstance(a.func, N.IdentExpr)
                     and a.func.name == self.name):
+                fed = True
                 continue
             if isinstance(a, N.IdentExpr):
-                if not self.passed_from_source(c, a.name, visiting, consumed):
+                r = self.passed_from_source(c, a.name, visiting, consumed)
+                if not r:
                     return False
+                fed = fed or r == 'fed'
                 continue
             return False
-        return (not consumed) or self.use_ok(fd, pname, visiting)
+        if consumed and not self.use_ok(fd, pname, visiting):
+            return False
+        return 'fed' if fed else 'cycle'
 
     def passed_from_source(self, call, aname: str, visiting: set,
-                           consumed: bool = True) -> bool:
-        """True when the argument `aname` of `call` is a pass-through: the
+                           consumed: bool = True):
+        """False when the argument `aname` of `call` is not a pass-through: the
         caller hands on ITS OWN parameter `aname`, and that parameter is itself
-        the tagged generator at every call site of the caller (`source_ok`, or
-        its source half alone with `consumed=False`)."""
+        the tagged generator at every call site of the caller. Otherwise the
+        `sources_ok` answer for that parameter: 'fed' or 'cycle' (see there)."""
         caller = self.caller.get(id(call))
         if (caller is None or id(caller) in self._nested
                 or caller.comptime_params
@@ -1985,7 +2007,7 @@ def _mixed_generator_callee(stmts: list, g: str):
                    if _is_gen_call_of(c.args[pidx], g)
                    or (isinstance(c.args[pidx], N.IdentExpr)
                        and flow.passed_from_source(c, c.args[pidx].name, set(),
-                                                   consumed=False))]
+                                                   consumed=False) == 'fed')]
             if not gen or len(gen) == len(sites):
                 continue
             return fd, pidx, gen

@@ -65,8 +65,9 @@ delegate in `gimple_codegen.py:5685`). With the bare call, extracting the arms m
 cycle of functions that each pass their own `gen` parameter on as "this parameter is the referenced
 generator", then clones the callee `_cpp_receiver_ctype` until the stack overflows. Measured with a
 depth probe: 4 `sources_ok` levels on the previous commit, 331 on the crashing variant. The
-underlying defect is filed as `bugs/CODEGEN_coro_paramflow_cycle_is_not_generator_fed.md`; the
-`gen._cpp_stmt` spelling avoids it here and is pinned by the new test.
+underlying defect (the cycle branch of `_ParamFlow.sources_ok` answering "fed" for a pass-through
+cycle nothing feeds) is fixed in `mojo/middle/coro.py`, pinned by `test_coro_paramflow_cycle.py`; the
+`gen._cpp_stmt` spelling is still used here and is pinned by the new test.
 
 Verified:
 
