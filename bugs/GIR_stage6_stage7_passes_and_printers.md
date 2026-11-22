@@ -21,14 +21,55 @@ Stage 7, in this order:
 
 1. Land `mojo/ir/build.py` (stage 2b, `bugs/GIR_stage2b_3c_builder_and_instr.md`) — or, if that lane is not
    yours, do the shape step first: `tools/extract_arm.py --list mojo/backend_gimple/cpp_core.py _cpp_expr`
-   reports **3,389 movable lines in 8 arms** (`IdentExpr` 91, `MemberExpr` 284, `LambdaExpr` 132,
-   `BinaryOp` 245, `CompareChain` 42, `CallExpr` 2,212, `SubscriptExpr` 140, `AwaitExpr` 243 — every one
-   `returns`, `extra inputs: none`), `_cpp_stmt` **1,527** in 9 arms, `_cpp_with_stmt` 90 in 1; the `_cpp_for_stmt`
+   reports **3,458 movable lines in 10 arms** (`IdentExpr` 91, `MemberExpr` 284, `LambdaExpr` 132,
+   `UnaryOp` 30, `BinaryOp` 245 and 39, `CompareChain` 42, `CallExpr` 2,212, `SubscriptExpr` 140, `AwaitExpr` 243 —
+   every one `returns`, `extra inputs: none`; corrected 2026-11-21, see the fourth-round Status), `_cpp_stmt` **1,527** in 9 arms, `_cpp_with_stmt` 90 in 1; the `_cpp_for_stmt`
    (1,425 in 6) and `_cpp_yield_from` (126 in 2) arms need `target`/`call` annotations. An extracted arm is exactly the
    unit that later returns an `Ex` instead of a string, and each extraction is AST-identity-checked by the tool.
 2. Then move one extracted arm at a time onto the builder, with
    `python3 tools/c_oracle.py check --base <the commit before> -j 4` reporting identical C **and** identical
    C++ companion for all 285 `tools/pydiff_corpus` programs and all 13 `tools/cpp_corpus` programs.
+
+## Status 2026-11-21 (fourth round): planning round — stage 7's shape step is blocked on a claim decision
+
+Output: a planning guide (no code change). Re-measured with `tools/extract_arm.py --list` on
+`mojo/backend_gimple/cpp_core.py` (13,347 lines), and corrected the Next step's counts, which were stale:
+
+| parent | movable lines (tool) | arms | notes |
+|---|---|---|---|
+| `_cpp_expr` | **3,458** | 10 | the doc said 3,389 / 8. The two missing arms are `UnaryOp` (30, returns) and `BinaryOp` `:=` (39, returns) |
+| `_cpp_stmt` | **1,527** | 9 | matches the doc |
+| `_cpp_with_stmt` | **90** | 1 | matches |
+| `_cpp_for_stmt` | **1,425** | 6 movable of 9 listed | the 363-line `for_target_is_tuple` arm is `NO` (binds `target`), so it is not in the count |
+| `_cpp_yield_from` | **126** | 2 | needs `call` annotation |
+
+**The blocker is the write set, not the tool.** `bugs/GIR_W1_cpp_core.md` still carries a live
+`STOP: claimed by the Claude W1 wave` line for `cpp_core.py`, and `doc/GIR_WORKERS.md` (W1, stage-4 tail)
+assigns the same file (39 C-type string-test sites). `python3 tools/control.py claims` lists no live holder,
+so that line looks stale, but only the orchestrator may remove it. Moving any `cpp_core.py` arm now would put
+two lanes in one file. **Decision needed from the controller:**
+
+1. Release the W1 `cpp_core` STOP line (orchestrator), then this lane runs the shape step on `cpp_core.py`
+   exactly as Next step 1 says; or
+2. Keep W1, and this lane takes the stage-2b route instead (`bugs/GIR_stage2b_3c_builder_and_instr.md`), which
+   is another lane's claim and is not in this worker's claim set. `mojo/ir/` today holds `instr.py`, `reader.py`,
+   `types.py`, `verify.py` but **no `build.py`**.
+
+**Plan once released (option 1), so the next round needs no re-investigation:**
+
+- Order: `_cpp_yield_from` (126, 2 arms, smallest, exercises the `call` annotation) -> `_cpp_with_stmt` (90)
+  -> `_cpp_stmt` arms, smallest first (`VarDecl` 44, `AugAssignStmt` 32, `ReturnStmt` 42, ...) -> `_cpp_expr`
+  arms (`IdentExpr` 91 first) -> `_cpp_for_stmt` (`target`-annotated arms last).
+- Each extraction: `python3 tools/extract_arm.py FILE _cpp_expr LINE NEWNAME "DOC" [name:ann ...]` with the
+  line from `--list`, then `python3 test_gimple_module_passes.py`-style pin for `cpp_core.py` if one exists
+  (it does not yet: add `test_gimple_cpp_core_arms.py` pinning the arm count, as the module-gen pin does).
+- Proof per extraction: `python3 tools/c_oracle.py check --base <prev commit> -j 4` — the `tools/cpp_corpus`
+  half is the one that sees a coroutine lowering change. Quick test only in the light lane; the full corpus run
+  is the integrator's.
+- Tests that prove the shape step: the AST-identity check inside `extract_arm.py` (it refuses on mismatch), and
+  the oracle reporting 0 changed programs in both corpora.
+
+**Not done:** no `cpp_core.py` edit, no `mojo/ir` builder, no emitted text changed. This round changes only this doc.
 
 ## Status 2026-11-21 (third round): the stage-7 oracle now hashes the C++ printer
 
