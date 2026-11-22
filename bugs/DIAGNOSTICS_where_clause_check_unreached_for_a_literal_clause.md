@@ -64,31 +64,39 @@ the compiler's, for the same construct. The interpreter's is modular's own
 `WhereConformanceError` note is this repo's wrapper leaking.
 
 The alias spelling's output begins `Error building:`, the literal one does not --
-so for the alias spelling the interpreter DECLINED the call and `fire.py build`
-fell back to the compiler. It is not the `alias` declaration itself: a module
-with `alias LIMIT = 2` and a trivial `main` builds cleanly (`Error building`
-absent, rc 0). It is the clause evaluation --
-`check_where_clause` sets `interp.scope = scope` (the function's comptime
-parameters) before `interp.eval_expr(cond)`, and `LIMIT` lives in the MODULE
-scope, so the name is not reachable from there and the handler's
-`except Exception: ok = True` declines.
+so for the alias spelling the interpreter DECLINED and `fire.py build` fell back
+to the compiler. Confirmed cause: `alias LIMIT = 2` parses as
+`ExprStmt(IdentExpr 'alias')` + `AssignStmt(target=LIMIT, ...)`, and
+`execute_ExprStmt` evaluated the marker, so the module raised NameError and the
+whole module declined. Fixed in `myinterpreter.execute_ExprStmt` (skip the
+marker); `fire.py run` on such a module now interprets it, and under the
+interpreter BOTH spellings give the same wording:
+
+```
+literal  -> error: invalid call to 'f': violated constraint
+            note: constraint declared here evaluated to False, expected '(x < Int(2))'
+alias    -> error: invalid call to 'f': violated constraint
+            note: constraint declared here evaluated to False, expected '(x < LIMIT)'
+```
+
+`fire.py build` still shows the old split, so its interpreter invocation is not
+the same one `fire.py run` uses -- that is the remaining question.
 
 Consequence for the test: `test_integer_literal_where_still_enforced` asserts the
-COMPILER's wording against the INTERPRETER's output. Its sibling
-`test_function_where_alias_violated_fails` passes only because that spelling
-happens to reach the compiler.
+COMPILER's wording, and under `fire.py build` it still gets the interpreter's --
+so it stays red until `build`'s interpreter invocation is reconciled with `run`'s.
+Its sibling `test_function_where_alias_violated_fails` passes only because that
+spelling happens to reach the compiler.
 
-## The fix, and what it moves
+## What is fixed, and what is left
 
-Make the module's top-level names reachable from the scope `check_where_clause`
-evaluates in: either give that scope the module scope as a parent, or resolve an
-unbound name against the module bindings before the `except Exception` declines
-it. Then both spellings stay on the interpreter and get its wording, which is
-modular's.
+Fixed: the interpreter no longer declines a module that declares a top-level
+`alias` (`myinterpreter.execute_ExprStmt` skips the marker), so `fire.py run`
+interprets such a module and both spellings word the refusal identically.
 
-Consequence: the two message-expecting cases in
-`test_where_alias_diagnostic.py` (`test_function_where_alias_violated_fails`,
-`test_integer_literal_where_still_enforced`) both move to the interpreter's
-wording, which is what `test_static_call_diagnostics.py` already pins for
-`where n > 0`. The job `reg-where-alias-diagnostic` is green when
-`python3 test_where_alias_diagnostic.py` is 9/9.
+Left: `fire.py build` still routes the alias spelling to the compiler. Its
+interpreter invocation is not the one `fire.py run` uses -- find where `build`
+decides to interpret (fire.py's `_invoke` / `static_module_diagnostics` region)
+and why an interpreter refusal there falls back to a compile. Until then
+`python3 test_where_alias_diagnostic.py` is 8/9 and
+`reg-where-alias-diagnostic` stays red.

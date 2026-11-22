@@ -8960,7 +8960,17 @@ class Interpreter:
 
     def execute_ExprStmt(self, node):
         """Execute expression statement."""
-        return self.eval_expr(node.value)
+        v = node.value
+        if isinstance(v, N.IdentExpr) and v.name == 'alias':
+            # `alias NAME = VALUE` is not a keyword here: the parser leaves it as
+            # a bare `ExprStmt(IdentExpr 'alias')` immediately followed by the
+            # `AssignStmt` that binds NAME (the backend finds the same pair in
+            # mojo/backend_gimple/module_gen.py). Evaluating the marker is a
+            # NameError, which declines the WHOLE module -- so a module with a
+            # top-level `alias` never interprets, and its `where` clauses are
+            # checked by the compiler instead, with a different diagnostic.
+            return None
+        return self.eval_expr(v)
 
     def execute_PassStmt(self, node):
         """Execute pass statement."""
