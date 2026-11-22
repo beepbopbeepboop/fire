@@ -14377,6 +14377,7 @@ def gen_module_impl(self, stmts: list):
             'line': 'int64_t',
             'col': 'int64_t',
             'type_ann': 'int64_t',
+            'is_alias': '_Bool',
         }
         self.struct_field_types['AugAssignStmt'] = {
             'target': 'int64_t',
