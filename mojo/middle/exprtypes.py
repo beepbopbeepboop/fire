@@ -835,7 +835,7 @@ def is_python_bool_expr(gen, node) -> bool:
                 return True
         return _is_python_bool_method(gen, node)
     try:
-        return gen._quick_type(node) == '_Bool'
+        return TypeLattice.is_bool(gen._quick_type(node))
     except Exception:
         return False
 
@@ -1147,7 +1147,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             # return type (`_LIBM_FN_RETVALS`), not a shorter copy of it: the
             # copy missed `pow`, `hypot` and `copysign`, so `print(math.copysign(3, -1))`
             # typed the call as an int and printed `-3` for `-3.0`.
-            if e.func.member == 'fsum' or _LIBM_FN_RETVALS.get(_as_str(e.func.member)) == 'double':
+            if e.func.member == 'fsum' or TypeLattice.is_double(_LIBM_FN_RETVALS.get(_as_str(e.func.member))):
                 return 'double'
         if e.func.member == 'format':
             return 'char *'
@@ -1347,7 +1347,7 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
         # though the emitter can compile both sites. A name whose element
         # type IS known (`local_elem_types`) keeps its precise type above;
         # this is only the genuinely opaque case.
-        if known is not None and known.get(call.name) == 'int64_t':
+        if known is not None and TypeLattice.is_word(known.get(call.name)):
             return 'int64_t'
     return 'char *'
 
@@ -1751,7 +1751,7 @@ def _yield_from_is_opaque_word_iterator(n: 'YieldFromExpr', generator_api: dict 
         return False
     if (local_elem_types or {}).get(call.name) is not None:
         return False
-    return known is not None and known.get(call.name) == 'int64_t'
+    return known is not None and TypeLattice.is_word(known.get(call.name))
 
 
 def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, module_global_types: dict | None=None, nested_generator_api: dict | None=None, outer_fn_name: str | None=None, home_generator_api: dict | None=None, imported_symbols: dict | None=None, module_alias_names=None) -> str | None:
@@ -1917,7 +1917,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
             # elements are words.
             elif (isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr)
                     and known is not None
-                    and known.get(n.value.func.name) == 'int64_t'
+                    and TypeLattice.is_word(known.get(n.value.func.name))
                     and _is_tuple_unpacked_call_word(fn, n.value.func.name)):
                 t = 'int64_t'
             else:
