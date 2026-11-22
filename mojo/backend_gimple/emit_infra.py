@@ -1880,6 +1880,9 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
     `from module_loader import STDLIB_PATH` in `_stdlib_fingerprint`).
     """
     _from_imports: list = []
+    # The names this module binds at module scope itself: a `from X import N`
+    # of one of them is shadowed, not an accessor read (see the skip below).
+    _own_bound = msh._gmi_module_bound_names(stmts)
 
     def _collect(s):
         if isinstance(s, gimple_ctypes.FromImportStmt):
@@ -1973,6 +1976,20 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
             if not info or info.get('kind') != 'global_var':
                 continue
             sym = alias if alias else name
+            # A name this module binds at module scope ITSELF is not the
+            # import's: `from fgl_b import N` followed by a module-level
+            # `N = 'a-side'` rebinds it in this module's namespace (Python
+            # semantics), so a bare read is this module's own field, and the
+            # accessor of `fgl_b`'s `N` must not be registered for it.
+            # `_lie_imported_global_accessor` would otherwise take the read
+            # ahead of the owned-global routing in `bare_global_read_plan`
+            # and print 'b-side' where CPython prints 'a-side'. The
+            # registration cannot tell a shadowed name apart by itself: the
+            # export scan of `fgl_b` now answers for any scalar global in any
+            # `.py` module (module_loader `_py_sibling_exports`), so the
+            # importer's own binding has to be excluded here.
+            if sym in _own_bound:
+                continue
             if sym in gen._imported_global_accessors:
                 continue
             ctype = info.get('c_return_type', 'int64_t')
