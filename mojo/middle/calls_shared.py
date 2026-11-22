@@ -931,7 +931,7 @@ def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
         if _dunder not in _have:
             continue
         _csym = gen._struct_method_csym(struct_name, _dunder, '')
-        if gen.func_return_types.get(_csym) != 'char *':
+        if (not gimple_ctypes.TypeLattice.is_cstr(gen.func_return_types.get(_csym))):
             continue
         # Same null semantics the generated field-dump has: a NULL object
         # reprs as "None" rather than crashing. Interned through

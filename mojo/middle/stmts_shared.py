@@ -351,8 +351,7 @@ def _assign_target(gen, tgt, et, ev):
             if gen._word_is_tagged(ev):
                 gen._word_mark_tagged(_un)
                 if (isinstance(tgt, IdentExpr)
-                        and gen.var_types.get(_as_str(tgt.name), 'int64_t')
-                        == 'int64_t'):
+                        and gimple_ctypes.TypeLattice.is_word(gen.var_types.get(_as_str(tgt.name), 'int64_t'))):
                     _tn = _as_str(tgt.name)
                     gen._word_mark_tagged(_tn)
                     gen._word_mark_boxed(_tn)

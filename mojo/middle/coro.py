@@ -9363,7 +9363,7 @@ def emit_c(meta_entry: dict) -> str:
     # __mojo_gen_arg_d); every other slot is an int64_t / pointer that a
     # plain cast carries losslessly.
     def _fwd(i):
-        if params[i].strip() == 'double':
+        if gimple_ctypes.TypeLattice.is_double(params[i].strip()):
             return (f', ({{ int64_t __t{i}; double __s{i} = __a{i}; '
                     f'__builtin_memcpy(&__t{i}, &__s{i}, sizeof __t{i}); __t{i}; }})')
         return f', (int64_t)__a{i}'
