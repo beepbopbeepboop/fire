@@ -51,3 +51,51 @@ representation question (`doc/GIR_WORKERS.md` §6) is still the owner's to answe
 **Next step (measurement first):** rebuild the 65 `None`-mentioning WRONG programs' list from a fresh
 `pydiff` run (`--out DIR` writes each WRONG program's two outputs), group by the first differing line,
 and pick the largest group whose cause is the unannotated-parameter path. That group is the slice.
+
+## Status 2026-11-22 (second round): the largest WRONG group is a field slot, and two pipelines disagree
+
+Grouping the 112 WRONG programs by their first differing line (`pydiff --out`): the largest group is
+`None` printed as `0` (about 19 programs, e.g. `classes/03_none_field_later_set`, `flow/13_return_tuple_unpack`).
+The 2026-11-21 reading "compiled True" is gone; these are all `None` -> `0`.
+
+**Reduction.** The minimal shape that reproduces through the gimple runner (`compile_mojo_to_gimple_exe`,
+the path `pydiff` and the test suite use):
+
+```python
+class C:
+    def __init__(self):
+        self.s = None
+    def open(self, x):
+        self.s = x          # the field is now an int slot
+    def take(self):
+        r = self.s
+        self.s = None       # a None store into that int slot
+        return r
+c = C()
+c.open(42)
+print(c.take())             # CPython: 42
+print(c.take())             # CPython: None, runner: 0
+```
+
+**Two pipelines disagree.** `python3 fire.py run <file>` prints `None` for the same program, while the
+runner prints `0`. So the runner path is the one that is wrong, and `fire.py run` is right for this shape
+(the difference is consistent with the link-mode vs inline split in CLAUDE.md's verification notes). The
+corpus program `classes/03_none_field_later_set.py` passes under `fire.py run` and is WRONG under `pydiff`.
+
+**Mechanism (measured in code, not yet changed).**
+- `emit_infra.py` (`box_mixed_store`, around line 4884) boxes a literal `None` with `mojo_box_none()`,
+  but only for a slot that the inference has classified as MIXED (box-holding).
+- The field `self.s` is inferred `int64_t` from `self.s = x` (an unannotated parameter receiving an int)
+  and is not widened to mixed by the later `self.s = None` store. The `'none'` kind
+  (`infra_infer.py` `_param_value_binding_kind`, line ~1862) is accepted for parameters but does not
+  widen a struct field slot.
+- So the store writes the NULL word, and the word read back prints `0`.
+
+**Next step (one measured change):** find where a struct field's type is joined across its stores
+(the field-type inference that fills `struct_field_types` for `self.<name> = <value>` assignments), and
+make a `'none'` store join a word-typed field into the mixed (box-holding) kind, the same way a parameter
+rebinding to `None` is already accepted. Acceptance: the reduction above prints `42` and `None` under the
+runner, `pydiff` on `classes/03_none_field_later_set.py` is OK, and the oracle stays byte-identical
+everywhere else (the change alters C only for classes that store `None` into a word field, so it should
+change the C of only those programs; confirm the changed set by hash).
+
