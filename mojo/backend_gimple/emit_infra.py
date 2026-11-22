@@ -4272,7 +4272,7 @@ def mixed_name_non_int64_refusal(other_ctype) -> str:
         other = 'a str value (char *)'
     elif other_ctype in gimple_ctypes._SCALAR_FLOAT_TYPES:
         other = f'a float value ({other_ctype})'
-    elif other_ctype is not None and str(other_ctype).endswith(' *'):
+    elif other_ctype is not None and gimple_ctypes.TypeLattice.ends_in_star(str(other_ctype)):
         other = f'a container or pointer value ({other_ctype})'
     elif other_ctype is not None:
         other = f'a value of another C type ({other_ctype})'
@@ -4354,7 +4354,7 @@ def _tagged_generator_iterable(gen, node) -> bool:
     if fname is None:
         return False
     api = (getattr(gen, '_generator_api', None) or {}).get(fname)
-    return bool(api) and bool(api.get('mixed_slots')) and api.get('value_ctype') == 'int64_t'
+    return bool(api) and bool(api.get('mixed_slots')) and gimple_ctypes.TypeLattice.is_word(api.get('value_ctype'))
 
 
 def tagged_for_target_name(gen, name) -> bool:
@@ -4921,7 +4921,7 @@ def box_mixed_store(gen, value_node, vtype: str, v: str, name) -> tuple:
     keeps its own type and the caller's refusal decides it. The per-kind
     dispatch itself is `box_word_value` — the same one a call argument for a
     box-holding parameter goes through."""
-    if gen.var_types.get(_as_str(name), 'int64_t') != 'int64_t':
+    if (not gimple_ctypes.TypeLattice.is_word(gen.var_types.get(_as_str(name), 'int64_t'))):
         return v, vtype
     return box_word_value(gen, value_node, vtype, v)
 
@@ -5945,7 +5945,7 @@ def _list_repr_fn(gen, rav: str) -> str:
     # sentinel heuristic. The nested entry here is the inner list's ELEMENT
     # type (a bare 'int64_t'), not a per-slot pair spec, so it is a
     # different shape from the enumerate/zip pairs handled above.
-    if gen._elem_types.get(rav) == 'MojoList *' and gimple_ctypes.TypeLattice.is_word(nested):
+    if gimple_ctypes.TypeLattice.is_list(gen._elem_types.get(rav)) and gimple_ctypes.TypeLattice.is_word(nested):
         return 'mojo_repr_list_intlists'
     # A list of inner lists/tuples whose slots are NOT all one kind —
     # `[(1.5, 2)]`, `[('a', 0, 1) for i in range(2)]` — goes before the
@@ -5956,7 +5956,7 @@ def _list_repr_fn(gen, rav: str) -> str:
     # bits (or faulted in mojo_read_type_tag_safe when those bits looked like a
     # heap address). `_tuple_slot_types` records the pattern per inner slot, so
     # hand it to the one helper that reads each inner slot by its own kind.
-    if gen._elem_types.get(rav) == 'MojoList *' and _tuple_slot_kind_bytes(gen, rav):
+    if gimple_ctypes.TypeLattice.is_list(gen._elem_types.get(rav)) and _tuple_slot_kind_bytes(gen, rav):
         return 'mojo_repr_list_slotkinds'
     # A `struct.unpack` result whose format MIXES kinds goes FIRST, before the
     # uniform branches below: its one container ctype is the degraded
@@ -6282,7 +6282,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     # tuple-loop var read via get_str and boxed) — stringify as the string
     # it points to, not its decimal address. Without this, f-strings /
     # %s of such a value emitted `static char * <address> = "<address>"`.
-    if gimple_ctypes.TypeLattice.is_int_word(et) and gen._get_actual_type(et, ev) == 'char *':
+    if gimple_ctypes.TypeLattice.is_int_word(et) and gimple_ctypes.TypeLattice.is_cstr(gen._get_actual_type(et, ev)):
         return gen._cast('char *', ev)
     # A slot read at a non-constant index may be a float BOX: `str(t[i])` and `f'{t[i]}'` render it as `mojo_repr_boxed`
     # does, the same as print (print(t[i]) already did; str() printed the box's integer word, 1 for 1.5).
@@ -7319,7 +7319,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._loop_head(idx64, len64, bb_cond, bb_body, bb_post, bb_after, False)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
-    if gen._word_has_slot_kinds(_iv) and gen._type_of(_as_str(gen0.target)) == 'int64_t':
+    if gen._word_has_slot_kinds(_iv) and gimple_ctypes.TypeLattice.is_word(gen._type_of(_as_str(gen0.target))):
         # a list that carries its own per-slot kinds: read each slot as the box
         # the runtime hands back (a float / str slot is boxed), exactly as the
         # `for` statement over such a list does, so the target IS the element
@@ -8882,7 +8882,7 @@ def _tag_mixed_list_call_args(gen, callee: str, arg_pairs: list) -> None:
         _pn = _as_str(_pnames[_i]) if _i < len(_pnames) else None
         if _pn is None or _pn not in _names:
             continue
-        if _as_str(gen._get_actual_type(_at, _av)) != 'MojoList *':
+        if (not gimple_ctypes.TypeLattice.is_list(_as_str(gen._get_actual_type(_at, _av)))):
             continue
         _et = _as_str(gen._elem_types.get(_as_str(_av)))
         _kind = {'char *': 'p', 'double': 'd'}.get(_et)
@@ -10580,7 +10580,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
         # A fresh STRING is owned only if no method call on it can hand back
         # the receiver itself (`t = s.strip()` may alias `s`): see
         # ownership_destruct.receiver_results_consumed.
-        if gen.var_types.get(name) == 'char *' and not _string_uses_ok(gen._cur_func_body, name):
+        if gimple_ctypes.TypeLattice.is_cstr(gen.var_types.get(name)) and not _string_uses_ok(gen._cur_func_body, name):
             candidates.discard(name)
             gen._owned_str_elem_names.discard(name)
             return

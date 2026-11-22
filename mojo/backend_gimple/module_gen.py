@@ -989,7 +989,7 @@ wrong-static-answer failure the whole table exists to avoid.
     _callee = getattr(f, 'name', None)
     if (_callee is not None
             and _callee in getattr(gen, '_return_maybe_kinds', ())
-            and getattr(gen, 'func_return_types', {}).get(_callee) == 'MojoList *'):
+            and gimple_ctypes.TypeLattice.is_list(getattr(gen, 'func_return_types', {}).get(_callee))):
         return True
     # `struct.unpack(fmt, buf)` / `struct.unpack_from(fmt, buf, off)` /
     # `struct.iter_unpack(fmt, buf)` — fmt is the first argument, read
@@ -1913,8 +1913,8 @@ def _emit_reflection_fwd_decls(self, parts):
         parts.append('')
     field_repr_names = set()
     for _sn in _emitted:
-        if self.func_return_types.get(
-                self._struct_method_csym(_sn, '__repr__', '')) == 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(self.func_return_types.get(
+                self._struct_method_csym(_sn, '__repr__', ''))):
             field_repr_names.add(_sn)
     field_repr_fwd_decls = [f"static char * _mojo_field_repr_{sn} ({sn} *obj);"
                             for sn in sorted(field_repr_names)]
@@ -1946,7 +1946,7 @@ def _emit_reflection_fwd_decls(self, parts):
     # an implicit declaration while the declaration half looked correct.
     for _sn in _emitted:
         _erep = self._struct_method_csym(_sn, '__repr__', '')
-        if self.func_return_types.get(_erep) == 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(self.func_return_types.get(_erep)):
             elem_repr_fwd_decls.append(f'extern char *{_erep} ({_sn} *);')
     if elem_repr_fwd_decls:
         parts.append("/* Forward decls for the per-struct ELEMENT REPR shims "
@@ -2380,8 +2380,8 @@ def _emit_reflection_dispatch(self, parts):
     # iteration, so every field fell through to the tag dispatch).
     field_repr_names = set()
     for _sn in reflect_structs:
-        if self.func_return_types.get(
-                self._struct_method_csym(_sn, '__repr__', '')) == 'char *':
+        if gimple_ctypes.TypeLattice.is_cstr(self.func_return_types.get(
+                self._struct_method_csym(_sn, '__repr__', ''))):
             field_repr_names.add(_sn)
     for sn in reflect_structs:
         fields = self.struct_field_types.get(sn, {})
@@ -2673,7 +2673,7 @@ def _emit_reflection_dispatch(self, parts):
                 val_expr = f'mojo_repr_float((double){fref})'
                 owned = 'T'
             elif gimple_ctypes.TypeLattice.is_list(ftype):
-                if self._field_elem_types.get(sn, {}).get(fname) == 'double':
+                if gimple_ctypes.TypeLattice.is_double(self._field_elem_types.get(sn, {}).get(fname)):
                     list_repr = f'mojo_repr_list_doubles({fref})'
                 else:
                     list_repr = f'_mojo_repr_list({fref})'
@@ -2815,7 +2815,7 @@ def _emit_reflection_dispatch(self, parts):
         # the same user symbol when the gate is open).
         _refl_body = repr_body
         _erep = self._struct_method_csym(sn, '__repr__', '')
-        _erep_ok = self.func_return_types.get(_erep) == 'char *'
+        _erep_ok = gimple_ctypes.TypeLattice.is_cstr(self.func_return_types.get(_erep))
         if _erep_ok:
             repr_body = (f"  if (!obj) return strdup(\"None\");\n"
                          f"  return {_erep} (obj);\n")
@@ -10529,9 +10529,9 @@ def _gmh_arg_scalar_type(self, caller_name, a, deep_str=False,
         for _side in (a.left, a.right):
             if not isinstance(_side, MemberExpr):
                 continue
-            if _gmh_arg_scalar_type(self, caller_name, _side,
+            if gimple_ctypes.TypeLattice.is_cstr(_gmh_arg_scalar_type(self, caller_name, _side,
                                 deep_str, prefer_refined_param,
-                                caller_struct) == 'char *':
+                                caller_struct)):
                 if isinstance(a.left, StringLiteral) or isinstance(a.right, StringLiteral):
                     return 'char *'
         return None
@@ -12975,7 +12975,7 @@ def _gmp_apply_xmod_param_hints(self, all_functions: list) -> None:
                     _xg_tgt[_xg_pn] = _xg_ct
                 elif ((gimple_ctypes.TypeLattice.is_cstr(_xg_ct)
                        and _xg_tgt.get(_xg_pn) in ('MojoList *', 'MojoSet *', 'MojoDict *'))
-                      or (_xg_tgt.get(_xg_pn) == 'char *'
+                      or (gimple_ctypes.TypeLattice.is_cstr(_xg_tgt.get(_xg_pn))
                           and _xg_ct in ('MojoList *', 'MojoSet *', 'MojoDict *'))):
                     # The str-vs-container ambiguity, settled by the callers
                     # exactly as the same-module pass settles it
@@ -14740,7 +14740,7 @@ def _gmp_collect_nested_str_call_args(self, _gmi_lift: list, _gmi_own: list, _gm
             for _gi in range(len(_gargs)):
                 if _gi >= len(_gpn):
                     break
-                if _gmh_arg_scalar_type(self, _scope_name, _gargs[_gi], deep_str=True) != 'char *':
+                if (not gimple_ctypes.TypeLattice.is_cstr(_gmh_arg_scalar_type(self, _scope_name, _gargs[_gi], deep_str=True))):
                     continue
                 _gslot.add(_gpn[_gi])
 
@@ -20794,7 +20794,7 @@ def gen_module_impl(self, stmts: list):
                         elif (isinstance(_scan_stmt.value.func, MemberExpr)
                                 and _scan_stmt.value.func.member == 'readlines'):
                             _gmh_phase17_set_gtype(self, _scan_stmt.name, 'MojoList *', _scan_own)
-                        elif self._quick_type(_scan_stmt.value) == 'double':
+                        elif gimple_ctypes.TypeLattice.is_double(self._quick_type(_scan_stmt.value)):
                             _gmh_phase17_set_gtype(self, _scan_stmt.name, 'double', _scan_own)
                         else:
                             _gmh_phase17_set_gtype(self, _scan_stmt.name, 'int64_t', _scan_own)
@@ -20839,7 +20839,7 @@ def gen_module_impl(self, stmts: list):
     _gmi_phase17_collect_appends(
         self, _phase17_stmts, _phase17_append_hits, _phase17_store_hits)
     for _gname, _gargs in _phase17_append_hits.items():
-        if self._global_var_types.get(_gname) != 'MojoList *':
+        if (not gimple_ctypes.TypeLattice.is_list(self._global_var_types.get(_gname))):
             continue
         if _gname in self._global_elem_types:
             continue
