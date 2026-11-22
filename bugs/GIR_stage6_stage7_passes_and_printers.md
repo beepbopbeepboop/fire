@@ -6,29 +6,94 @@ Plan source: `doc/GIR.md`, Stage 6 (counted loops, arms of the giant functions, 
 
 ## Still open
 
-- Stage 7 itself: `cpp_core.py` is the C++ coroutine printer. Its lowering still spells types and
-  statements as strings; the plan moves it onto the same builder as stage 2b. **Blocked**: it starts
-  after stages 2b and 3c, and `mojo/ir/build.py` (stage 2b) does not exist in the tree yet.
-- Its VERIFICATION is no longer blocked: `tools/c_oracle.py` now hashes the companion `.cpp` (see the
-  Status below), so a printer change can be proven byte-identical before it is made.
-- Its WRITE SET may be: `bugs/GIR_W1_cpp_core.md` still carries the W1 wave's `STOP: claimed` line for
-  `mojo/backend_gimple/cpp_core.py`, while `python3 tools/control.py claims` lists no live holder. Release
-  one of the two before moving a `cpp_core.py` emission, or the two lanes edit one file.
+- The builder half of stage 7: each of `cpp_core.py`'s five dispatch functions is now a list of
+  one-line calls (see the fifth-round Status), but an arm still returns C++ **text**. Moving one
+  arm at a time onto the stage-2b builder (`mojo/ir/build.py`) is what remains, and that file still
+  does not exist in the tree — it is the W2 lane's work (`bugs/GIR_stage2b_3c_builder_and_instr.md`),
+  not this one's.
+- The W1 write-set line: `bugs/GIR_W1_cpp_core.md` still carries its `STOP: claimed` line.
+  `python3 tools/control.py claims` lists no live holder, and this round's edit does not touch any
+  of the 35 type-string sites the packet is about (counts unchanged: 11 / 12 / 12), so the packet
+  can still run on top of it; only the orchestrator removes the line.
 
 ## Next step
 
-Stage 7, in this order:
+Stage 7's remaining half, in this order:
 
-1. Land `mojo/ir/build.py` (stage 2b, `bugs/GIR_stage2b_3c_builder_and_instr.md`) — or, if that lane is not
-   yours, do the shape step first: `tools/extract_arm.py --list mojo/backend_gimple/cpp_core.py _cpp_expr`
-   reports **3,458 movable lines in 10 arms** (`IdentExpr` 91, `MemberExpr` 284, `LambdaExpr` 132,
-   `UnaryOp` 30, `BinaryOp` 245 and 39, `CompareChain` 42, `CallExpr` 2,212, `SubscriptExpr` 140, `AwaitExpr` 243 —
-   every one `returns`, `extra inputs: none`; corrected 2026-11-21, see the fourth-round Status), `_cpp_stmt` **1,527** in 9 arms, `_cpp_with_stmt` 90 in 1; the `_cpp_for_stmt`
-   (1,425 in 6) and `_cpp_yield_from` (126 in 2) arms need `target`/`call` annotations. An extracted arm is exactly the
-   unit that later returns an `Ex` instead of a string, and each extraction is AST-identity-checked by the tool.
-2. Then move one extracted arm at a time onto the builder, with
-   `python3 tools/c_oracle.py check --base <the commit before> -j 4` reporting identical C **and** identical
-   C++ companion for all 285 `tools/pydiff_corpus` programs and all 13 `tools/cpp_corpus` programs.
+1. Land `mojo/ir/build.py` (stage 2b, `bugs/GIR_stage2b_3c_builder_and_instr.md`) — another lane's
+   claim. Then move one arm at a time onto the builder, smallest first (`_cps_aug_assign` 32 lines,
+   `_cps_import_stmt` 38, `_cpy_handle_local` 48, `_cpw_async_with` 90, ...), with
+   `python3 tools/c_oracle.py check --base <the commit before> -j 4` reporting identical C **and**
+   identical C++ companion for all 285 `tools/pydiff_corpus` programs and all 13 `tools/cpp_corpus`
+   programs.
+2. If the builder is still elsewhere, any further `cpp_core.py` split (for example the 363-line
+   `for_target_is_tuple` arm, which `extract_arm.py` refuses) is independent of it; re-measure with
+   `python3 tools/extract_arm.py --list mojo/backend_gimple/cpp_core.py <parent> 25`, which now
+   prints `0 lines can be moved` for all five printers.
+
+## Status 2026-11-22 (fifth round): stage 7's shape step is landed — all 30 printer arms are functions
+
+Landed (one code commit, `89c65d3a1`): `tools/extract_arm.py` moved every top-level `if` arm of
+`cpp_core.py`'s five dispatch functions into its own module-level function. No moved line was edited
+by hand, apart from the one call spelling described below; the tool's AST-identity check accepted
+every extraction.
+
+| parent | before | after | arms |
+|---|---|---|---|
+| `_cpp_expr` | 3,566 lines | **101** | 11 `_cpx_*` |
+| `_cpp_stmt` | 1,582 | **73** | 9 `_cps_*` |
+| `_cpp_with_stmt` | 344 | **256** | 1 `_cpw_async_with` |
+| `_cpp_yield_from` | 716 | **595** | 2 `_cpy_*` |
+| `_cpp_for_stmt` | 1,846 | **456** | 7 `_cpf_*` |
+
+`python3 tools/extract_arm.py --list mojo/backend_gimple/cpp_core.py <parent> 25` prints
+`0 lines can be moved` for all five. The one remaining refusal is the 363-line
+`for_target_is_tuple` arm (`binds name(s) read later: target`).
+
+The two annotation questions the fourth-round plan flagged are answered from the compiler's own
+dump (`python3 fire.py --dump mojo/backend_gimple/cpp_core.py`): `target` and `call` are erased
+words (`int64_t target;`, `int64_t call;`), so both are passed **unannotated**, the same treatment
+stage 6 gave `_gg_stmts`. `declared: dict` / `indent: str` / `s: 'ForStmt'` / `yf: 'YieldFromExpr'`
+keep the parent's own spelling.
+
+**One hand edit, and the latent bug it exposed.** The IfStmt arm's elif-chain recursion was the only
+bare module-level printer call in the file (`return _cpp_stmt(gen, ...)`); it now reads
+`return gen._cpp_stmt(...)`, the spelling of the other ~40 call sites (the method is a one-line
+delegate in `gimple_codegen.py:5685`). With the bare call, extracting the arms makes
+`python3 fire.py --dump cpp_core.py` fail after 142 s with `RecursionError` in
+`_specialize_mixed_generator_callers`: `mojo.middle.coro`'s `_ParamFlow` (coro.py:1680) reports a
+cycle of functions that each pass their own `gen` parameter on as "this parameter is the referenced
+generator", then clones the callee `_cpp_receiver_ctype` until the stack overflows. Measured with a
+depth probe: 4 `sources_ok` levels on the previous commit, 331 on the crashing variant. The
+underlying defect is filed as `bugs/CODEGEN_coro_paramflow_cycle_is_not_generator_fed.md`; the
+`gen._cpp_stmt` spelling avoids it here and is pinned by the new test.
+
+Verified:
+
+- `python3 test_gimple_cpp_core_arms.py` (new): 30 arms across 5 printers, 0 failures. It pins each
+  arm as a module-level function called once, the five parent line ratchets, the `0 lines can be
+  moved` end state, and the no-bare-printer-call rule. On the pre-change file it reports **46
+  failures**.
+- `python3 tools/c_oracle.py check --base 3462c536c -j 4`: all 285 `tools/pydiff_corpus` programs
+  generate **identical C**, all 13 `tools/cpp_corpus` programs generate **identical C++ companion** —
+  the coroutine lowering is byte-identical.
+- `python3 fire.py --dump mojo/backend_gimple/cpp_core.py`: succeeds in 12 s (was 15 s before; the
+  8.7 MB `.ci` differs because the compiler's own module now has 30 more functions, which is
+  expected and not emitted-program output).
+- `python3 test_gimple_generator_runner.py`: 520 passed, 0 failed.
+- `python3 test_regress_cpp_oracle_covers_lowering.py`: 13 programs, 2 shapes, 0 failures.
+- `python3 test_type_string_ratchet.py`: 0 failures; `cpp_core.py`'s counts are unchanged
+  (`== 'int64_t'` 11, `== 'char *'` 12, `== 'MojoList *'` 12), so the W1 packet is untouched.
+- `python3 test_gimple_arms_extracted.py` is 6/8, the separate pre-existing red
+  `bugs/GIR_arms_extracted_pin_has_two_movable_arms.md` (`_lower_IdentExpr` 25,
+  `_lower_binary_tail` 27) records; untouched here.
+
+**Not done:** the builder half of stage 7. No arm returns an `Ex` yet and no `mojo/ir/build.py`
+exists. The self-hosted compile of `cpp_core.py` itself is not verified here (light lane, no
+bootstrap): the new functions' parameters are inferred from their own bodies, and some differ from
+their parent's inferred type (`_cps_expr_stmt`'s `s` is `int64_t` where the parent's is
+`MojoList *`), which is the same class of change the stage-6 pass extractions made and accepted.
+The integrator's gate covers it.
 
 ## Status 2026-11-21 (fourth round): planning round — stage 7's shape step is blocked on a claim decision
 

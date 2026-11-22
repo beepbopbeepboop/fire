@@ -426,5 +426,12 @@ stage 7 has an oracle before it has a builder.
   GCC bridge (`gcc/fire/fire-gimple-bridge.cc`, today a stub that builds
   `int main(){return 0;}`) become printers over GIR. Its oracle is in place and
   is the second corpus `tools/c_oracle.py` hashes (`tools/cpp_corpus`, 13
-  coroutine programs compiled with `MOJO_CORO=cpp`, both promise shapes); the
-  builder it prints through (stage 2b, `mojo/ir/build.py`) is still the blocker.
+  coroutine programs compiled with `MOJO_CORO=cpp`, both promise shapes).
+  Shape step (2026-11-22): `extract_arm.py` moved every top-level `if` arm of
+  the five dispatch functions into its own module-level function — 30 arms,
+  `_cpp_expr` 3,566 -> 101 lines, `_cpp_stmt` 1,582 -> 73, `_cpp_with_stmt`
+  344 -> 256, `_cpp_yield_from` 716 -> 595, `_cpp_for_stmt` 1,846 -> 456 —
+  so `--list ... 25` prints `0 lines can be moved` for all five and an arm is
+  the unit that later returns an `Ex`. Both corpora are byte-identical.
+  `test_gimple_cpp_core_arms.py` pins it. The builder it prints through
+  (stage 2b, `mojo/ir/build.py`) is still the blocker.

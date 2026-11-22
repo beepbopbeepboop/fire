@@ -4542,6 +4542,13 @@ UNREGISTERED = {
     'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
     'test_gimple_arms_extracted.py': _STANDALONE_TEST_REASON,
+    # Stage 7's shape pin (2026-11-22): the five C++ printers of `cpp_core.py`
+    # have no movable `if` arms left, the same state
+    # `test_gimple_arms_extracted.py` pins for the GIMPLE lowerer and
+    # `test_gimple_module_passes.py` for `gen_module_impl`. It runs directly in
+    # ~0.1 s and was added by a worker round told not to register in
+    # tools/suite.py; a cheap one wants a bucket.
+    'test_gimple_cpp_core_arms.py': _STANDALONE_TEST_REASON,
     # The bootstrap-stage2-cc pins (2026-11-19): one shape of the red
     # whole-closure job each — the unaliased class import in every scope, the
     # class-method import's closure pull-in, the mid-compile module-global
