@@ -8979,7 +8979,8 @@ def _cps_multi_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 declared[tname] = vt
                 if gen._cpp_func_scope_decls is not None:
                     gen._cpp_func_scope_decls.append(f"{gimple_exprtypes._c_to_cpp_scalar_type(vt)} {tname};")
-            lines.append(f"{indent}{tname} = {val};")
+            from mojo.ir.instr import ex_text
+            lines.append(_cpp_assign_line(ex_text(tname), ex_text(val), indent))
         return lines
     return []
 
