@@ -4459,6 +4459,8 @@ test('stdlib-syntax-quick-bench-math', [PY, 'test_stdlib_syntax_quick_bench_math
 test('land-doc-summary', [PY, 'tools/test_land_doc_summary.py'],
      mem='tiny',
      desc='land doc summary (registered by the estate audit)')
+test('arms-extracted', [PY, 'test_gimple_arms_extracted.py'], mem='tiny',
+     desc='GIR Stage 6: the eight giant lowering functions have no movable `if` arms (the pin was in no bucket; registered)')
 test('gates-bootstrap-not-off', [PY, 'test_gates_bootstrap_jobs_not_off.py'],
      mem='tiny',
      desc='GATE_red_recover-land_2026-11-02-part5-part3: no gates.json OFF pattern may name a bootstrap gate job')
@@ -5397,6 +5399,7 @@ BUCKETS['check'].append('gates-coro-jobs-not-off')
 BUCKETS['check'].append('stdlib-import-suffix')
 BUCKETS['check'].append('stdlib-syntax-quick-bench-math')
 BUCKETS['check'].append('land-doc-summary')
+BUCKETS['check'].append('arms-extracted')
 BUCKETS['check'].append('dylib-generic-instances')
 BUCKETS['check'].append('import-overload-choice')
 BUCKETS['check'].append('out-param-local')

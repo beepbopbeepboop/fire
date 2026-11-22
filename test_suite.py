@@ -4548,7 +4548,6 @@ UNREGISTERED = {
     'test_bootstrap_stage2_dumps_skip.py': _STANDALONE_TEST_REASON,
     'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
-    'test_gimple_arms_extracted.py': _STANDALONE_TEST_REASON,
     # Stage 7's shape pin (2026-11-22): the five C++ printers of `cpp_core.py`
     # have no movable `if` arms left, the same state
     # `test_gimple_arms_extracted.py` pins for the GIMPLE lowerer and
@@ -5939,6 +5938,35 @@ def test_the_orchestrator_pins_run_rather_than_being_excused():
               'the estate check refuses an excuse for a registered file, so '
               'this excuse can only turn suite-self-test red — the fix is the '
               'registration, not the excuse')
+
+
+def test_the_arms_extracted_pin_runs_in_check():
+    """The arms-of-the-giant-functions pin is RUN by a gate, not just present.
+
+    `test_gimple_arms_extracted.py` pins that the eight giant lowering
+    functions of GIR.md "Stage 6" have no movable `if` arms left. It sat in
+    `UNREGISTERED` (excused as "run directly"), so no gate ran it: it went
+    6/8 on 2026-11-21 and nothing said so. The excuse was the defect, so this
+    pin states the decision the way the orchestrator pins above do: the file
+    is named by the `arms-extracted` spec, that spec is in `check` (the
+    everyday gate), and the excuse is gone. Cheap: `tiny`, no compile.
+    """
+    name, path = 'arms-extracted', 'test_gimple_arms_extracted.py'
+    spec = suite.REGISTRY.get(name)
+    files = ({os.path.basename(str(c)) for c in spec.cmd}
+             if spec is not None else set())
+    check(f'the suite: {name} names {path}',
+          spec is not None and os.path.basename(path) in files,
+          f'no spec names {path} (spec={spec!r}, cmd={sorted(files)}) — the '
+          'pin is then run by nothing and a regressed arm goes unnoticed')
+    check(f'the suite: {name} is in the check bucket',
+          name in suite.expand_bucket('check'),
+          f'{name} is registered but no bucket runs it, so the everyday gate '
+          'never observes the pin')
+    check(f'the suite: {path} is not excused in UNREGISTERED',
+          path not in _unregistered_reason_table(),
+          f'UNREGISTERED excuses {path}, which {name} already RUNS; the '
+          'excuse is the defect this pin exists to refuse')
 
 
 def test_no_test_name_is_registered_twice():
@@ -7438,6 +7466,7 @@ def main():
                test_the_suite_self_test_registrations_are_gated,
                test_the_land_doc_suite_is_registered_where_its_bucket_says,
                test_the_orchestrator_pins_run_rather_than_being_excused,
+               test_the_arms_extracted_pin_runs_in_check,
                test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
