@@ -14152,22 +14152,33 @@ def _gmp_emit_toplevel_function(self, func_parts: list[str], has_toplevel_code: 
         if self._lambda_parts:
             func_parts.extend(self._lambda_parts)
             self._lambda_parts = []
-        if not self.emit_entry_points:
-            sub_fn = _module_toplevel_name(self.module_name)
-            if sub_fn not in self._sub_toplevels:
-                self._sub_toplevels.append(sub_fn)
-            if not self.do_imports:
-                init_fn = _module_init_name(self.module_name)
-                func_parts.append(f"__attribute__((constructor)) static void {sub_fn}_ctor (void)")
+    # A standalone library module ALWAYS exports `<module>_init()` (and its
+    # constructor), even when it has no top-level statements. An importer
+    # that does `from M import f` calls `M_init()` for every local sibling it
+    # imports from (`_toplevel_dep_init_modules`, emit_funcs' prelude), so a
+    # def-only `M` that emitted nothing left that call an undefined symbol at
+    # link time. The empty body is the whole of such a module's init.
+    if not self.emit_entry_points:
+        sub_fn = _module_toplevel_name(self.module_name)
+        if sub_fn not in self._sub_toplevels:
+            self._sub_toplevels.append(sub_fn)
+        if not self.do_imports:
+            if not has_toplevel_code:
+                func_parts.append(f"void {sub_fn} (void)")
                 func_parts.append("{")
-                func_parts.append(f"  {sub_fn} ();")
                 func_parts.append("}")
                 func_parts.append('')
-                func_parts.append(f"void {init_fn} (void)")
-                func_parts.append("{")
-                func_parts.append(f"  {sub_fn} ();")
-                func_parts.append("}")
-                func_parts.append('')
+            init_fn = _module_init_name(self.module_name)
+            func_parts.append(f"__attribute__((constructor)) static void {sub_fn}_ctor (void)")
+            func_parts.append("{")
+            func_parts.append(f"  {sub_fn} ();")
+            func_parts.append("}")
+            func_parts.append('')
+            func_parts.append(f"void {init_fn} (void)")
+            func_parts.append("{")
+            func_parts.append(f"  {sub_fn} ();")
+            func_parts.append("}")
+            func_parts.append('')
 
 
 def _gmp_fix_global_call_slot_types(self, stmts: list) -> None:
