@@ -4385,8 +4385,7 @@ test('tuple-enumerate-var-refinement', [PY, 'test_tuple_enumerate_var_refinement
 test('unpacking-in-comprehensions', [PY, 'test_unpacking_in_comprehensions.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('where-clause-call-site-diagnostic', [PY, 'test_where_clause_call_site_diagnostic.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)',
-     disabled='bugs/gate-where-clause-call-site-diagnostic.md')
+     desc='registered by the estate audit (every test file runs)')
 # Defaulted trait method conformance (DIAGNOSTICS_trait_conformance part 6):
 # a struct inheriting a trait default whose signature cannot be instantiated
 # for the conforming struct must be rejected at declaration time.
