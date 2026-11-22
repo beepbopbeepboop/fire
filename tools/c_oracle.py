@@ -102,7 +102,12 @@ def git(*args, cwd=HERE) -> str:
 
 
 def corpus(rel_dir: str = CORPUS) -> list:
-    files = sorted(glob.glob(os.path.join(HERE, rel_dir, '*', '*.py')))
+    # Programs are Mojo source; `.py` is the older name for the Python-compatible
+    # ones, and a Mojo-only program (a `struct`) has to be `.mojo` or the Python
+    # scanners (`test_refusal_taxonomy.py`) read it as a Python file. The child
+    # compiles the text either way, so the extension only has to be globbed.
+    files = sorted(glob.glob(os.path.join(HERE, rel_dir, '*', '*.py'))
+                   + glob.glob(os.path.join(HERE, rel_dir, '*', '*.mojo')))
     return [(os.path.relpath(f, HERE), f) for f in files]
 
 
