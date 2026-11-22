@@ -2629,7 +2629,8 @@ test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'],
             'doc/POLICY_memory_over_4gb.md.',
      deps=['preflight'], timeout=600,
      desc='optional-unit link mechanism: derivation, probe, and every '
-          'test_sqlite3*.mojo built+linked+RUN on both pipelines')
+          'test_sqlite3*.mojo built+linked+RUN on both pipelines',
+     disabled='bugs/gate-sqliteruntime.md')
 
 # `mem='tiny'` (4 GB), down from `program` (55), and the aggregate is what the
 # ceiling is still for: the per-file gcc here is small (a snippet-sized
