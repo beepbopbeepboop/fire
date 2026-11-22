@@ -17,6 +17,17 @@ not a generator source) and was never registered in `tools/suite.py`.
 The test runs in a bucket (it is a fast, pure-parser test; `check` is the natural home), so the
 regression for the cycle fix is run by every gate, not only when someone runs it by hand.
 
+## Done when
+
+    python3 tools/suite.py --list | grep coro-paramflow-cycle     # a job in `check`
+    python3 tools/suite.py coro-paramflow-cycle                   # 2/2 PASS
+    python3 test_suite.py                                         # the estate line
+                                                                  # no longer names this file
+
+The last line still lists `test_bootstrap_stage2_dumps_t_print.py` and
+`test_type_lattice_predicates.py` for the same reason this file was named;
+those two arrived in other landings and are a separate doc, not this one.
+
 ## Next step
 
 Register `test('coro-paramflow-cycle', [PY, 'test_coro_paramflow_cycle.py'], ...)` in `tools/suite.py`
