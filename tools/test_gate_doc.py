@@ -305,6 +305,30 @@ def test_a_gate_that_is_off_files_no_second_doc():
     in_repo(body)
 
 
+def test_known_bugs_resolves_a_fanout_item_and_its_parent():
+    """A fanout ITEM is named `<parent>:<file>`; the doc is named the same way.
+
+    `known_bugs` split the JOB name on `[-_]` but the file name on `[-_.]`, so
+    `dumps:test` and `jit.mojo` never met `dumps:test` and `jit` + `mojo`: both
+    the item and its parent returned [], and the gate printed `NEW: no bug doc
+    tracks this job` for a failure the per-item docs already tracked.
+    """
+    import suite as S
+    with tempfile.TemporaryDirectory() as tmp:
+        bugs = os.path.join(tmp, "bugs")
+        os.makedirs(bugs)
+        doc = os.path.join(bugs, "gate-bootstrap-stage2-dumps:test_jit.mojo.md")
+        open(doc, "w").write("# Gate: bootstrap-stage2-dumps:test_jit.mojo is red on master\n")
+        check("a fanout item resolves its own per-item doc",
+              S.known_bugs("bootstrap-stage2-dumps:test_jit.mojo", root=bugs)
+              == [os.path.join("bugs", "gate-bootstrap-stage2-dumps:test_jit.mojo.md")])
+        parent = S.known_bugs("bootstrap-stage2-dumps", root=bugs)
+        check("the parent resolves the per-item docs too",
+              parent == [os.path.join("bugs", "gate-bootstrap-stage2-dumps:test_jit.mojo.md")])
+        check("an unrelated job still resolves to nothing",
+              S.known_bugs("no-such-job-anywhere", root=bugs) == [])
+
+
 if __name__ == "__main__":
     test_gate_doc_is_tracked_on_master_at_once()
     test_ledger_landing_clears_an_untracked_twin_of_a_tracked_doc()
@@ -316,5 +340,6 @@ if __name__ == "__main__":
     test_gate_doc_never_names_a_path_and_holds_first()
     test_failed_job_names_stops_at_the_section_end()
     test_restart_refuses_a_task_with_no_doc()
+    test_known_bugs_resolves_a_fanout_item_and_its_parent()
     print("%d failure(s)" % len(FAILED))
     sys.exit(1 if FAILED else 0)

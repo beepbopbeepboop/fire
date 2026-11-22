@@ -6646,20 +6646,33 @@ def _line(job, res, done, total, active):
 # ── Reporting ────────────────────────────────────────────────────────────────
 # The screen gets the failures and one tally. Everything per-test — a PASS
 # line each, with argv, exit code, duration and measured peak — is in the log.
-def known_bugs(name):
+def known_bugs(name, root=None):
     """The bug docs that already track a failing job, so a red gate says whether it is a regression someone has
     seen before (a doc exists) or a new one (none does). A doc matches when its file name carries every word of the
     job's name (`gimple` -> GATE_check_gimple_selfhost_...), or when its title names the job in backticks. The
-    result is a list of bugs/ paths, possibly empty; it is a pointer for the reader, not a verdict on the failure."""
+    result is a list of bugs/ paths, possibly empty; it is a pointer for the reader, not a verdict on the failure.
+
+    `root` overrides the bugs/ directory, so the matching rule can be tested
+    without a doc having to exist in the live tree (which churns)."""
     import re as _re
-    words = [w for w in _re.split(r'[-_]', name.lower()) if w]
+    base = os.path.dirname(os.path.abspath(__file__))
+    bugs = os.path.normpath(root or os.path.join(base, '..', 'bugs'))
+    rel = os.path.dirname(bugs)
+    # Split the NAME on the same separators as the file name (`[-_.:]`), not
+    # just `[-_]`. A fanout item is named `<parent>:<file>`, so the old split
+    # left `dumps:test` and `jit.mojo` as single words while the file name
+    # yielded `dumps:test` and `jit` + `mojo` -- neither the item nor its
+    # parent matched the per-item docs that exist for them, and the gate then
+    # reported a NEW regression for a failure fifty docs already track
+    # (a fanout item is named <parent>:<file>; its doc is named the same way).
+    words = [w for w in _re.split(r'[-_.:]', name.lower()) if w]
     hits = []
-    for root, _dirs, files in os.walk(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bugs')):
+    for dirpath, _dirs, files in os.walk(bugs):
         for f in files:
             if not f.endswith('.md') or f.startswith(('OPEN_WORK', 'README')):
                 continue
-            path = os.path.normpath(os.path.join(root, f))
-            tokens = set(_re.split(r'[-_.]', f[:-3].lower()))
+            path = os.path.normpath(os.path.join(dirpath, f))
+            tokens = set(_re.split(r'[-_.:]', f[:-3].lower()))
             if all(w in tokens for w in words):
                 hits.append(path)
                 continue
@@ -6669,7 +6682,6 @@ def known_bugs(name):
                 continue
             if title.startswith('#') and f'`{name}`' in title:    # the title names the job, not a passing mention
                 hits.append(path)
-    rel = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
     return sorted(os.path.relpath(h, rel) for h in hits)
 
 
