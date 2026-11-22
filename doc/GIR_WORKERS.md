@@ -188,7 +188,7 @@ Claude workers are not running.
    passed to an unannotated parameter is the shared box `mojo_box_none()`
    (as a `= None` default already is), and `is None` on such a parameter
    reads the box. Today `pick(0)` answers `x is None` True.
-   `bugs/GIR_stage5c_none_representation.md` has the repros.
+   `bugs/mid/GIR_stage5c_none_representation.md` has the repros.
 2. **Bootstrap visibility.** `bootstrap-stage1-transitive` and
    `bootstrap-stage2-cc` are disabled by `bugs/gate-bootstrap-stage1-transitive.md`
    and `bugs/mid/gate-bootstrap-stage2-cc.md`. While they are off, self-host breakage
