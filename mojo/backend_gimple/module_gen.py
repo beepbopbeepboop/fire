@@ -10341,7 +10341,7 @@ def _gmh_reconcile_param_container_kinds(self):
             if _pbns and _pname in _pbns:
                 continue
             _cur = self._inferred_param_types[_fn].get(_pname)
-            if _cur in (None, 'int64_t', 'int', ''):
+            if (gimple_ctypes.TypeLattice.is_int_word_or_none(_cur) or gimple_ctypes.TypeLattice.is_unsolved(_cur)):
                 self._inferred_param_types[_fn][_pname] = _ctype
 
 
@@ -19862,7 +19862,7 @@ def gen_module_impl(self, stmts: list):
                 if _bm_sn in self.struct_field_types:
                     _bm_rt = self.func_return_types.get(
                         f"{_bm_sn}_{gimple_ctypes._safe_name(_as_str(_value.member))}")
-                    if isinstance(_bm_rt, str) and _bm_rt not in ('', 'int64_t', 'void'):
+                    if isinstance(_bm_rt, str) and not (gimple_ctypes.TypeLattice.is_word_or_unsolved(_bm_rt) or gimple_ctypes.TypeLattice.is_void(_bm_rt)):
                         self._global_callable_ret_types[_gname] = _bm_rt
 
     def _phase17_scan_try_branches(_try_stmt):

@@ -3918,7 +3918,7 @@ def _inferred_arg_mojo_type(gen, arg, ctype):
     call has can move — the List/Span proofs are purely additive."""
     if gimple_ctypes.TypeLattice.is_list(ctype):
         return _list_arg_mojo_type(gen, arg, ctype)
-    if ctype in ('Span *', 'int64_t'):
+    if (gimple_ctypes.TypeLattice.is_word(ctype) or gimple_ctypes.TypeLattice.is_span(ctype)):
         return _proven_span_arg_mojo_type(gen, arg)
     return _constructed_struct_type(gen, arg, ctype)
 

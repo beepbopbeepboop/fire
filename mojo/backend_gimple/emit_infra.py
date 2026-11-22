@@ -9472,7 +9472,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 rv = _own_repr(gen, _fn, gen._call_expr('char *', _fn, _fargs),
                                _owned_reprs)
             gen._rt_void(print_fn, [f"{rv}"])
-        elif gimple_ctypes.TypeLattice.is_bool(atype) or (gimple_ctypes.TypeLattice.is_bool(_stat) and atype in ('int', 'int64_t', 'char *', 'long')):
+        elif gimple_ctypes.TypeLattice.is_bool(atype) or (gimple_ctypes.TypeLattice.is_bool(_stat) and (gimple_ctypes.TypeLattice.is_int_word(atype) or gimple_ctypes.TypeLattice.is_cstr(atype) or gimple_ctypes.TypeLattice.is_c_long(atype))):
             # Python prints True/False; the generic numeric path below would
             # sprintf a _Bool with "%d" and print 1. Also reached for
             # `_Bool`-typed locals, which is how a comparison or a

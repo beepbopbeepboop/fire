@@ -6345,7 +6345,7 @@ def _ldm_setdefault(gen, ov: str, args: list) -> tuple:
         [('MojoDict *', ov), (key_type, key_val), ('int64_t', dv64)])
     # Preserve a container/pointer default's static type so a chained
     # `.append(...)` / `[...]` resolves against the real runtime type.
-    if dt not in ('int64_t', 'int', '_Bool', 'double', ''):
+    if not (gimple_ctypes.TypeLattice.is_number_scalar(dt) or gimple_ctypes.TypeLattice.is_unsolved(dt)):
         typed = gen._cast(dt, raw)
         gen._elem_types[typed] = gen._elem_types.get(dv, gen._elem_types.get(_gmm_as_str(raw)))
         return dt, typed
@@ -9140,7 +9140,7 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     else:
         struct_name = gimple_exprtypes._struct_name_of(ot)
         # If we couldn't determine struct from C type, try to look up variable's declared type
-        if (struct_name in ('int64_t', 'int', 'long', '') 
+        if ((gimple_ctypes.TypeLattice.is_int_word(struct_name) or gimple_ctypes.TypeLattice.is_c_long(struct_name) or gimple_ctypes.TypeLattice.is_unsolved(struct_name)) 
                 and isinstance(func.obj, gimple_ctypes.IdentExpr)):
             _vname = func.obj.name
             # Check var_types, global var types, etc.

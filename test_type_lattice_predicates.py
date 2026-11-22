@@ -57,7 +57,17 @@ ANSWER_KEY = {
     'is_double': {'double'},
     'is_float': {'double', 'float', '__fp16'},
     'is_cstr': {'char *'},
+    'is_str': {'MojoStr *'},
+    'is_span': {'Span *'},
     'is_voidp': {'void *'},
+    'is_void': {'void'},
+    'is_u8': {'uint8_t'},
+    'is_c_long': {'long'},
+    'is_cpp_bool': {'bool'},
+    'is_cpp_int_scalar': {'int', 'int64_t', '_Bool', 'bool'},
+    'is_unsolved': {'', 'unknown'},
+    'is_word_or_unsolved': {'int64_t', '', 'unknown'},
+    'is_int_word_or_unsolved': {'int', 'int64_t', '', 'unknown'},
     'is_list': {'MojoList *'},
     'is_dict': {'MojoDict *'},
     'is_set': {'MojoSet *'},
@@ -102,6 +112,19 @@ ALLOWED_EXTRA = {
     frozenset(["'_Bool'", "'double'", "'float'", "'int'", "'int64_t'"]): {'__fp16'},
     frozenset(["'_Bool'", "'char *'", "'double'", "'float'", "'int'",
                "'int64_t'"]): {'__fp16'},
+    # The unsolved marker has two spellings (`''` and `'unknown'`, see
+    # is_unsolved) and the hand-written tuples named one of them — one tuple
+    # even named both side by side. A predicate that asks the question
+    # therefore answers for both, so every tuple below is accepted with
+    # 'unknown' as the one extra member. The tuple that already named both
+    # spellings needs no exception and is not listed.
+    frozenset(["''", "'int64_t'"]): {'unknown'},
+    frozenset(["''", "'int'", "'int64_t'"]): {'unknown'},
+    frozenset(["''", "'int64_t'", "'void *'"]): {'unknown'},
+    frozenset(["''", "'int64_t'", "'void'"]): {'unknown'},
+    frozenset(["''", "'_Bool'", "'double'", "'int'", "'int64_t'"]): {'unknown'},
+    frozenset(["''", "'int'", "'int64_t'", "None"]): {'unknown'},
+    frozenset(["''", "'int'", "'int64_t'", "'long'"]): {'unknown'},
 }
 
 

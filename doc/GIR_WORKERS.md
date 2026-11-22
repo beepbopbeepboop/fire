@@ -88,11 +88,13 @@ Status 2026-11-21: items 1, 2 and 4 landed. `tools/c_oracle.py` (corpus hashing 
 programs with `-j 6`, so every worker can afford it); nine tuple predicates in `TypeLattice` and the tuple
 table in `tools/type_string_codemod.py` (294 -> 115 tuple tests, C byte-identical on 285 programs); the
 ratchet no longer counts `mojo/middle/types.py`, where the predicates are defined; eight W1 packets
-(`bugs/GIR_W1_*.md`, 322 sites). The 2026-11-21 tail round (`bugs/GIR_stage4_type_objects_tail.md`)
-added the representation-class predicates (`is_dict`/`is_set`/`is_bytes`/`is_uword`/`is_char`/
+(`bugs/GIR_W1_*.md`, 322 sites). The 2026-11-21 stage-4 tail (two rounds) added the
+representation-class predicates (`is_dict`/`is_set`/`is_bytes`/`is_uword`/`is_char`/
 `is_voidp`/`is_boxable`/`is_word_value`/`is_c_scalar`/`is_number_scalar`), taught the codemod to emit
 a disjunction of classes, to read a tuple wrapped across lines, and to rewrite a module that imports
-`TypeLattice` directly, and took the counts to 17 / 54 / 62 / 16 / 29 / 2 / 8 (tuple / int64 / char* /
+`TypeLattice` directly, then added the single-type spellings the last 17 tuples needed (`is_str`,
+`is_span`, `is_u8`, `is_c_long`, `is_void`, the C++ emitter's `is_cpp_bool`/`is_cpp_int_scalar`) and
+the unsolved marker `is_unsolved` (`''`/`'unknown'`), and took the counts to 0 / 54 / 62 / 16 / 29 / 2 / 8 (tuple / int64 / char* /
 endswith / list / bool / double), C byte-identical on 285 programs; each packet's table was
 re-measured. Item 3 (the None decision) is the owner's.
 

@@ -52,7 +52,11 @@ EQ_PATS = [(re.compile(r"(?P<pre>" + PRE + r"(?:not\s+)?)" + LHS
 # to a predicate of its own, so the classes keep their one definition each:
 # `x in ('int', 'int64_t', 'uint64_t')` -> is_int_word(x) or is_uword(x).
 # Every predicate answers exactly its own membership (`None` included where
-# listed), so a rewrite cannot change which values match.
+# listed), so a rewrite cannot change which values match, with ONE deliberate
+# widening: `''` and `'unknown'` are the same "not inferred" marker
+# (`is_unsolved`), so a tuple that named only one spelling gains the other.
+# `test_type_lattice_predicates.py` lists each such tuple with `'unknown'` as
+# its one allowed extra.
 TUPLES = {
     frozenset(["'int'", "'int64_t'"]): ('is_int_word',),
     frozenset(["'_Bool'", "'int'", "'int64_t'"]): ('is_int_word_or_bool',),
@@ -116,6 +120,35 @@ TUPLES = {
     frozenset(["'_Bool'", "'double'", "'float'", "'int'", "'int64_t'"]):
         ('is_number_scalar', 'is_float'),
     frozenset(["'MojoList *'", "'int'", "'int64_t'"]): ('is_list', 'is_int_word'),
+    # The "not inferred yet" marker (`''`/`'unknown'`, see is_unsolved): the
+    # tuples below spell it with one or both of its spellings. A tuple that
+    # also lists `None` keeps its own `*_or_none` predicate for the absent
+    # entry, because `not in` tests must still reject an absent entry.
+    frozenset(["'int64_t'", "''"]): ('is_word_or_unsolved',),
+    frozenset(["'int'", "'int64_t'", "''"]): ('is_int_word_or_unsolved',),
+    frozenset(["'int64_t'", "'void *'", "''"]):
+        ('is_word', 'is_voidp', 'is_unsolved'),
+    frozenset(["''", "'int64_t'", "'void'"]):
+        ('is_word_or_unsolved', 'is_void'),
+    frozenset(["'_Bool'", "'double'", "'int'", "'int64_t'", "''"]):
+        ('is_number_scalar', 'is_unsolved'),
+    frozenset(["''", "'int'", "'int64_t'", "None"]):
+        ('is_int_word_or_none', 'is_unsolved'),
+    frozenset(["''", "'int'", "'int64_t'", "'long'"]):
+        ('is_int_word', 'is_c_long', 'is_unsolved'),
+    frozenset(["''", "'_Bool'", "'char'", "'double'", "'int'", "'int64_t'",
+               "'unknown'"]): ('is_number_scalar', 'is_char', 'is_unsolved'),
+    # The single-type spellings the C++/Span/bytes paths needed (is_str is the
+    # lazy MojoStr handle, is_u8 the unsigned byte, is_span the erased Span).
+    frozenset(["'_Bool'", "'char *'", "'int'", "'int64_t'", "'MojoStr *'"]):
+        ('is_int_word_or_bool', 'is_cstr', 'is_str'),
+    frozenset(["'_Bool'", "'char'", "'int'", "'int64_t'", "'uint8_t'"]):
+        ('is_int_word_or_bool', 'is_char', 'is_u8'),
+    frozenset(["'Span *'", "'int64_t'"]): ('is_word', 'is_span'),
+    frozenset(["'char *'", "'int'", "'int64_t'", "'long'"]):
+        ('is_int_word', 'is_cstr', 'is_c_long'),
+    # The C++ emitter's bool spelling (see is_cpp_bool).
+    frozenset(["'int'", "'int64_t'", "'_Bool'", "'bool'"]): ('is_cpp_int_scalar',),
 }
 
 TUPLE_PAT = re.compile(r"(?P<pre>" + PRE + r")" + LHS_TUPLE + r"\s+(?P<neg>not )?in "

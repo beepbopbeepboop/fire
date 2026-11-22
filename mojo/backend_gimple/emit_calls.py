@@ -6155,7 +6155,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # must be a `MojoList *` (see _lower_bare_list_ctor for the measured
     # integer erasure this replaces).
     if (fname_raw == 'List'
-            and _ctor_rt in ('int64_t', '')
+            and gimple_ctypes.TypeLattice.is_word_or_unsolved(_ctor_rt)
             and fname_raw not in gen.var_types
             and fname_raw not in gen.func_param_types
             and fname_raw not in gen.struct_field_types
@@ -6780,7 +6780,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
             iv = gen._cast('int64_t', obj_val)
             gen._rt_into(res, 'mojo_isinstance_p', [iv, f"{type_id}"])
             return gen._cast('_Bool', res)
-        if obj_type not in ('int64_t', 'void *', ''):
+        if not (gimple_ctypes.TypeLattice.is_word(obj_type) or gimple_ctypes.TypeLattice.is_voidp(obj_type) or gimple_ctypes.TypeLattice.is_unsolved(obj_type)):
             return gen._new_val('_Bool', '(_Bool)0')
     res = gen._new_temp('int')
     if obj_type in ('char *', 'void *', 'MojoDict *', 'MojoList *', 'MojoSet *') or gimple_ctypes.TypeLattice.ends_in_star(obj_type):
@@ -7335,7 +7335,7 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
         bf = 'mojo_bytes_all' if fname_raw == 'all' else 'mojo_bytes_any'
         gen._emit_call('int', t, bf, [('MojoBytes *', av)])
     elif (gimple_ctypes.TypeLattice.is_list(at) or at == 'MojoDict *' or at == 'MojoSet *'
-          or at in ('int64_t', 'int', '_Bool', 'char *', 'MojoStr *')
+          or (gimple_ctypes.TypeLattice.is_int_word_or_bool(at) or gimple_ctypes.TypeLattice.is_cstr(at) or gimple_ctypes.TypeLattice.is_str(at))
           or gimple_ctypes.TypeLattice.ends_in_star(at)):
         # DESIGN.html R1/R5: dict/set materialization (all(d)/any(s) over a
         # dict's keys / a set's elements, not a reinterpret of the header —

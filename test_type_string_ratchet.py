@@ -44,7 +44,7 @@ PATTERNS = {
 BASELINE = {
     "endswith(' *')": 16,
     "== 'int64_t'": 54,
-    "in (.., 'int64_t', ..)": 17,
+    "in (.., 'int64_t', ..)": 0,
     "== 'char *'": 62,
     "== '_Bool'": 2,
     "== 'double'": 8,

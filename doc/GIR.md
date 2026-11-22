@@ -222,14 +222,19 @@ that is meant to be behaviour-preserving:
   counts of `.endswith(' *')` (344; 67 after the codemod), `== 'int64_t'` (404), `in (.., 'int64_t')`
   (312), `== 'char *'` (398; 159 after the 2026-11-20 codemod that turned 240 of them into `TypeLattice.is_cstr(x)`, byte-identical C on 284 programs), `== '_Bool'` (68; 23 after the codemod), `== 'double'` (187) and
   `== 'MojoList *'` (203) may only shrink.
-  *Measured 2026-11-21 after the stage-4 tail round* (which added the representation-class
+  *Measured 2026-11-21 after the stage-4 tail* (two rounds: the first added the representation-class
   predicates — `is_dict`, `is_set`, `is_bytes`, `is_uword`, `is_char`, `is_voidp`, `is_boxable`,
   `is_word_value`, `is_c_scalar`, `is_number_scalar` — and taught the codemod to emit a
-  disjunction of classes for a tuple that is a union of them): `in (..)` 17, `== 'int64_t'` 54,
-  `== 'char *'` 62, `endswith(' *')` 16, `== 'MojoList *'` 29, `== '_Bool'` 2, `== 'double'` 8,
-  C byte-identical on all 285 `tools/pydiff_corpus` programs. `python3
-  test_type_string_ratchet.py --per-file` is the per-file census; `test_type_lattice_predicates.py`
-  pins each predicate's exact membership and each codemod table entry.
+  disjunction of classes for a tuple that is a union of them; the second added the single-type
+  spellings the tail still needed — `is_str`, `is_span`, `is_u8`, `is_c_long`, `is_void`,
+  `is_cpp_bool`/`is_cpp_int_scalar` for the C++ emitter's `bool` — and the unsolved marker
+  `is_unsolved` (`''`/`'unknown'`) with its two word compositions, and took the tuple pattern to
+  **0**): `in (..)` 0, `== 'int64_t'` 54, `== 'char *'` 62, `endswith(' *')` 16, `== 'MojoList *'`
+  29, `== '_Bool'` 2, `== 'double'` 8, C byte-identical on all 285 `tools/pydiff_corpus` programs.
+  `python3 test_type_string_ratchet.py --per-file` is the per-file census;
+  `test_type_lattice_predicates.py` pins each predicate's exact membership and each codemod table
+  entry. The remaining `==` tests are the ones whose left side is an expression the codemod
+  deliberately does not accept; the tuple pattern can only shrink from here.
 - **Stage 5a (landed 2026-11-14). A value's facts travel with a copy.**
   `carry_value_info(gen, dst, src)` (`emit_infra.py`) copies what the backend
   knows about a VALUE from one name to another, and `gen._copy` calls it for

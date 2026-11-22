@@ -2090,7 +2090,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if gimple_ctypes.TypeLattice.is_double(_suf):
             return 'double', gen._rt_call('double', 'mojo_list_get_double', [_pair, '1'])
         _raw = gen._rt_call('int64_t', 'mojo_list_get_int', [_pair, '1'])
-        if _pv_type in ('int64_t', 'int', ''):
+        if gimple_ctypes.TypeLattice.is_int_word_or_unsolved(_pv_type):
             return 'int64_t', _raw
         # A struct-pointer / other non-scalar value type: keep the real
         # static type so a later field read or call resolves statically.
@@ -7260,7 +7260,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         # (left operand) is another bytes value or an int 0-255.
         if xt == 'MojoBytes *':
             needle = xv
-        elif xt in ('int', 'int64_t', 'char', 'uint8_t', '_Bool'):
+        elif (gimple_ctypes.TypeLattice.is_int_word_or_bool(xt) or gimple_ctypes.TypeLattice.is_char(xt) or gimple_ctypes.TypeLattice.is_u8(xt)):
             xv64 = gen._to_int64(xt, xv)
             l1 = gen._call_expr('MojoList *', 'mojo_list_new', [])
             gen._rt_void('mojo_list_append_int', [l1, xv64])

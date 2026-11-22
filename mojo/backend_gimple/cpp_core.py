@@ -5000,7 +5000,7 @@ def _cpp_expr(gen, e) -> str:
                         fn_return_types=_cpp_trusted_fn_return_types(gen))
                 except Exception:
                     _sct = None
-                if _sct in ('int64_t', '_Bool', 'bool', 'int'):
+                if gimple_ctypes.TypeLattice.is_cpp_int_scalar(_sct):
                     return f"mojo_str_from_int((int64_t)({args[0]}))"
                 if gimple_ctypes.TypeLattice.is_double(_sct):
                     return f"mojo_repr_float((double)({args[0]}))"
@@ -5914,7 +5914,7 @@ def _cpp_expr(gen, e) -> str:
                             fn_return_types=_cpp_trusted_fn_return_types(gen),
                             module_global_types=getattr(
                                 gen, '_cpp_module_global_ctypes', None))
-                        if _act in ('int64_t', 'int', '_Bool', 'bool'):
+                        if gimple_ctypes.TypeLattice.is_cpp_int_scalar(_act):
                             _pack_stmts.append(
                                 f"mojo_list_append_int({_listvar}, "
                                 f"(int64_t)({args[_i]}));")
@@ -6191,8 +6191,10 @@ def _cpp_expr(gen, e) -> str:
                         elif isinstance(expected_pt, str) and expected_pt.endswith('*'):
                             arg_exprs.append(f"({expected_pt})({ae})")
                             continue
-                        elif expected_pt in ('int64_t', 'int', '_Bool', 'bool'):
-                            if gimple_ctypes.TypeLattice.is_bool(actype) or expected_pt in ('_Bool', 'bool'):
+                        elif gimple_ctypes.TypeLattice.is_cpp_int_scalar(expected_pt):
+                            if (gimple_ctypes.TypeLattice.is_bool(actype)
+                                    or gimple_ctypes.TypeLattice.is_bool(expected_pt)
+                                    or gimple_ctypes.TypeLattice.is_cpp_bool(expected_pt)):
                                 arg_exprs.append(f"(int64_t)({ae})")
                             elif isinstance(actype, str) and actype.endswith('*'):
                                 # pointer argument into an int64 slot: word-pack
@@ -7658,8 +7660,10 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                         elif isinstance(expected_pt, str) and gimple_ctypes.TypeLattice.ends_in_star(expected_pt):
                             arg_exprs.append(f"({expected_pt})({ae})")
                             continue
-                        elif expected_pt in ('int64_t', 'int', '_Bool', 'bool'):
-                            if gimple_ctypes.TypeLattice.is_bool(actype) or expected_pt in ('_Bool', 'bool'):
+                        elif gimple_ctypes.TypeLattice.is_cpp_int_scalar(expected_pt):
+                            if (gimple_ctypes.TypeLattice.is_bool(actype)
+                                    or gimple_ctypes.TypeLattice.is_bool(expected_pt)
+                                    or gimple_ctypes.TypeLattice.is_cpp_bool(expected_pt)):
                                 arg_exprs.append(f"(int64_t)({ae})")
                             elif gimple_ctypes.TypeLattice.is_cstr(actype):
                                 arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
