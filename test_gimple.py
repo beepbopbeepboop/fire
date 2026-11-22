@@ -1089,20 +1089,42 @@ def test_word_facts_one_record_per_temp():
     w.carry('c2', 'c')
     want(w.is_boxed_container('c2'), "an unknown container kind travels too")
 
-    # THE CARRY BOUNDARY (see `carry`'s docstring): a copy gets the READ-side
-    # half of a box (the runtime decides the kind) but not the BIND-side one
-    # (the copy is not claimed to be a heap box a name must unbox), and the
-    # Tagged flag stays with the Box kind it modifies.
+    # THE CARRY BOUNDARY (see `carry`'s docstring): a copy of a box IS the
+    # same word, so the READ-side half travels -- the `Box` KIND and the
+    # `Tagged` flag that modifies it (every renderer/arithmetic reader asks
+    # "is this word's kind a runtime fact?"). The BIND-side `BindBox` fact
+    # does NOT: whether a NAME is represented as a box is a decision about the
+    # name, and a pass-through temp is not a name anybody bound.
     w.mark_boxed('b')
     w.mark_tagged('tb')
     w.carry('b2', 'b')
     w.carry('tb2', 'tb')
     want(w.is_dyn('b2'),
          "a copy of a box is a word whose kind the runtime decides")
-    want(not w.may_be_box('b2'),
-         "Box itself does not travel through a copy (see carry's docstring)")
-    want(w.is_dyn('tb2') and not w.is_tagged('tb2'),
-         "Tagged does not travel either; the tag belongs to the Box kind")
+    want(w.may_be_box('b2'),
+         "Box travels through a copy (the read half; see carry's docstring)")
+    want(w.is_tagged('tb2'),
+         "Tagged travels with the Box kind it modifies")
+    want(w.bind_box('b') and not w.bind_box('b2'),
+         "the BIND half does not travel: a copy is not a name anybody bound")
+    want(w.bind_tagged('tb') and not w.bind_tagged('tb2'),
+         "a copied tagged box is tagged to READ, not tagged as a NAME's shape")
+    want(w.may_be_box('b') and w.is_tagged('tb'),
+         "the producer keeps both halves")
+
+    # A box carried onto a record that already holds a DynWord is the stronger
+    # fact, so the kind is upgraded (and the tag with it); a proven integer is
+    # the one fact a box does not overwrite.
+    w.mark_dyn('d')
+    w.carry('d2', 'b')
+    want(w.may_be_box('d2') and not w.bind_box('d2'),
+         "a box copied onto a dynamic word upgrades its kind, not its bind")
+    w.mark_int_word('n2src')
+    w.mark_boxed('n2src')
+    w.mark_int_word('intdst')
+    w.carry('intdst', 'n2src')
+    want(w.is_int_word('intdst') and not w.may_be_box('intdst'),
+         "an integer proof is not promoted to a box by a copy")
 
     # A nested body saves and restores the whole record map.
     snap = w.snapshot()
@@ -1126,6 +1148,138 @@ def test_word_facts_one_record_per_temp():
     else:
         print(f"PASS  {name}")
         _PASS += 1
+
+
+def test_word_facts_bind_side_does_not_travel():
+    """The bind/read split, on its own (`doc/GIR.md` stage 5b, the step after
+    the one record): a copy of a box carries the READ fact (`Box` + `Tagged`)
+    and not the BIND fact (`BindBox`), and the bind path asks the BIND fact.
+
+    The bug this pins: carrying `Box`/`Tagged` while the bind path still read
+    them made the self-host-closure module `mojo/middle/infra_infer.py` refuse
+    to compile -- `_pn2 = _chosen.get('param_names') or []` merges a tagged
+    dict-get box through `_copy` into a temp that is then stored into a
+    `MojoList *` local, and the bind path read the copy's tag as a decision
+    about the NAME ("a tagged generator word ... cannot also hold a container
+    value"). A pass-through temp is not a name anybody bound, so the copy is
+    tagged to READ and not tagged as a name's representation.
+
+    A record-level test because the difference is what the backend KNOWS: the
+    copy's C is the same in both spellings on `tools/pydiff_corpus` (the
+    refusal is the observable change), so the end-to-end guard is the refusal
+    shape in `test_dict_slot_read_regression.py`.
+    """
+    global _PASS, _FAIL
+    name = "word_facts_bind_side_does_not_travel"
+    try:
+        from mojo.middle.valueinfo import WordFacts
+    except ImportError as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+        return
+    problems = []
+
+    def want(cond, why):
+        if not cond:
+            problems.append(why)
+
+    w = WordFacts()
+    w.mark_tagged('yield_word')
+    want(w.may_be_box('yield_word') and w.is_tagged('yield_word'),
+         "the producer is a box that is tagged")
+    want(w.bind_box('yield_word') and w.bind_tagged('yield_word'),
+         "the producer also claims the name's representation (the bind half)")
+
+    # A plain copy (`_copy` -> `carry`): an `or` merge, a coercion temp.
+    w.carry('merge_temp', 'yield_word')
+    want(w.may_be_box('merge_temp'),
+         "the copy IS the same box: the read half travels")
+    want(w.is_tagged('merge_temp'),
+         "the tag travels with the Box kind it modifies")
+    want(w.is_dyn('merge_temp'),
+         "and it is still a word whose kind the runtime decides")
+    want(not w.bind_box('merge_temp') and not w.bind_tagged('merge_temp'),
+         "the bind half does not travel: a copy is not a name anybody bound")
+
+    # A second copy is no different, and a copy of a NON-tagged box travels
+    # the same way (a boxed tuple slot, a boxed dict read).
+    w.carry('second', 'merge_temp')
+    want(w.may_be_box('second') and w.is_tagged('second')
+         and not w.bind_box('second'),
+         "the read/bind boundary is stable across copies")
+    w.mark_boxed('slot')
+    w.carry('slot_copy', 'slot')
+    want(w.may_be_box('slot_copy') and not w.is_tagged('slot_copy')
+         and not w.bind_box('slot_copy'),
+         "an untagged box copies as an untagged box, still bind-free")
+
+    # A name the bind path KEEPS as a box is marked again at the bind
+    # (`emit_stmts`' `_keep_tagged_box`), so it answers both halves.
+    w.mark_boxed('kept_name')
+    w.mark_tagged('kept_name')
+    want(w.bind_tagged('kept_name'),
+         "a name marked at the bind is a tagged bind, not a copied word")
+
+    if problems:
+        print(f"FAIL  {name}: " + "; ".join(problems))
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}")
+        _PASS += 1
+
+
+def test_a_carried_box_operand_keeps_an_int_result():
+    """`int * maybe-a-box-word` answers in a WORD, never in a C `double`.
+
+    Stage 5b's carry moves the `Box` kind across a copy, so a name bound from
+    a kind-mixed slot read (`_acnt` out of `(str, int)` in the compiler's own
+    `_gen_stmt_AssignStmt`) is a word that may be a box. Coercing that operand
+    to a `double` asserted it IS a float box: the product's C type became
+    `double`, an ordinary integer local was DECLARED a double, and the next
+    store into it (a temp NAME from a call the resolver types `str`) tripped
+    the "a name cannot hold a float and a str" refusal — which is how the
+    whole-closure compile of `mojo/backend_gimple/emit_stmts.py` started
+    falling back to source inclusion (`'_nbytes': ... cannot also hold a str
+    value (char *)`). The kind-dispatching select (`mojo_mul_word` /
+    `_float_param_arith`) answers an int box with an int and a double box with
+    a double box, so the result is the `int64_t` word it must be.
+
+    Asserted on the DECLARATION because that is the whole bug: the expression
+    computed the right number and the wrong C type.
+    """
+    global _PASS, _FAIL
+    name = "a_carried_box_operand_keeps_an_int_result"
+    ok, c_src, stderr = gimple_compiles("""\
+def copy_field(gen, elem_t):
+    ainfo = gen._array_field_sizes.get(elem_t, {}).get('buf')
+    if ainfo:
+        ect, acnt = ainfo
+    else:
+        ect, acnt = ('int64_t', 1)
+    if gen._has_scalar_ctype_size(ect):
+        nbytes = gen._scalar_ctype_size(ect, 8) * acnt
+    else:
+        esz = gen._new_val('int64_t', "(int64_t) sizeof(X)")
+        nbytes = gen._binop('int64_t', esz, '*', '2')
+    gen._memcpy(nbytes)
+""")
+    if not ok:
+        print(f"FAIL  {name}: the shape did not compile")
+        for line in (stderr or '').splitlines()[:6]:
+            print(f"      {line}")
+        _FAIL += 1
+        return
+    if 'int64_t nbytes;' not in c_src:
+        print(f"FAIL  {name}: `nbytes` is not declared int64_t "
+              f"({'double nbytes;' if 'double nbytes;' in c_src else 'missing'})")
+        _FAIL += 1
+        return
+    if 'double nbytes;' in c_src:
+        print(f"FAIL  {name}: `nbytes` was declared a double")
+        _FAIL += 1
+        return
+    print(f"PASS  {name}")
+    _PASS += 1
 
 
 def test_gimple_operators_are_actually_gimple():
@@ -2403,6 +2557,10 @@ def main():
     _run_isolated(lambda: test_box_marker_scope(), 'test_box_marker_scope (line 1074)')
     # Stage 5b step 4: one ValueInfo record per temp; the six sets are views.
     _run_isolated(lambda: test_word_facts_one_record_per_temp(), 'test_word_facts_one_record_per_temp (line 1076)')
+    # Stage 5b, the step after it: the bind half of a box does not travel.
+    _run_isolated(lambda: test_word_facts_bind_side_does_not_travel(), 'test_word_facts_bind_side_does_not_travel (line 1153)')
+    # ... and a carried box operand keeps the expression's int64_t result.
+    _run_isolated(lambda: test_a_carried_box_operand_keeps_an_int_result(), 'test_a_carried_box_operand_keeps_an_int_result (line 1231)')
     # `!x` and `a && b` are not GIMPLE, and a `__GIMPLE` body must be.
     _run_isolated(lambda: test_gimple_operators_are_actually_gimple(), 'test_gimple_operators_are_actually_gimple (line 1076)')
     # A local rebound to a different struct has no single pointer type.

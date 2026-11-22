@@ -292,15 +292,15 @@ that is meant to be behaviour-preserving:
   The six dynamic-word facts (`_boxed_vals`, `_dyn_word_vals`,
   `_tagged_word_vals`, `_int_word_vals`, `_maybe_kinds_vals`,
   `_boxed_container_vals`) joined it in stage 5b step 4 (below), which
-  carries `dyn` / `int_word` / `slot_kinds` / `boxed_container` across a copy,
-  turns a copied Box into a `DynWord` (the read-side half), and records why
-  the Box kind itself does not travel: its carry needs the bind-side
-  "needs boxing" fact to be split from the read-side "is a box".
-- **Stage 5b. One value-info record. LANDED 2026-11-21 (steps 1-4).**
+  carries `dyn` / `int_word` / `slot_kinds` / `boxed_container` across a copy
+  and, since step 5 (LANDED), the `Box` kind and its `Tagged` flag as well;
+  the bind-side half ("a name holds a box") is the separate `BindBox` flag,
+  which a copy does not carry.
+- **Stage 5b. One value-info record. LANDED 2026-11-21 (steps 1-5).**
   The name-keyed tables are fields of one `ValueInfo` record per temp:
-  `kind` is `Int / Erased(T) / DynWord / Box / Plain` and three flags
-  (`Tagged`, `SlotKinds`, `BoxedContainer`) carry the facts that are not a
-  kind. `int64_t` therefore splits into
+  `kind` is `Int / Erased(T) / DynWord / Box / Plain` and the flags
+  `Tagged`, `SlotKinds`, `BoxedContainer` and `BindBox` carry the facts that
+  are not a kind. `int64_t` therefore splits into
   Int / Erased(T) / DynWord / Box in the value's info.
   *Measured 2026-11-20 (the guide for the next round).* The six
   dynamic-word sets, by uses / files / writers (`.add`, `.update`, `[x] =`):
@@ -308,7 +308,7 @@ that is meant to be behaviour-preserving:
   61/7/19, `_int_word_vals` 46/7/9, `_maybe_kinds_vals` 84/11/33,
   `_boxed_container_vals` 17/6/8: about 376 sites.
   Plan, in order, each step byte-identical C on `tools/pydiff_corpus` except
-  step 4, which the plan allows to change C (hash
+  steps 4-5, which the plan allows to change C (hash
   `compile_to_gimple_with_cpp` output before and after, review per program):
   1. (LANDED 2026-11-20, byte-identical on 284 programs) A plain class `WordFacts` (new `mojo/middle/valueinfo.py`) that OWNS the
      six sets and has `save()` / `restore(saved)`; `FuncState` keeps ONE
@@ -321,7 +321,8 @@ that is meant to be behaviour-preserving:
   3. Add writers (`words.mark_tagged(name)` ...) and move the ~150 writers.
   4. (LANDED 2026-11-21) The storage is one `ValueInfo` record per temp,
      holding the `Int / Erased(T) / DynWord / Box` kind and the three flags the
-     old sets spelled (`Tagged`, `SlotKinds`, `BoxedContainer`); the six
+     old sets spelled (`Tagged`, `SlotKinds`, `BoxedContainer`; step 5 adds
+     `BindBox`); the six
      historical sets are derived READ-ONLY views (`WordFacts.boxed`, ...).
      Two consequences a single kind forces, each measured over the 285 corpus
      programs (`compile_to_gimple_with_cpp` output, before vs after) and
@@ -342,19 +343,45 @@ that is meant to be behaviour-preserving:
        That is safe (`mojo_truthy_word` handles registered lists/dicts/sets and
        `mojo_cstr_or_int_str` renders boxes by kind), just less precise; the
        bind/read split in the next item is where it gets refined.
-     * `Box` still does not travel AS a Box, and that is recorded, not
-       pending: a copy gets the READ-side half as `DynWord` (the runtime
-       decides the kind) but not the BIND-side one, and `Tagged` stays with
-       the Box kind. Carrying the Box kind for real makes
-       `mojo/middle/infra_infer.py` — a self-host-closure module — refuse to
-       compile (`_pn2 = _chosen.get('param_names') or []`: the `or` merge's
-       dict-get arm is tagged and the merge temp is stored into a
-       `MojoList *` local), because the bind path reads the value's tag as a
-       decision about the NAME's representation. Splitting the read-side
-       "kind is a runtime fact" from the bind-side "this name holds a box"
-       is the next step; `carry`'s docstring carries the full measurement and
-       `bugs/GIR_stage5b_box_carry_needs_the_bind_fact_split.md` is the work
-       doc.
+     * `Box` travels AS a Box since step 5 (LANDED 2026-11-21): a copy is the
+       same word, so the `Box` KIND and its `Tagged` flag travel with it, and
+       every reader of "this word's kind is a runtime fact" sees the copy as
+       the box it is. The BIND-side fact is the separate `BindBox` flag
+       (`bind_box` / `bind_tagged`), set by `mark_boxed` / `mark_tagged` and
+       NOT moved by `carry`, and the bind path (`_keep_tagged_box`,
+       `_tagged_bind`, `_for_copy`, the `mojo_box_word` unbox arms in
+       `emit_stmts` / `stmts_shared`) reads it. Without the split, carrying
+       `Box`/`Tagged` made two self-host-closure modules refuse to compile —
+       `mojo/middle/infra_infer.py` (`_pn2 = _chosen.get('param_names') or []`,
+       the `or` merge's dict-get arm is tagged, the merge temp is stored into a
+       `MojoList *` local) and `elaborate.py` (`cands`) — because the bind path
+       read the copy's tag as a decision about the NAME's representation. A
+       pass-through temp is not a name anybody bound, so with the split both
+       compile and the bind path's answers are exactly what they were when a
+       copy was carried as a `DynWord`. The read side had to learn the same
+       lesson one level down: `+ - *` on a maybe-box operand beside an integer
+       now selects by the box's kind (`mojo_mul_word` / `_float_param_arith`)
+       instead of coercing the operand to a `double`, which had made the
+       result — and every local it was stored into — a C double. `carry`'s
+       docstring carries the measurement; `test_gimple.py`'s
+       `test_word_facts_bind_side_does_not_travel` and
+       `test_a_carried_box_operand_keeps_an_int_result`, and
+       `test_dict_slot_read_regression.py`'s Test 7 pin it.
+   5. (LANDED 2026-11-21) Split the bind half of `boxed` out of the read half
+      (the `BindBox` flag, the bullet above), so `carry` can move the `Box`
+      kind and `Tagged`. The bind path answers exactly as it did when a copy
+      was carried as a `DynWord` (every bind-side reader moved, and only for
+      copies); and once a copy IS a box, `+ - *` beside an integer selects the
+      answer by its kind (`_tagged_arith_select`, `mojo_mul_word` /
+      `_float_param_arith`) instead of coercing the operand to a C `double` —
+      the coercion turned an ordinary integer local into a double and made
+      `mojo/backend_gimple/emit_stmts.py` refuse in the whole-closure compile
+      (`'_nbytes': ... cannot also hold a str value (char *)`). Measured:
+      `mojo/middle/infra_infer.py`, `mojo/backend_gimple/emit_stmts.py` and
+      `elaborate.py` compile (`compile_to_gimple(..., do_imports=False)`; the
+      first and third refuse with the bind path on `is_tagged`), and the
+      closure compile of `fire.py`'s tiny `import cas` program reports no
+      module falling back to source inclusion.
      `test_gimple.py`'s `test_word_facts_one_record_per_temp` pins the record,
      the read-only views and the carry boundary; `test_gimple_runner.py`'s
      `test_copy_of_a_dynamic_word_keeps_it` pins the copied dynamic word.

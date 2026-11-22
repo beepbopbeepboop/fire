@@ -1653,11 +1653,19 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # the box the same way: the loop stored the box in `v` (`_boxed_vals`,
         # emit_loops' generator for-target arm), and `tagged_for_target_name`
         # is what makes every store into `x` a box.
+        #
+        # Every fact read on this path is the BIND side of the record
+        # (`_word_bind_box` / `_word_bind_tagged`, `mojo/middle/valueinfo.py`),
+        # not `may_be_box` / `is_tagged`: whether a NAME is represented as a
+        # box is a decision about the name, and a box that arrived at the RHS
+        # through a plain copy does not claim it. The READ side (`may_be_box`,
+        # `is_tagged`) is what the renderers/arithmetic ask, and it travels
+        # with the copy.
         _copy_src = (_as_str(node.value.name)
                      if isinstance(node.value, gimple_ctypes.IdentExpr) else None)
         _for_copy = (_copy_src is not None
                      and gimple_ctypes.TypeLattice.is_word(vtype)
-                     and gen._word_may_be_box(v)
+                     and gen._word_bind_box(v)
                      and gen.var_types.get(_copy_src) == 'int64_t'
                      and ginf.tagged_for_target_name(gen, _copy_src))
         # A call to a float+pointer function is a tagged word too
@@ -1676,7 +1684,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # resume word's box too: `x = yield` after `next(it)` is the None box,
         # and the name must render it as None (`tagged_recv_name`).
         _keep_tagged_box = (gimple_ctypes.TypeLattice.is_word(vtype)
-                            and (gen._word_is_tagged(v)
+                            and (gen._word_bind_tagged(v)
                                  or _for_copy or _call_tagged)
                             and gen.var_types.get(tname, 'int64_t') == 'int64_t'
                             and (_call_tagged
@@ -1702,7 +1710,12 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             gimple_ctypes.TypeLattice.ends_in_star(_declared_t)
             and _declared_t not in ('char *', 'const char *')
             and _as_str(v) in getattr(gen, '_dict_get_boxed_temps', ()))
-        _tagged_bind = ((gen._word_is_tagged(v) and not _boxed_get_into_container)
+        # BIND side again (`bind_tagged`, not `is_tagged`): a tagged word that
+        # reached this store through a copy (an `or` merge's temp, a coercion)
+        # is not a claim that the name is represented as a box, so it neither
+        # refuses a container-typed name nor keeps the box -- exactly as when
+        # such a copy was carried as a `DynWord`.
+        _tagged_bind = ((gen._word_bind_tagged(v) and not _boxed_get_into_container)
                         or _for_copy or _call_tagged)
         # A float/str/bool/int store into a box-holding name is boxed by its
         # kind here, BEFORE any refusal below reads the value's C type, so it
@@ -1774,7 +1787,14 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             gen._word_mark_boxed(_tn)
             gen._word_mark_tagged(_tn)
             gen._dyn_word_locals.add(_as_str(tname))
-        elif gimple_ctypes.TypeLattice.is_word(vtype) and gen._word_may_be_box(v):
+        elif gimple_ctypes.TypeLattice.is_word(vtype) and gen._word_bind_box(v):
+            # The unbox half of the same bind-side predicate: the word was a
+            # box this backend observed at its producer, so the name gets the
+            # plain word (`mojo_box_word` keeps a double/id box and returns
+            # every other kind's own word). A box that only arrived through a
+            # copy keeps travelling as the box (its KIND is carried): the name
+            # then reads it by kind (`_dyn_word_locals` below), which is what
+            # a copy of a box answered before the Box kind was carried at all.
             _bw = gen._new_temp('int64_t')
             gen._rt_into(_bw, 'mojo_box_word', [f"{v}"])
             v = _bw
