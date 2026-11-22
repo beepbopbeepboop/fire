@@ -3158,8 +3158,7 @@ test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
             'check it mostly is. The 1.5 GB warm peak is its table row and is '
             'NOT what may size this class; see '
             'a cold store (MEASURED_PEAK_GB["prooflib"]). See ' + MEM_DEBT_DOC,
-     desc='the sweep, measured against the interpreter: no invented coverage',
-     disabled='bugs/gate-formal-sweep-truth.md')
+     desc='the sweep, measured against the interpreter: no invented coverage')
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'], mem='tiny',
      desc='every bound symbol is accounted for, on every container format')
