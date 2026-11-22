@@ -214,19 +214,30 @@ def save(st):
 
 
 def reconcile(st, run_sha, failed, passed, prev):
-    """Fold one full-gate run into the ledger. FAILED are the red jobs, PASSED the ones the run saw pass, PREV the
-    previous run's {"sha":..., "failed": [...]} (the last_good of a job that was green then). Returns
-    (newly_red, recovered): the jobs whose first_bad must now be found, and those that came back."""
+    """Fold one full-gate run into the ledger. FAILED are the red jobs, PASSED the ones the run SAW PASS, PREV the
+    previous run's {"sha":..., "failed": [...], "passed": [...]} (the last_good of a job that was green there).
+    Returns (newly_red, recovered): the jobs whose first_bad must now be found, and those that came back.
+
+    A job's last_good is the previous run's sha ONLY when that run's own log reports the job PASSED. A job that
+    SKIPped there (every dependent of a disabled producer, every platform-gated test) is in neither `failed` nor
+    `passed`, and reading that absence as green is what gave all fifty `bootstrap-stage2-dumps:<item>` entries the
+    same `last_good` from a run whose log skipped them and whose producer was red at that very sha (2026-11-21).
+    A job that did not run has no evidence either way: last_good stays None, and the note says so."""
     jobs, newly, recovered = st.setdefault("jobs", {}), [], []
+    seen_pass = set(prev.get("passed") or [])
     for j in failed:
         e = jobs.get(j)
         if e and e.get("red"):
             e["last_seen_bad"] = run_sha
             continue
         good = (e or {}).get("last_good")
-        if not good and prev.get("sha") and j not in prev.get("failed", []) and not prev.get("unknown"):
+        if not good and prev.get("sha") and j in seen_pass:
             good = prev["sha"]
-        jobs[j] = {"red": True, "last_good": good, "first_bad": None, "last_seen_bad": run_sha, "marked": False}
+        entry = {"red": True, "last_good": good, "first_bad": None, "last_seen_bad": run_sha, "marked": False}
+        if not good:
+            entry["bisect_note"] = ("the run at %s did not report this job green (it did not run there), so there is "
+                                    "no last_good to bisect from" % (prev.get("sha") or "?")[:10])
+        jobs[j] = entry
         newly.append(j)
     for j in passed:
         e = jobs.get(j)

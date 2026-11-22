@@ -121,6 +121,43 @@ to re-derive the same cascade. Every one of those workers pays a
    for a probe whose jobs all SKIP (it must be PROBE REFUSED/NO EVIDENCE, never
    "right track"). Both use a synthetic `build/suite.log`, no gate run.
 
+## Done when
+
+    python3 tools/test_gate_ledger.py
+    python3 tools/test_integrate_probe_loop.py
+    python3 tools/test_gate_doc.py
+
+`test_gate_ledger.py::Ledger::test_a_job_that_did_not_run_in_the_previous_run_has_no_last_good`
+is the site-1 pin: with the previous run naming only the producer in `failed` and the item in neither set, the
+item's `last_good` must be None — the pre-fix `reconcile` returned that run's sha, the same value a genuine pass
+produced. `test_integrate_probe_loop.py::SuiteVerdicts`, `::ProbeNeedsEvidence` and `::BisectStopsWithoutEvidence`
+pin sites 2-3 on a synthetic `build/suite.log` (no gate run): `ok`/`skip`/`FAIL` are three different answers,
+a skipped selection that exits 0 is NO EVIDENCE, `passed_jobs` reads the runner's `ok` tag (pre-fix it matched
+`PASS` and returned `[]`), and a bisect on no evidence names no commit and no branch. All three files pass on the
+fixed tree; the site-1 and site-2 cases fail on the pre-fix one.
+
+## Status
+
+**Fully fixed 2026-11-21**, all three sites, through ONE parser as this doc asked. `tools/integrate.py` now owns
+`suite_verdicts` / `tag_verdict` / `job_verdict`: it reads the suite's own per-job verdict lines (`[ i/n]
+ok|skip|DISABLED|FAIL|TIMEOUT|RESOURCE|EXPECTED <job>`) plus the PER-TEST row that aggregates a registration's
+jobs with the worst item, so a fanout item's `ok` cannot make a parent whose other items SKIPped green. `since`
+refuses a log older than the run being judged, so a run that died before the runner started cannot read the
+previous run's verdicts.
+
+- **site 3** `verify_landed.passed_jobs` reads that parser and only registrations, so a pass is `ok`, not the
+  dead `PASS` spelling.
+- **site 2** `verify_landed.job_is_red_at` returns the tri-state; `bisect_job` raises out of `first_bad` on
+  no evidence and records `bisect_note = "job did not run at <sha>; cannot bisect"`.
+  `autointegrate.probe` returns `green`/`red`/`no-evidence` from the same parser, and `bisect_first_bad` returns
+  None (naming no culprit) on no evidence; `fix_forward` and `settle` stop rather than re-gate on a guess.
+- **site 1** `gate_ledger.reconcile` takes `prev["sha"]` as `last_good` only when the job is in that run's
+  `passed` set (now recorded in `control/verify.json`), and otherwise leaves it None with a `bisect_note`.
+  `verify_landed` no longer needs its "a job that was OFF counts as failed" patch: an OFF job is not in `passed`.
+
+The item-name half this doc left to `SUITE_fanout_item_red_is_misreported` (symptom 1) is the same fix and is
+now also resolved by it.
+
 ## Relationship to the archived work-7804 note (2026-11-21)
 
 A parallel lane (work-7804, branch
