@@ -7641,7 +7641,7 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             else:
                 out = [_cpp_call_line(indent, 'printf', [fmt, arg_expr])]
             if flush:
-                out.append(f'{indent}fflush(stdout);')
+                out.append(_cpp_call_line(indent, 'fflush', ['stdout']))
             return out
     # `print(<multiple scalar args>)` — CPython's default separator is `sep=' '`.
     # Emit one printf per argument with space between them, end_str after last.
@@ -7686,11 +7686,11 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 else:
                     fmt_str += '"'
                 if gimple_ctypes.TypeLattice.is_double(arg_ctype) or gimple_ctypes.TypeLattice.is_bool(arg_ctype) or gimple_ctypes.TypeLattice.is_cstr(arg_ctype):
-                    lines.append(f"{indent}printf({fmt_str}, {val_expr});")
+                    lines.append(_cpp_call_line(indent, 'printf', [fmt_str, val_expr]))
                 else:
-                    lines.append(f"{indent}printf({fmt_str}, {val_expr});")
+                    lines.append(_cpp_call_line(indent, 'printf', [fmt_str, val_expr]))
             if flush:
-                lines.append(f'{indent}fflush(stdout);')
+                lines.append(_cpp_call_line(indent, 'fflush', ['stdout']))
             return lines
     # A bare call to a captured (or scalar-parameter) function-type
     # value — device_context.mojo's `async def wrapper(...)
