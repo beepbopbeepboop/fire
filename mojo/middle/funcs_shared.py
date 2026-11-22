@@ -1245,10 +1245,35 @@ def module_member_function_csym(gen, module_name: str, member_name: str):
     if def_name in gen._NO_OVERLOAD_MANGLE or def_name in gen._extra_no_mangle:
         sym = base
     else:
-        suffix = _as_str(gen.overload_suffix_for(gen._home_signature_ctypes(definer, fs)))
         qualifier = sanitize_module_qualifier(gen, definer)
+        _pts = _definer_committed_pts(gen, qualifier, def_name)
+        if _pts is None:
+            _pts = gen._home_signature_ctypes(definer, fs)
+        suffix = _as_str(gen.overload_suffix_for(_pts))
         sym = (qualifier + '_' + base if qualifier else base) + suffix
     return sym, definer, def_name, fs
+
+
+def _definer_committed_pts(gen, qualifier: str, def_name: str):
+    """The parameter ctypes the DEFINING unit committed for `def_name`: the
+    whole-program `_home_def_param_types` entry `emit_funcs._commit_home_def_pts`
+    writes when the definition is emitted (the tier-0 read
+    `emit_funcs._imported_def_pts` makes for a bare name), or None when that
+    definition has not been emitted in this process yet.
+
+    An importer must not hash its OWN resolution of the callee's parameters
+    instead. An unannotated parameter is typed from usage and from the
+    call-site evidence in the importing unit, and each compile's
+    `_inferred_param_types` is per-instance. An importer that calls
+    `glob.escape("a*b")` infers `pathname: char *`, while the definer, which
+    sees no such call, emits `escape(int64_t pathname)`. Hashing the importer's
+    view named `glob_escape_d719e0` against the definition's
+    `glob_escape_9f63a2` (the `globcompiled` gate job's link failure)."""
+    _committed = _as_dict(getattr(gen, '_home_def_param_types', None)).get(
+        _pair_key(qualifier, def_name))
+    if _committed is None:
+        return None
+    return list(_committed)
 
 
 def register_module_member_value(gen, module_name: str, member_name: str):
@@ -1303,10 +1328,41 @@ def register_module_member_value(gen, module_name: str, member_name: str):
             _m = re.match(r'.*?' + re.escape(def_name), _sig)
             if _m and _m.end() < len(_sig):
                 _entry['signature'] = _ret + ' ' + def_name + _sig[_m.end():]
+    # The DEFINER's parameter list, when it committed one (see
+    # `_definer_committed_pts`). The export scan types an unannotated parameter
+    # from THIS unit's call-site evidence, which the definition does not share,
+    # so the prototype must say what the definition emits: `int64_t pathname`,
+    # not the importer's `char * pathname`. Otherwise the extern and the
+    # definition disagree in one translation unit (`conflicting types for
+    # 'glob_escape_9f63a2'`, the `globcompiled` job). Only the parameter list
+    # is rewritten, and only when it lines up one-to-one with the definition's
+    # parameters: a `*args`/`**kwargs` shape keeps the scan's answer.
+    _committed = _definer_committed_pts(gen, sanitize_module_qualifier(gen, definer), def_name)
+    _fs_params = list(_fs.params or [])
+    if (_committed is not None and len(_committed) == len(_fs_params)
+            and not any(_as_str(_pn).startswith('*') for _pn, _pt in _fs_params)):
+        _params = [f"{_as_str(_ct)} {_as_str(_pn)}"
+                   for _ct, (_pn, _pt) in zip(_committed, _fs_params)]
+        _entry['c_parameters'] = _params
+        if _entry.get('signature'):
+            _sig = _as_str(_entry['signature'])
+            _open = _sig.find('(')
+            if _open >= 0 and _sig.endswith(')'):
+                _entry['signature'] = _sig[:_open] + '(' + ', '.join(_params) + ')'
     if _entry.get('signature'):
         _entry['signature'] = gimple_ctypes._replace_first_ident(
             _as_str(_entry['signature']), def_name, sym)
     gen._register_imported_symbol(sym, _entry, None, write_param_types=True)
+    # The call is re-dispatched on `sym`, so its keyword arguments are mapped
+    # to slots by the table `_kwarg_param_names` reads under the name the call
+    # is emitted with. Without a `sym` entry that lookup misses and a keyword
+    # argument pads by position: `m.f('x', recursive=True)` bound `True` to
+    # `root` (the `globcompiled` job's recursive glob). Mirrors the parameter
+    # types the registration above already keys under `sym`.
+    _names_tbl = getattr(gen, '_func_param_names', None)
+    if _names_tbl is not None:
+        _as_dict(_names_tbl)[sym] = [
+            _as_str(_pn) for _pn, _pt in _fs_params if not _as_str(_pn).startswith('*')]
     return sym, def_name
 
 
