@@ -397,10 +397,15 @@ that is meant to be behaviour-preserving:
   nested functions were lifted (`_gmh_*`, 1,074 lines), which freed 18 more
   passes to move. `gen_module_impl` is 9,416 lines.
   Third round (2026-11-21): 13 more passes, 856 statement lines -> 13 call
-  sites, so `gen_module_impl` is **9,107** lines. The largest was the 478-line
-  AST struct-table pre-seed, gated on one bool. 447 lines are still movable
-  (`extract_arm.py --list-phases`); `test_gimple_module_passes.py` pins the
-  extracted rows, their annotations and the 9,107-line ratchet.
+  sites, so `gen_module_impl` is 9,107 lines. The largest was the 478-line
+  AST struct-table pre-seed, gated on one bool.
+  Fourth round (2026-11-21): the remaining 14 passes, 447 statement lines ->
+  14 call sites, so `gen_module_impl` is **8,674** lines and
+  `extract_arm.py --list-phases` prints `0 lines can be moved`: every
+  statement still in the parent is one of the tool's own refusals (returns,
+  binds a name read later, or calls a nested function).
+  `test_gimple_module_passes.py` pins the extracted rows, their annotations,
+  the 8,674-line ratchet and the `0 lines can be moved` end state.
   NOT moved: 29 nested functions that read a local of `gen_module_impl`
   (lifting one needs a typed parameter per captured local), the passes
   that call them, and the passes that bind a name read later (those need

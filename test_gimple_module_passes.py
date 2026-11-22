@@ -20,7 +20,9 @@ pins the arm split:
     changes that function's C.  These rows were verified against the C types
     the parent's locals had in the compiler's own output (`fire.py --dump
     mojo/backend_gimple/module_gen.py`); a later round appends its own rows;
-  * `gen_module_impl`'s own length, which may only shrink.
+  * `gen_module_impl`'s own length, which may only shrink;
+  * that `tools/extract_arm.py --list-phases` has nothing left to offer, i.e.
+    every statement remaining in the parent is the tool's own refusal.
 
 A pass inlined back into the parent, an annotation dropped, or a new pass
 written inline makes this test fail.  The byte-identical-C half of the
@@ -32,6 +34,7 @@ too slow to run here.
 import ast
 import os
 import re
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -62,9 +65,45 @@ ROUND_2026_11_21 = [
     ('_gmp_infer_global_var_types_early', 'self, _early_gvt_items: list'),
 ]
 
+# Same day, the rest of the movable statements: with these 14 gone
+# `--list-phases` has nothing left to offer and every remaining refusal is the
+# tool's own verdict (a pass that returns, binds a name read later, or calls a
+# nested function).  `_gg_stmts` is deliberately unannotated: in the parent it
+# is an erased word (`int64_t` in the compiler's own output), and the
+# self-hosted compiler types an unannotated parameter the same way.
+ROUND_2026_11_21B = [
+    ('_gmp_harvest_module_type_aliases', 'self, stmts: list'),
+    ('_gmp_record_threaded_comptime_params', 'self, stmts: list, _gsrc: str'),
+    ('_gmp_register_global_literal_types', 'self, stmts: list, _mod_name: str'),
+    ('_gmp_register_gimplegen_class_attrs',
+     'self, stmts: list, _gg_stmts, imported_stmts: list'),
+    ('_gmp_register_bytes_subclass_payloads',
+     'self, _bytes_subclass: set[str], all_struct_defs: list'),
+    ('_gmp_collect_ctor_init_params',
+     'self, _ctor_init_methods: dict, _ctor_init_params: dict, all_struct_defs: list'),
+    ('_gmp_infer_struct_method_return_types', 'self, all_structs_for_methods: list'),
+    ('_gmp_refresh_signature_ctypes', 'self, stmts: list, imported_stmts: list'),
+    ('_gmp_retract_isinstance_param_elem_types',
+     'self, _fn_by_name: dict, _struct_names_here: set[str]'),
+    ('_gmp_collect_nested_lift_candidates',
+     'self, _gmi_def: list, _gmi_lift: list, _gmi_own: list, _gmi_pn: list, '
+     '_gmi_scopes: list, _gmi_src: list'),
+    ('_gmp_collect_nested_str_call_args',
+     'self, _gmi_lift: list, _gmi_own: list, _gmi_pn: list, _gmi_rec: dict, '
+     '_gmi_scopes: list, _gmi_src: list'),
+    ('_gmp_collect_nested_call_shapes',
+     'self, _calls: dict, _copies: dict, _fn_by_name: dict, _gmi_def: list, '
+     '_gmi_lift: list, _gmi_pn: list, _gmi_src: list, _nested_lifted: dict, '
+     '_params: dict, _rets: dict'),
+    ('_gmp_infer_unannotated_function_returns', 'self, all_functions: list'),
+    ('_gmp_propagate_generator_returns', 'self, _ret_changed: bool, _ret_defs: list'),
+]
+
+ROUNDS = [ROUND_2026_11_21, ROUND_2026_11_21B]
+
 # The parent's own line span; it may only shrink as passes move out.  A pass
 # written inline here instead of extracted makes this fail.
-PARENT_LINES = 9107
+PARENT_LINES = 8674
 
 
 def main() -> int:
@@ -97,7 +136,8 @@ def main() -> int:
             failures.append(f'{name}: called {calls[name]} times from '
                             f'gen_module_impl; a pass is called once')
 
-    for name, sig in ROUND_2026_11_21:
+    pinned = [row for rows in ROUNDS for row in rows]
+    for name, sig in pinned:
         want = f'def {name}({sig}) -> None:'
         if not re.search(r'(?m)^' + re.escape(want) + r'$', src):
             failures.append(f'{name}: signature is not {want!r}')
@@ -112,9 +152,30 @@ def main() -> int:
                         f'with tools/extract_arm.py --phase instead of '
                         f'inlining it')
 
+    # The tool's own verdict is the definition of "done": a movable statement
+    # is a pass still inlined, and every refusal it prints is the accepted end
+    # state (returns a value, binds a name read later, or calls a nested
+    # function).
+    listing = subprocess.run(
+        [sys.executable, os.path.join(ROOT, 'tools', 'extract_arm.py'),
+         '--list-phases', PATH, 'gen_module_impl', '25'],
+        capture_output=True, text=True)
+    if listing.returncode:
+        failures.append(f'extract_arm.py --list-phases failed: '
+                        f'{listing.stderr.strip()}')
+    else:
+        movable = [ln for ln in listing.stdout.splitlines()
+                   if ' lines ' in ln and ' NO (' not in ln
+                   and 'can be moved' not in ln]
+        tail = listing.stdout.strip().splitlines()[-1]
+        if movable or tail != '0 lines can be moved':
+            failures.append(f'{len(movable)} movable pass(es) left in '
+                            f'gen_module_impl ({tail!r}): extract the largest '
+                            f'with tools/extract_arm.py --phase')
+
     for f in failures:
         print(f'FAIL: {f}')
-    print(f'{len(ROUND_2026_11_21)} pass(es) pinned, gen_module_impl '
+    print(f'{len(pinned)} pass(es) pinned, gen_module_impl '
           f'{lines}/{PARENT_LINES} lines, '
           f'{len(failures)} failure(s)')
     return 1 if failures else 0
