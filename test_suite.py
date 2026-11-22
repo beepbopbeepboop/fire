@@ -2891,7 +2891,27 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
     # bare overloaded-dunder call sites it reddened on are fixed and the job is
     # back on.
-    expected_disabled = []
+    # Measured 2026-11-21: 13 jobs are registered `disabled='bugs/gate-*.md'`.
+    # A disabled job is a DECISION, and this list is its census -- the checks
+    # below re-assert on each one that it reserves 0 GB, is listed with its
+    # doc, and plans as DISABLED, so a job cannot be silently switched off.
+    # The gate doc named in the registration stays in bugs/ as the switch:
+    # delete it only when the job is green on master.
+    expected_disabled = [
+        'bootstrap-stage1-transitive',
+        'bootstrap-stage2-cc',
+        'formal-doc-truth',
+        'gimplerunner',
+        'linked-list-struct-element-step4',
+        'linked-list-struct-element-step4c',
+        'modcache',
+        'rthdrscan',
+        'stdlib-dylib',
+        'stdlib-syntax',
+        'stdlib-syntax-quick-bench-math',
+        'suite-self-test',
+        'type-string-ratchet',
+    ]
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
           f'{sorted(real)} — a disabled job in the registry must be named in '
@@ -3036,7 +3056,24 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
     # bare overloaded-dunder call sites it reddened on are fixed and the job is
     # back on.
-    expected_disabled = []
+    # The same 13-name census as the `disabled:` section above -- the two
+    # sections ask different questions of the same registry (reservations and
+    # listing here, marker truth there) and must not drift apart.
+    expected_disabled = [
+        'bootstrap-stage1-transitive',
+        'bootstrap-stage2-cc',
+        'formal-doc-truth',
+        'gimplerunner',
+        'linked-list-struct-element-step4',
+        'linked-list-struct-element-step4c',
+        'modcache',
+        'rthdrscan',
+        'stdlib-dylib',
+        'stdlib-syntax',
+        'stdlib-syntax-quick-bench-math',
+        'suite-self-test',
+        'type-string-ratchet',
+    ]
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
           sorted(real) == sorted(expected_disabled),
