@@ -7968,9 +7968,10 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     lines.append(f"{indent}int64_t {el.name};")
                 if _boxed_names is not None:
                     _boxed_names.add(el.name)
-                lines.append(
-                    f"{indent}{el.name} = mojo_list_get_int("
-                    f"{_cpp_as('MojoList *', _ubox)}, {i});")
+                lines.append(_cpp_assign_line(
+                    ex_text(el.name),
+                    ex_text(f"mojo_list_get_int({_cpp_as('MojoList *', _ubox)}, {i})"),
+                    indent))
             return lines
         if (not _tup_is_list_val and not _tup_is_unresolved_call
                 and gimple_ctypes.TypeLattice.is_word(_cpp_expr_static_ctype(gen, s.value))):
@@ -7998,7 +7999,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     _el_get = f"mojo_list_get_double({_uw}, {i})"
                 else:
                     _el_get = f"mojo_list_get_boxed({_uw}, {i})"
-                lines.append(f"{indent}{el.name} = {_el_get};")
+                lines.append(_cpp_assign_line(ex_text(el.name), ex_text(_el_get), indent))
             return lines
         if _tup_is_unresolved_call:
             # Still emit the call itself (discarding its bogus
@@ -8034,7 +8035,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                         _el_get = f"mojo_list_get_double({_cpp_as('MojoList *', _tup_val)}, {i})"
                     else:
                         _el_get = f"mojo_list_get_int({_cpp_as('MojoList *', _tup_val)}, {i})"
-                    lines.append(f"{indent}{el.name} = {_el_get};")
+                    lines.append(_cpp_assign_line(ex_text(el.name), ex_text(_el_get), indent))
                 elif _tup_is_unresolved_call:
                     lines.append(f"{indent}{el.name} = 0;")
                 else:
