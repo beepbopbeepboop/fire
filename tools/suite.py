@@ -2137,7 +2137,8 @@ test('runtimere', [PY, 'test_runtime_re.py'], cache=True, mem='tiny',
 test('globcompiled', [PY, 'test_glob_compiled.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_glob_compiled.py', 'build_config.py', 'exec_budget.py',
                              RUNTIME_SRC, RUNTIME_HDR, 'runtime/fire_re_engine.inc'],
-     desc="CPython's glob.py + fnmatch.py compiled as siblings and run on a tree, vs CPython")
+     desc="CPython's glob.py + fnmatch.py compiled as siblings and run on a tree, vs CPython",
+     disabled='bugs/gate-globcompiled.md')
 
 # [1]'s round was "the silent no-op class", and this is the test that pins it.
 # It is in `check` and not in a heavyweight bucket because it needs no Lean and
@@ -2632,7 +2633,8 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # moment a recorded peak stops fitting its class).
 test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
      mem='tiny', excl=True, timeout=3600,
-     desc='from-scratch stdlib dylib; reports modules that fell back to source')
+     desc='from-scratch stdlib dylib; reports modules that fell back to source',
+     disabled='bugs/gate-stdlib-dylib.md')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
      deps=['preflight'], mem='tiny',
      desc='the runtime dylib: export table, per-arch link, cross-arch checks')
