@@ -431,7 +431,9 @@ def needs_memwhy(spec) -> bool:
 # somebody adds a measurement and forgets to move the class.
 MEASURED_RUN = ('a full `gate`, 2026-11-15, master 5339685b5, per-job peaks from '
                 'the run log (--apply-peaks); linkmode re-measured 2026-11-20 on '
-                '632a573a5 by a single-job --no-cache run')
+                '632a573a5 by a single-job --no-cache run; sqliteruntime '
+                're-measured 2026-11-21 on 6f7ff40ef after its whole-closure '
+                'case was replaced by a single-module one')
 
 # `measured`: read off that run for this job.
     # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
@@ -462,11 +464,15 @@ MEASURED_PEAK_GB = {
     'selfhost':                    (7.9, 'measured'),
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
-    # 2.3 GB was that job's number until it was re-measured at 5.58 GB (see
-    # the registration's memwhy). The growth 1.3 -> 2.3 -> 5.58 across recent
-    # commits is an UNRESOLVED compiler memory regression, recorded rather
-    # than hidden: this table entry only sizes the class to what was measured.
-    'sqliteruntime':               (5.58, 'measured'),
+    # 5.58 GB was this job's number until 2026-11-21, when the cause was found
+    # rather than just measured: a single case compiled the compiler's WHOLE
+    # import closure (147 MB of C, 681 s, 8.06 GB cold). It now compiles the
+    # runtime signature table alone, and the job measures 0.7 GB for its whole
+    # process tree on a cold CAS cache (368 s) and 0.4 GB warm (119 s). The
+    # 1.3 -> 2.3 -> 5.58 GB growth that was recorded here as an "unresolved
+    # compiler memory regression" was that ONE whole-closure compile, not a
+    # drift in the builds this job exists to exercise.
+    'sqliteruntime':               (0.7, 'measured'),
     'bootstrap-stage1-transitive': (4.1, 'measured'),
     'bootstrap-stage2-cc':         (4.1, 'measured'),
     'bootstrap-stage2-dumps':      (0.7, 'measured'),   # per item
@@ -2608,30 +2614,37 @@ test('runtimedylib', [PY, 'test_runtime_dylib.py'],
 # ~240 s at a 2.4 GB peak, so `tiny` (4) is the class the ratchet assigns. In
 # the 17-job `check` run its footprint inflated to the 4.0 GB ceiling and it was
 # killed (a RESOURCE verdict, reported apart from FAIL), and a later 3-job run
-# timed out at 600 s: under heavy load this job is the one to look at first.
+# timed out at 600 s. Both of those were the whole-closure compile recorded on
+# the registration below; with it gone the job is back to `tiny` and a
+# measured 368 s.
 test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'],
-     # `tiny` (4) was set from a 1.3 GB peak. Re-measured 2026-11-18 with
-     # `/usr/bin/time -l` on a quiet machine: peak RSS 5.58 GB over 870 s
-     # (exit 0). The suite's own log recorded 4.2 GB and RESOURCE-KILLED the
-     # job at 532 s, so 4.2 was a partial peak, not the job's need. The
-     # ratchet's 1.5x headroom rule (class_for_peak) puts 5.58 GB at `module`
-     # (8.37 GB needed; `small` is 8). Over the 4 GB line and therefore a
-     # debt, not a fact -- see MEM_DEBT_DOC.
-     mem='module',
-     memwhy='measured 5.58 GB peak RSS 2026-11-18 (/usr/bin/time -l on '
-            'test_sqlite3_runtime.py, 870 s wall, exit 0); the suite log '
-            'recorded 4.2 GB and RESOURCE-killed it at 532 s, so that number '
-            'was a partial peak. Building the sqlite3 optional units drags in '
-            'the runtime headers and several test programs; the '
-            '1.3 -> 2.3 -> 5.58 GB growth across recent commits is an OPEN '
-            'compiler memory regression, and this class is 4.3x the measured '
-            'peak only because the headroom rule rounds 8.37 GB up to the next '
-            'rung -- reducing the peak is the real fix. See '
-            'doc/POLICY_memory_over_4gb.md.',
-     deps=['preflight'], timeout=600,
+     # `tiny` (4 GB) is the floor class, and it is now the MEASURED one. The
+     # job used to peak at 5.58 GB (and was RESOURCE-killed at 4.2 GB) because
+     # one of its cases, `test_probe_ignores_the_runtime_signature_table` (then
+     # named `test_probe_ignores_mentions`), compiled the compiler's
+     # WHOLE import closure (`from build_config import find_gcc` with
+     # do_imports=True): re-measured 2026-11-21 on this tree, that single
+     # compile emits 147 MB of C, takes 681 s cold and peaks at 8.06 GB. That
+     # case now compiles the compiler's runtime signature table
+     # (`mojo/middle/rt_sigs.py`, do_imports=False — 0.5 s, ~1 MB, the module
+     # that actually carries the optional units' names as literal data), so
+     # the job's own measurement is 368 s / 0.7 GB tree on the first (cold CAS)
+     # run and 119 s / 0.4 GB on a warm one — memcap's tree peak and
+     # `/usr/bin/time -l`'s 414 MB max RSS for the driver, 2026-11-21. A QUICK
+     # suite job must not contain a whole-closure compile: that is a self-host
+     # step's cost, and it is what timed this job out at 600 s in the gate at
+     # ce55ca85bf.
+     mem='tiny',
+     # 119-368 s measured is 12 real build/link/RUN steps (5 programs x 2
+     # pipelines plus two link-line probes), and the suite runs it beside
+     # ~17 other jobs, so the margin is for the machine, not for the job:
+     # this was the entry that stretched past a cap on load alone before
+     # (CONTROL.html round 2: 724 s wall for 122 s CPU). Nothing here compiles
+     # the compiler's closure any more, so a genuine hang still costs one
+     # cap, not a day.
+     deps=['preflight'], timeout=1200,
      desc='optional-unit link mechanism: derivation, probe, and every '
-          'test_sqlite3*.mojo built+linked+RUN on both pipelines',
-     disabled='bugs/gate-sqliteruntime.md')
+          'test_sqlite3*.mojo built+linked+RUN on both pipelines')
 
 # `mem='tiny'` (4 GB), down from `program` (55), and the aggregate is what the
 # ceiling is still for: the per-file gcc here is small (a snippet-sized

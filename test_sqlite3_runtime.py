@@ -201,29 +201,57 @@ def test_probe_distinguishes_calls_from_mentions():
         check(got == want, f'probe: {why}', f'want {want}, got {got}')
 
 
-def test_probe_ignores_mentions():
+def test_probe_ignores_the_runtime_signature_table():
     """The self-host case specifically: the compiler's own generated C.
 
-    The do_imports=True import-snippet form, restored now that the transitive
-    compile stopped hanging (bugs/MIDDLE_coro_import_compile_hangs_on_
-    large_modules, fixed by memoizing the single binder census in the walk
-    memo's own lifecycle): the snippet's closure reaches the compiler's own
-    modules (`build_config` -> `module_loader` -> ... -> `gimple_codegen` /
-    `fire_compiler`), so the generated C carries every one of the 59
-    optional-unit signatures as string-literal data — the exact shape the
-    probe must not mistake for calls. This is the same compilation the suite
-    job timed out on before the fix; it must now complete and pull in no
-    unit. (The `do_imports=False` form this briefly measured `build_config.
-    py` alone while the wider form hung.)"""
-    gen = gimple_codegen.compile_to_gimple_cached(
-        'from build_config import find_gcc\n'
-        'def main():\n    print(find_gcc())\n',
-        do_imports=True, filename='probe.mojo')
+    `mojo/middle/rt_sigs.py` is the compiler's runtime signature table — the
+    same data `GimpleGen._KNOWN_SIGS` carries — so compiling it puts every
+    optional unit's symbol names in the generated C as string-literal data,
+    which is the exact shape the probe must not mistake for calls. It is
+    compiled here on its own (`do_imports=False`).
+
+    It deliberately does NOT compile the compiler's whole import closure
+    (`from build_config import find_gcc` with `do_imports=True`). That form
+    measured 147 MB of generated C, 681 s and 8.06 GB on 2026-11-21 (a cold
+    CAS cache) — a whole-closure compile inside a QUICK suite job, and the
+    single item that pushed this job past its 600 s timeout (the gate's red
+    at ce55ca85bf). The property being pinned is the literal data, which this
+    module supplies on its own; the call-shaped-fragment-inside-a-literal
+    shape has its own case in `test_probe_distinguishes_calls_from_mentions`
+    above.
+    """
+    src = os.path.join(HERE, 'mojo', 'middle', 'rt_sigs.py')
+    with open(src) as f:
+        gen = gimple_codegen.compile_to_gimple_cached(
+            f.read(), do_imports=False, filename='mojo/middle/rt_sigs.py')
+    # Cost pin, not a size preference: this fixture is ONE module (~1 MB of C,
+    # 0.5 s, 0.3 GB). The whole-closure form it replaced is 147 MB and 681 s,
+    # and a revert must not be able to slip back in as "still passing, just
+    # slow" the way it did. 4 MB is four times the fixture and 1/37 of the
+    # closure.
+    check(len(gen) < 4_000_000,
+          'the probe fixture is one module, not the compiler closure',
+          f'{len(gen)} bytes of C')
+    # The premise of the check below, asserted rather than assumed: a fixture
+    # that stopped carrying these names would make the probe check pass
+    # vacuously. Every unit's every declared symbol must be in the C text.
+    # `metal` is the one unit NOT in this table — its entry points are
+    # declared in runtime/fire_metal.h and reached from the kernel-dispatch
+    # path, and `rt_sigs.py` (like `GimpleGen._KNOWN_SIGS`) has no
+    # `mojo_metal_*` row. Filtering rather than naming the four keeps a
+    # future unit honest: a new unit without rows here fails, instead of
+    # quietly narrowing the fixture's premise.
+    table_units = [u for u in build_config.optional_unit_names() if u != 'metal']
+    for unit in table_units:
+        missing = [s for s in build_config.optional_unit_symbols(unit)
+                   if s not in gen]
+        check(not missing,
+              f'the signature table carries {unit}\'s symbols as C data',
+              str(missing[:4]))
     hits = build_config.referenced_optional_runtime_units(gen)
     check(hits == [],
-          'compiling an import snippet whose closure reaches the compiler '
-          'modules pulls in NO optional unit',
-          str(hits))
+          'compiling the compiler\'s runtime signature table pulls in NO '
+          'optional unit', str(hits))
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +379,7 @@ def main():
     test_registry_is_derived_from_the_headers()
     test_fire_python_is_deliberately_excluded()
     test_probe_distinguishes_calls_from_mentions()
-    test_probe_ignores_mentions()
+    test_probe_ignores_the_runtime_signature_table()
     test_programs_build_link_and_run()
     test_a_program_without_sqlite_does_not_link_it()
     test_sqlite_program_does_link_sqlite()
