@@ -8,9 +8,8 @@ Plan source: `doc/GIR.md`, Stage 6 (counted loops, arms of the giant functions, 
 
 - The builder half of stage 7: each of `cpp_core.py`'s five dispatch functions is now a list of
   one-line calls (see the fifth-round Status), but an arm still returns C++ **text**. Moving one
-  arm at a time onto the stage-2b builder (`mojo/ir/build.py`) is what remains, and that file still
-  does not exist in the tree — it is the W2 lane's work (the stage-2b builder, another lane's claim),
-  not this one's.
+  arm at a time onto the IR is what remains. (Corrected 2026-11-22: `mojo/ir/build.py` DOES exist —
+  stage 2b landed in `efa173346` — so the W2 claim this line used to name is not a blocker.)
 - The W1 write-set line: the W1 `cpp_core` packet, which carried the `STOP: claimed` line on `cpp_core.py`, landed 2026-11-22 (its doc is deleted), so the write set is free.
   `python3 tools/control.py claims` lists no live holder, and this round's edit does not touch any
   of the 35 type-string sites the packet is about (counts unchanged: 11 / 12 / 12), so the packet
@@ -30,6 +29,33 @@ Stage 7's remaining half, in this order:
    `for_target_is_tuple` arm, which `extract_arm.py` refuses) is independent of it; re-measure with
    `python3 tools/extract_arm.py --list mojo/backend_gimple/cpp_core.py <parent> 25`, which now
    prints `0 lines can be moved` for all five printers.
+
+## Status 2026-11-22 (sixth round): the first arm onto the IR is blocked by a self-host stub
+
+Output: a measured blocker and a stashed change, no commit to `cpp_core.py`.
+
+- **Attempt.** `_cps_aug_assign` (the smallest arm) now builds its `name = name op val;` line from the
+  stage-2b shapes (`Instr('assign')`, a new `ex_text`/`ex_bin`/`ex_deref` in `mojo/ir/instr.py`).
+  Verified: `test_gimple_cpp_core_arms.py` 30/0; `c_oracle check --base 58726afc8` identical on all 285
+  C programs and all 13 coroutine C++ companions (the corpus has `+=` inside generator/async bodies, so
+  the arm is reached); `compile_stdlib.py` unchanged (the same 18 unexpected failures as the pre-round
+  base, no new failing module).
+- **Blocker.** `c_oracle check --closure` reports 3 NEW self-host stubs: `PRESENCE_WORD`,
+  `_IDENT_CHARS`, `_NONE_TYPE_MARKER` (base has 1, which is unchanged). These are module-level constants
+  in `mojo/middle/types.py` (2092, 2179) and `resolve_shared.py` (1730). Their global reads are emitted
+  correctly (`_mojo_middle_types_globals.PRESENCE_WORD`), and no bare call to them exists in `fire.ci`,
+  so the stub is a weak definition the closure still emits for each name. The trigger is the `mojo/ir`
+  code joining the closure, not the import's position: moving `from mojo.ir.instr import ...` inside the
+  function gives the same three stubs (re-measured). Root cause is not yet known; the self-host gap is the
+  one the workers doc calls the blind spot.
+- **Parked, recoverable.** The change is in `git stash` as `stash@{0}` ("GIR stage7 _cps_aug_assign IR
+  move"), not landed, so `master` is unchanged by it.
+
+**Next step (one bounded question):** find why a module-level constant read from a function in an
+already-closed module becomes a weak stub once `mojo.ir.*` is in the closure. Measure first:
+`grep -n 'PRESENCE_WORD' fire.ci` on a dump with and without the `mojo/ir` import, and the emitted
+definition for `mojo_middle_types__mojo_global_get_PRESENCE_WORD` in each. Land a fix for that before
+re-applying the stash, which then needs only `git stash pop` and the same oracle and closure checks.
 
 ## Status 2026-11-22 (fifth round): stage 7's shape step is landed — all 30 printer arms are functions
 
