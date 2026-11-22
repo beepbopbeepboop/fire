@@ -251,6 +251,30 @@ def test_function_scoped_str_global_reads_accessor_not_stub():
         shutil.rmtree(td, ignore_errors=True)
 
 
+def test_py_str_literal_global_is_read_through_accessor():
+    # Before the fix, a compiler-module `NAME = 'x'` (no annotation) was left
+    # unexported, so an importer declared nothing for it and read
+    # `(int64_t)0` -- a silent NULL where the string belongs. `cas.ABI_VERSION`
+    # is the real instance: the definer's accessor is `char *`.
+    import gimple_codegen
+    src = ('from cas import ABI_VERSION\n\n'
+           'def f(x):\n'
+           '    return ABI_VERSION\n')
+    root = os.path.join(HERE, 'build', 'test_imported_global_stub')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='probe_', dir=root)
+    try:
+        path = os.path.join(td, 'uses.py')
+        sep = gimple_codegen.compile_to_gimple(
+            src, do_imports=False, filename=path)
+        assert '(int64_t)0' not in sep, sep
+        assert 'extern char * cas__mojo_global_get_ABI_VERSION (void);' in sep, sep
+        assert '_t1 = cas__mojo_global_get_ABI_VERSION ();' in sep, sep
+    finally:
+        import shutil
+        shutil.rmtree(td, ignore_errors=True)
+
+
 def test_py_scalar_global_scanner_types_only_what_the_definer_types():
     # The `.py` export scan (module_loader.py) types a `NAME[: ANN] = RHS`
     # global exactly as the DEFINING module's accessor is typed, or leaves it
@@ -275,7 +299,14 @@ def test_py_scalar_global_scanner_types_only_what_the_definer_types():
     assert ml._ml_py_global_ctype('', '_find_stdlib_path()', exports) == 'char *'
     assert ml._ml_py_global_ctype('', '_n()', exports) == ''
     assert ml._ml_py_global_ctype('', 'undefined()', exports) == ''
-    assert ml._ml_py_global_ctype('', "'x'", exports) == ''
+    # A whole-RHS plain string literal is `char *` in the defining module too
+    # (its accessor is `char *`); the importer must read it that way.
+    assert ml._ml_py_global_ctype('', "'x'", exports) == 'char *'
+    assert ml._ml_py_global_ctype('', '"x"', exports) == 'char *'
+    assert ml._ml_py_global_ctype('', "'a' + b", exports) == ''
+    assert ml._ml_py_global_ctype('', "'a' 'b'", exports) == ''
+    assert ml._ml_py_global_ctype('', "'it''s'", exports) == ''
+    assert ml._ml_py_global_ctype('', "'\\n'", exports) == ''
     # Annotated: the defining module's own accessor types.
     assert ml._ml_py_global_ctype('str', "'x'", {}) == 'char *'
     assert ml._ml_py_global_ctype('int', '1', {}) == 'int'
@@ -288,4 +319,5 @@ if __name__ == '__main__':
     test_imported_global_has_no_function_stub()
     test_function_scoped_str_global_reads_accessor_not_stub()
     test_py_scalar_global_scanner_types_only_what_the_definer_types()
+    test_py_str_literal_global_is_read_through_accessor()
     print('PASS')

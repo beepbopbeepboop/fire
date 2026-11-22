@@ -258,15 +258,27 @@ def _ml_py_ann_ctype(ann: str) -> str:
     return ''
 
 
+def _ml_plain_str_literal(rhs: str) -> bool:
+    """True when `rhs` is exactly one quoted string literal with no quote of
+    the same kind inside it (`'x'`, `"x"`). Concatenation (`'a' + b`), a
+    triple-quoted or escaped string all answer False and stay unexported."""
+    if len(rhs) < 2 or rhs[0] not in ('"', "'") or rhs[-1] != rhs[0]:
+        return False
+    return rhs[0] not in rhs[1:-1] and '\\' not in rhs
+
+
 def _ml_py_global_ctype(ann: str, rhs: str, exports: dict) -> str:
     """The C type a `.py` sibling's `NAME[: ANN] = RHS` global is exported
     with, or '' to leave it unexported (its reads then keep the stub, as they
     always did). An annotation decides it alone. Unannotated, only a whole-RHS
     `callee(...)` to a same-file `def` whose C return is a pointer, `char *` or
     `double` qualifies: that is the rule the defining module applies to the
-    same RHS, so the importer's extern matches its accessor."""
+    same RHS, so the importer's extern matches its accessor. A whole-RHS plain
+    string literal (`NAME = 'x'`) is `char *` in the defining module too."""
     if ann != '':
         return _ml_py_ann_ctype(ann)
+    if _ml_plain_str_literal(rhs):
+        return 'char *'
     callee = _ml_plain_call_callee(rhs)
     if callee == '' or callee not in exports:
         return ''
