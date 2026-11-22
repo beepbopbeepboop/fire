@@ -4532,6 +4532,13 @@ UNREGISTERED = {
     # the job that eventually registers it must name `.gitignore` in `extra`
     # or a deleted rule would replay a recorded PASS.
     'test_bootstrap_corpus_scratch_mojo.py': _STANDALONE_TEST_REASON,
+    # The c0182fd365 pin that a bootstrap-stage2-dumps ITEM is skipped behind
+    # its disabled producer rather than red (0.0 s, no spawn: it reads the real
+    # registry and `dep_block_detail`). Landed by a `land` of the branch that
+    # added it with no declaration at all, so the estate check named it as run
+    # by nothing; declared for the same reason as the entry above — the round
+    # that touched it was told not to register in tools/suite.py.
+    'test_bootstrap_stage2_dumps_skip.py': _STANDALONE_TEST_REASON,
     'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
     'test_gimple_arms_extracted.py': _STANDALONE_TEST_REASON,
