@@ -81,3 +81,32 @@ so), but two callers assume the name is runnable:
 Not urgent while `bootstrap-stage2-cc` is doc'd off (since 416ed660c the whole fanout
 SKIPs and the parent never reaches the `FAILED` section), but it is exactly what will
 mislead the fifty tasks when the fanout is red for a real reason.
+
+## Relationship to the archived branch work/fix-gate-bootstrap-stage2-dumps-bootstrap-test-stress-mojo (2026-11-21)
+
+That branch's one commit (6470f5922, 148 behind this master) is docs-only, and
+this DROP is the record that nothing in it is missing from the tree. It added
+three files, and each subject already lives somewhere better (the branch's own
+paths are deliberately not cited here: they never existed on master, and the
+ratchet must not carry citations to docs the tree does not have):
+
+- the per-item doc for `bootstrap_test_stress.mojo` — master deleted the same
+  doc in 42865539e once 416ed660c made a disabled producer's dependents SKIP;
+  that commit message carries the branch's analysis (the item is not
+  independently red; `0b0316114e` is the phantom bisect, not a culprit).
+- the branch's fanout-item doc — the first symptom above, including the
+  `known_bugs` item-name mismatch and the `set_disabled` no-op
+  (`ORCH_gate_ledger_false_skipped_paragraph` is that half). Its proposed fix
+  in `main` (fold `fanout:item` with `k.split(':', 1)[0]`) is the rule
+  `failed_jobs` now implements, pinned by
+  `tools/test_gate_doc.py::test_one_doc_per_failing_test_not_per_fanout_item`.
+- the branch's passed-jobs note — site 3 of
+  `SUITE_ledger_counts_a_skip_as_green`, which gives it the shared tri-state
+  parser the branch's one-line regex fix would have pre-empted.
+
+Measured on this tree while deciding: `python3 tools/suite.py
+bootstrap-stage2-dumps` -> exit 0, "2 passed, 0 failed, 1 skipped, 2 disabled
+(5 tests, 99 jobs, 17.3s, peak 0.2 GB)", the fanout SKIPPED naming
+`bugs/gate-bootstrap-stage2-cc.md`, so no per-item doc is owed for it now; and
+`known_bugs('bootstrap-stage2-dumps:test_jit.mojo')` still returns `[]`, which
+is this doc's open symptom 2, not a reason to land a second copy of it.
