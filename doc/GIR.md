@@ -128,6 +128,14 @@ that is meant to be behaviour-preserving:
     # before and after the change, in two empty directories:
     for f in <corpus>; do python3 fire.py --dump $f; done ; diff -r before after
 
+`tools/c_oracle.py check` is the same oracle for both backends, and it has TWO
+corpora because one cannot see both printers: `tools/pydiff_corpus` (285
+programs, compiled with the default coroutine backend, so no companion `.cpp` at
+all) and `tools/cpp_corpus` (13 coroutine programs, compiled with `MOJO_CORO=cpp`,
+where an empty companion is an ERROR). A `cpp_core.py`/`cpp_async.py` change
+that leaves the first corpus identical and the second one changed is detected, so
+stage 7 has an oracle before it has a builder.
+
 - **Stage 0 (landed).** `mojo/ir` types, instructions, verifier, reader;
   `tools/gimple_lint.py`; `test_gimple_lint.py` registered as `gimple-lint`.
 - **Stage 1 (landed 2026-11-13). The call-argument hole is closed for
@@ -500,6 +508,16 @@ that is meant to be behaviour-preserving:
   become its first parameters and every call passes them. 30 of the 59
   nested functions were lifted (`_gmh_*`, 1,074 lines), which freed 18 more
   passes to move. `gen_module_impl` is 9,416 lines.
+  Third round (2026-11-21): 13 more passes, 856 statement lines -> 13 call
+  sites, so `gen_module_impl` is 9,107 lines. The largest was the 478-line
+  AST struct-table pre-seed, gated on one bool.
+  Fourth round (2026-11-21): the remaining 14 passes, 447 statement lines ->
+  14 call sites, so `gen_module_impl` is **8,674** lines and
+  `extract_arm.py --list-phases` prints `0 lines can be moved`: every
+  statement still in the parent is one of the tool's own refusals (returns,
+  binds a name read later, or calls a nested function).
+  `test_gimple_module_passes.py` pins the extracted rows, their annotations,
+  the 8,674-line ratchet and the `0 lines can be moved` end state.
   NOT moved: 29 nested functions that read a local of `gen_module_impl`
   (lifting one needs a typed parameter per captured local), the passes
   that call them, and the passes that bind a name read later (those need
@@ -510,4 +528,14 @@ that is meant to be behaviour-preserving:
 - **Stage 7. Other printers.** The C++ coroutine lowering (`cpp_core.py`,
   `cpp_async.py`, 16,400 lines, a second walk of the same AST) and the direct
   GCC bridge (`gcc/fire/fire-gimple-bridge.cc`, today a stub that builds
-  `int main(){return 0;}`) become printers over GIR.
+  `int main(){return 0;}`) become printers over GIR. Its oracle is in place and
+  is the second corpus `tools/c_oracle.py` hashes (`tools/cpp_corpus`, 13
+  coroutine programs compiled with `MOJO_CORO=cpp`, both promise shapes).
+  Shape step (2026-11-22): `extract_arm.py` moved every top-level `if` arm of
+  the five dispatch functions into its own module-level function — 30 arms,
+  `_cpp_expr` 3,566 -> 101 lines, `_cpp_stmt` 1,582 -> 73, `_cpp_with_stmt`
+  344 -> 256, `_cpp_yield_from` 716 -> 595, `_cpp_for_stmt` 1,846 -> 456 —
+  so `--list ... 25` prints `0 lines can be moved` for all five and an arm is
+  the unit that later returns an `Ex`. Both corpora are byte-identical.
+  `test_gimple_cpp_core_arms.py` pins it. The builder it prints through
+  (stage 2b, `mojo/ir/build.py`) is still the blocker.
