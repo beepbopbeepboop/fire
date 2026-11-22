@@ -184,6 +184,28 @@ CASES = {
         {'helper.py': 'print(5)\n' + HELPER_SRC,
          'main.py': 'from helper import double_it\nprint(double_it(21))\n'},
         'main', '5\n42\n', False),
+    # The CALL spelling `h.double_it(21)` with a class of the IMPORTER of the
+    # same name. The call used to re-dispatch on the bare name, which the
+    # importer's class answered: the constructor arm built the class instead
+    # of calling the function (measured: a pointer decimal, not 42).
+    'call_class_shadows_module_function': (
+        {'helper.py': HELPER_SRC,
+         'main.py': ('import helper as h\n'
+                     'class double_it:\n'
+                     '    pass\n'
+                     'print(h.double_it(21))\n')},
+        'main', '42\n', False),
+    # The CALL spelling with a same-named LOCAL def beside it: the module's
+    # call answers the module, the local `double_it(5)` is still the local one
+    # (measured before the fix: `h.double_it(21)` printed 0).
+    'call_local_def_shadows_module_function': (
+        {'helper.py': HELPER_SRC,
+         'main.py': ('import helper as h\n'
+                     'def double_it(x: int) -> int:\n'
+                     '    return 0\n'
+                     'print(h.double_it(21))\n'
+                     'print(double_it(5))\n')},
+        'main', '42\n0\n', False),
     # A class of the module, bound through the alias as a VALUE. Modeling a
     # class as a value is a separate, larger feature (documented as a stub in
     # `_lower_MemberExpr`), so the assertion here is narrower: the alias read

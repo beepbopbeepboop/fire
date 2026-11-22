@@ -113,7 +113,8 @@ def _dict_val_domain(ctype):
 # `_lower_method_call` below and `_struct_cname_by_id` in
 # GimpleGen.__init__.
 from mojo.middle.funcs_shared import _ctor_cname_via_module, _resolve_struct_cname
-from mojo.middle.funcs_shared import register_module_member_function
+from mojo.middle.funcs_shared import (
+    module_member_is_struct, register_module_member_function, register_module_member_value)
 
 # Sentinel for "this api entry has no `receiver` key at all", so a
 # missing key is distinguishable from a recorded empty string (which is a
@@ -4001,8 +4002,23 @@ def _lmc_name_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, st
                 # answers_zero.md`). `_mgc_raw` is the un-registered
                 # export entry, when there was one, for the factory-value
                 # accessor below.
-                _mgc_sub_ref, _mgc_raw = _register_sibling_module_member(
-                    gen, module_name, method_name, _mgc_sub_ref)
+                # The member is registered under its module-qualified C
+                # SYMBOL (`register_module_member_value`, the same writer the
+                # VALUE spelling uses), and the re-dispatch names THAT symbol.
+                # Keying the call on the bare name let an importer's own
+                # class or def of the same name answer it (`class double_it`
+                # beside `h.double_it(21)` built the class). A member that
+                # has no single plain definition (an overload set) is not
+                # answered here, and keeps the bare-name registration.
+                _mgc_csym = register_module_member_value(
+                    gen, module_name, method_name)
+                if _mgc_csym is not None:
+                    _mgc_raw = None
+                    _mgc_callee = _as_str(_mgc_csym[0])
+                else:
+                    _mgc_sub_ref, _mgc_raw = _register_sibling_module_member(
+                        gen, module_name, method_name, _mgc_sub_ref)
+                    _mgc_callee = method_name
                 # The factory-value shape (the 2026-10-24 os.py shadow
                 # class, its ENTRY-side half): `f = _mk()` is a VALUE,
                 # not a top-level `def`, so the export scan carries no
@@ -4052,7 +4068,7 @@ def _lmc_name_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, st
                     gen._imported_global_accessors[method_name] = ('void *', _mg_csym)
                 _bare_node = gimple_ctypes.CallExpr(
                     func=gimple_ctypes.IdentExpr(
-                        name=method_name, line=getattr(node, 'line', 0)),
+                        name=_mgc_callee, line=getattr(node, 'line', 0)),
                     args=list(node.args),
                     kwargs=list(getattr(node, 'kwargs', None) or []))
                 return gen._lower_call(_bare_node)
@@ -4948,10 +4964,17 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # same-named classes won the bare-name race. With nothing colliding this
     # returns the bare name verbatim, i.e. the pre-existing behaviour exactly
     # (CODEGEN_same_bare_name_struct_collision_across_modules).
+    # For a real module alias the class is answered by the MODULE
+    # (`module_member_is_struct`), never by the TU-wide `struct_field_types`:
+    # an importer's own class named like the module's function (`class
+    # double_it` beside `h.double_it(21)`) is not the module's class, and
+    # the bare-name test sent the call to the constructor.
     if (isinstance(func.obj, gimple_ctypes.IdentExpr)
             and func.obj.name in gen.imported_symbols
             and func.obj.name not in gen.struct_field_types
-            and func.member in gen.struct_field_types
+            and (module_member_is_struct(gen, func.obj.name, func.member)
+                 if func.obj.name in getattr(gen, '_module_alias_names', ())
+                 else func.member in gen.struct_field_types)
             and func.member not in gen.var_types):
         return gen._lower_struct_constructor(
             _ctor_cname_via_module(gen, func.obj.name, func.member),
