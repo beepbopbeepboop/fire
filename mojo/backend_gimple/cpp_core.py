@@ -8862,9 +8862,11 @@ def _cps_return_stmt(gen, s, indent: str) -> list[str]:
         # plain `static` C++ function (see
         # `_cpp_compile_nested_sync_helpers`) — `return` is an
         # ordinary function return, NOT a generator's `co_return`.
-        if s.value is None:
-            return [f"{indent}return;"]
-        return [f"{indent}return {gen._cpp_expr(s.value)};"]
+        # Built as the stage-2b `return` shape (mojo/ir/instr.py).
+        from mojo.ir.instr import Instr, ex_none, ex_text
+        i = Instr('return')
+        i.rhs = ex_none() if s.value is None else ex_text(gen._cpp_expr(s.value))
+        return [indent + i.show()]
     if gen._cpp_emit_kind == 'async':
         # Step B's whole target shape: `return <scalar-expr>` is how
         # this narrow async function's one result gets produced —
