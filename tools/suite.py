@@ -2467,6 +2467,23 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
             'runtime/fire_async_runtime.cpp', 'runtime/fire_async_runtime.h'] + CORO_RUNTIME,
      desc='nested async-def mutable closure capture under MOJO_CORO=stackswitch '
           '(was 0/9, unregistered, naming the pre-rename mojo_*.c runtime files)')
+# Two pure-Python pins the estate check reported as run by nothing (bug:
+# SUITE_estate_two_test_files_unregistered). Neither compiles anything.
+# The stage2-dumps pin reads the registry and asserts the `bootstrap-stage2-cc`
+# producer is still disabled by its doc, so its cache key names both.
+test('bootstrap-stage2-dumps-t-print', [PY, 'test_bootstrap_stage2_dumps_t_print.py'],
+     mem='tiny',
+     extra=['test_bootstrap_stage2_dumps_t_print.py', 'tools/suite.py',
+            'bugs/mid/gate-bootstrap-stage2-cc.md'],
+     desc='bootstrap-stage2-dumps fanout skips behind disabled bootstrap-stage2-cc '
+          '(pinned against the registry and its doc)')
+# The GIR stage-4 type-lattice predicates over mojo/middle/types.py; the GIR_W1_*
+# docs run this file by name.
+test('type-lattice-predicates', [PY, 'test_type_lattice_predicates.py'], cache=True,
+     mem='tiny',
+     extra=['test_type_lattice_predicates.py', 'mojo/middle/types.py',
+            'tools/type_string_codemod.py'],
+     desc='GIR stage-4 type-lattice predicates over mojo/middle/types.py (pure Python)')
 
 # ── The self-hosted BINARY's own compiled codegen ───────────────────────────
 # Everything here runs a mojoc process, so everything is capped, and
@@ -5448,6 +5465,10 @@ BUCKETS['check'].append('function-body-alias-class-import')
 BUCKETS['check'].append('gpu-offload-validation-part3')
 BUCKETS['check'].append('mojoc-import-conformance')
 BUCKETS['check'].append('mojoc-synthetic-signature-default')
+# The two pure-Python pins the estate check named as run by nothing; their
+# registrations above say what each one reads.
+BUCKETS['check'].append('bootstrap-stage2-dumps-t-print')
+BUCKETS['check'].append('type-lattice-predicates')
 BUCKETS['check'].append('mojoc-implicit-default-conformance')
 BUCKETS['check'].append('trait-comptime-member-conformance-diagnostic')
 
