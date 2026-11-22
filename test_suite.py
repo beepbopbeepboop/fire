@@ -2920,34 +2920,22 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # too expensive or otherwise inappropriate to run, so each must be named
     # here and have its reserves-0 / --list / --dry-run properties re-asserted.
     real = [n for n, s in suite.REGISTRY.items() if suite.is_disabled(s)]
-    # Measured 2026-11-14: `rthdrscan` is green again (the census caught up with
-    # two `issubclass` declarations) and `formal-doc-truth` is green again
-    # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
-    # `formal-read-before-store` are no longer disabled either. This list is the
-    # census the check compares the registry against, so it tracks the tree
-    # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
-    # bare overloaded-dunder call sites it reddened on are fixed and the job is
-    # back on.
-    # Measured 2026-11-21: 13 jobs are registered `disabled='bugs/gate-*.md'`.
-    # A disabled job is a DECISION, and this list is its census -- the checks
-    # below re-assert on each one that it reserves 0 GB, is listed with its
-    # doc, and plans as DISABLED, so a job cannot be silently switched off.
-    # The gate doc named in the registration stays in bugs/ as the switch:
-    # delete it only when the job is green on master.
+    # The census the check compares the registry against, so it tracks the
+    # tree rather than freezing it. Measured 2026-11-21 (this tree): five jobs
+    # carry `disabled=`, each with its gate doc in bugs/ as the switch. A
+    # disabled job is a DECISION: the checks below re-assert that it reserves
+    # 0 GB, is listed with its doc, and plans as DISABLED, so a job cannot be
+    # silently switched off. `stdlib-dylib` left the census here: its lone
+    # unexpected skip (std/math/math.mojo) was the monomorphized `_ldexp_impl`
+    # instance whose comptime `FPUtils[dtype]` references erased to `float`,
+    # fixed by 244efdbef and pinned by test_stdlib_dylib_degraded_module.py,
+    # so the job is back on and its doc is gone.
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
-        'formal-doc-truth',
-        'gimplerunner',
-        'linked-list-struct-element-step4',
-        'linked-list-struct-element-step4c',
-        'modcache',
         'rthdrscan',
-        'stdlib-dylib',
         'stdlib-syntax',
-        'stdlib-syntax-quick-bench-math',
         'suite-self-test',
-        'type-string-ratchet',
     ]
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
@@ -3148,31 +3136,19 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     check('disabled markers: the real registry has no stale or wrong marker',
           not suite.disabled_problems(),
           f'{suite.disabled_problems()}')
-    # Measured 2026-11-14: `rthdrscan` is green again (the census caught up with
-    # two `issubclass` declarations) and `formal-doc-truth` is green again
-    # (FORMAL.md's census/size figures were synced); `cli-usage-text` and
-    # `formal-read-before-store` are no longer disabled either. This list is the
-    # census the check compares the registry against, so it tracks the tree
-    # rather than freezing it. `stdlib-syntax` left it 2026-11-16: the three
-    # bare overloaded-dunder call sites it reddened on are fixed and the job is
-    # back on.
-    # The same 13-name census as the `disabled:` section above -- the two
+    # The same five-name census as the `disabled:` section above -- the two
     # sections ask different questions of the same registry (reservations and
-    # listing here, marker truth there) and must not drift apart.
+    # listing there, marker truth here) and must not drift apart. This list is
+    # the census the check compares the registry against, so it tracks the tree
+    # rather than freezing it; measured 2026-11-21 (this tree) when
+    # `stdlib-dylib` left it (its monomorphized `_ldexp_impl` skip is fixed by
+    # 244efdbef, pinned by test_stdlib_dylib_degraded_module.py).
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
-        'formal-doc-truth',
-        'gimplerunner',
-        'linked-list-struct-element-step4',
-        'linked-list-struct-element-step4c',
-        'modcache',
         'rthdrscan',
-        'stdlib-dylib',
         'stdlib-syntax',
-        'stdlib-syntax-quick-bench-math',
         'suite-self-test',
-        'type-string-ratchet',
     ]
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',

@@ -14,8 +14,8 @@ reach an object. `std/math/math.mojo` is the one that made the job red at
 erase to `float` (gcc: `invalid operands to binary << (have 'float' and
 'float')`), so `_compile_module_job` returned that error and the caller printed
 `skip std/math/math.mojo: ...`. The ratchet counts any skip not in
-EXPECTED_FAILURES as a regression, which is why `bugs/gate-stdlib-dylib.md`
-was filed. This is that doc's Done-when quick test: it fails on the unfixed
+EXPECTED_FAILURES as a regression, which is why the gate filed a bug for this
+job. This is that bug's Done-when quick test: it fails on the unfixed
 tree (verified at 244efdbef^, with the same 3-attempt gcc error) and passes
 once the comptime member references fold at elaboration (244efdbef).
 """
