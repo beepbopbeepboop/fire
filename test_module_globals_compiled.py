@@ -45,6 +45,9 @@ print(not_upper)
 # carries a location. Used to tell THIS program's diagnostics from the stdlib
 # dylib's own fallback blocks; see `_program_errors`.
 _LOCATED_ERROR = re.compile(r'\S+:\d+:\d+: error:')
+# gcc's source-echo line under a located diagnostic (`  634 |   code`). It repeats
+# the offending source text, so it can contain `error:` without being one.
+_SOURCE_ECHO = re.compile(r'^\s*\d+\s*\|')
 
 
 def _program_errors(out: str, src: str) -> list:
@@ -67,7 +70,7 @@ def _program_errors(out: str, src: str) -> list:
     src = os.path.abspath(src)
     errs = []
     for ln in out.splitlines():
-        if 'error:' not in ln:
+        if 'error:' not in ln or _SOURCE_ECHO.match(ln):
             continue
         if src in ln or _LOCATED_ERROR.search(ln) is None:
             errs.append(ln)
@@ -95,6 +98,17 @@ def _filter_selfcheck(src: str) -> str | None:
     bare = 'error: violated constraint\n'
     if _program_errors(bare, src) != [bare.rstrip('\n')]:
         return 'a location-less compiler refusal is not reported'
+    # The gcc source excerpt under a stdlib fallback's located `error:` line
+    # echoes the stdlib source line, and that line can contain the word
+    # `error:` (std/testing/suite.mojo:634 is `if error:`). It is an echo of
+    # the stdlib's text, not a diagnostic, so it must not be attributed here.
+    excerpt = (
+        '  skip ../new-modular/Mojo/stdlib/std/testing/suite.mojo: '
+        '/s/stdlib/std/testing/suite.mojo:634:13: error: bad\n'
+        '  634 |             if error:\n'
+        '      |             ^~~~~~~~~\n')
+    if _program_errors(excerpt, src):
+        return 'a stdlib source excerpt containing "error:" is attributed to the program'
     return None
 
 
