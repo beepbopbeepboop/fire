@@ -159,3 +159,24 @@ default) has to answer from the box, or the store change makes some programs wor
 `git stash` entry "stage 5c step 2 experiment" (diff also saved in the session scratchpad). Next step: the
 constructor default and the `is None` read, measured one at a time against the same runner check.
 
+**Steps 2 and 3 measured together (2026-11-22, stashed, not landed).** The store arm (boxes a literal
+`None` into a word-typed field of the owning struct) plus a box-aware `is None` read of such a field
+(`mixed_field_read` in emit_infra, used by `_lbt_boxed_none_compare` in emit_exprs):
+
+- The reduction prints `42` / `None` (runner SAME). The corpus `classes/03_none_field_later_set.py` goes
+  WRONG -> OK.
+- Byte-identical oracle: only the four class programs that store `None` into a word field change C
+  (03, 12, 13, 32), as intended.
+- But `classes/12_linked_list_nodes.py` and `classes/13_binary_tree_inorder.py` go WRONG -> CRASH
+  (`AttributeError: value`). Their `next` field is word-typed and receives `None` and a struct POINTER
+  (`self.next = next_node`, an unannotated parameter). The box-aware `is None` read then asks the runtime
+  for a box kind on a pointer. The "may be scalar" evidence the predicate uses for an unannotated
+  parameter cannot tell a scalar from a pointer, so it marks a pointer-linked field mixed.
+
+So this change cannot land as is. It needs a type fact the predicate lacks: whether a non-None store is a
+scalar or a struct pointer (the struct field table `struct_field_types` distinguishes only a `Node *`
+field, and the `next` field here is word-typed). The experiment is stashed (`stash@{0}`, diff in the
+session scratchpad). Next measured step: find where a parameter's scalar-vs-pointer kind is known at the
+field store (the constructor's argument binding), and make a pointer-valued store exclude the field from
+mixed. Re-measure 12 and 13 against the runner before any landing.
+
