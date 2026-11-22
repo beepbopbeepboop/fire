@@ -591,10 +591,10 @@ def _register_sibling_module_member(gen, module_name: str, method_name: str,
     The generic branch's factory-value accessor still keys on that raw entry.
 
     The steps themselves live in `funcs_shared.register_module_member_
-    function`, so the module-qualified VALUE spelling (`x = m.f`, reached
-    through `_callable_value_symbol` / `_lower_MemberExpr`) registers the
-    member exactly as the call spelling does instead of keeping a second
-    copy of the resolution that can drift from this one.
+    function`. The module-qualified VALUE spelling (`x = m.f`) does not come
+    here: it is keyed by the module-qualified C symbol
+    (`funcs_shared.register_module_member_value`), so a bare name that the
+    importer's own class or def also holds cannot answer for it.
     """
     return register_module_member_function(gen, module_name, method_name,
                                            sub_ref)
@@ -4867,9 +4867,44 @@ def _lmc_async_wait(gen, _wait_obj) -> tuple[str, str]:
     return vct, result
 
 
+def _class_attr_callable_call(gen, node):
+    """`Cls.attr(args)` where `attr` is a class-body attribute whose VALUE is a
+    callable (a function, or a module member reached through an alias): the
+    call goes through the attribute's own `_classattr_` global, which the class
+    body's store wrote the function's address into.
+
+    Without this the callee was looked up dynamically on the class value. That
+    value is the class's type TAG (`(int64_t)67LL`), not an object pointer, so
+    the runtime's getattr never reaches the class-attribute reader and the read
+    raised `AttributeError: attr` (`class C: f = h.double_it` then `C.f(21)`).
+    A literal-valued attribute is not callable, so it is not routed here; a
+    method of the same name keeps its own meaning. Returns None when the call
+    is not this shape."""
+    func = node.func
+    if not isinstance(func.obj, gimple_ctypes.IdentExpr):
+        return None
+    _cls = _as_str(func.obj.name)
+    if (_cls not in gen._struct_bases or _cls in gen.var_types
+            or _cls in gen._global_var_types):
+        return None
+    _attr = _as_str(func.member)
+    _gname = (gen._class_attrs.get(_cls) or {}).get(_attr)
+    if _gname is None or _attr in (gen._struct_method_names.get(_cls) or ()):
+        return None
+    if _as_str(_gname) not in gen._callable_cattr_globals:
+        return None
+    _gtype = gen._global_var_types.get(_gname, 'int64_t')
+    _fv = _cattr_read(gen, _gname, _gtype)
+    return gen._lower_fnptr_call_value('void *', gen._cast('void *', _fv), node, 'int64_t')
+
+
 def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
     func = node.func  # MemberExpr
+
+    _cattr_call = _class_attr_callable_call(gen, node)
+    if _cattr_call is not None:
+        return _cattr_call
 
     # `sys._getframe(n)`: the frame word `n` callers up (default 0), for a module whose
     # functions are instrumented with frame records (emit_methods._frame_enter). Its

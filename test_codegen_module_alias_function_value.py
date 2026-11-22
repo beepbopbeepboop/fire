@@ -125,6 +125,61 @@ CASES = {
                      '    return f(21)\n'
                      'print(go())\n')},
         'main', '42\n', True),
+    # A class of the IMPORTER named like the module's function. The value form
+    # must answer the MODULE's function, not the class typedef that the bare
+    # name `double_it` resolves to in this TU (measured before the fix:
+    # `f(21)` printed a pointer decimal, `20058832`, different every run).
+    'value_class_shadows_module_function': (
+        {'helper.py': HELPER_SRC,
+         'main.py': ('import helper as h\n'
+                     'class double_it:\n'
+                     '    pass\n'
+                     'f = h.double_it\n'
+                     'print(f(21))\n')},
+        'main', '42\n', True),
+    # A same-named LOCAL def beside the alias's value: the value is the
+    # module's `double_it`, the local `double_it(21)` is still the local one.
+    'value_local_def_shadows_module_function': (
+        {'helper.py': HELPER_SRC,
+         'main.py': ('import helper as h\n'
+                     'def double_it(x: int) -> int:\n'
+                     '    return 0\n'
+                     'f = h.double_it\n'
+                     'print(f(21))\n'
+                     'print(double_it(21))\n')},
+        'main', '42\n0\n', True),
+    # A class-body attribute bound to a module-alias function value, then
+    # CALLED through the class. The class body's store writes the function's
+    # address into the attribute's `_classattr_` global; the call reads it
+    # (before the fix the call went to a dynamic getattr on the class's type
+    # tag, which raised `AttributeError: f`).
+    'class_attr_module_function_value': (
+        {'helper.py': HELPER_SRC,
+         'main.py': ('import helper as h\n'
+                     'class C:\n'
+                     '    f = h.double_it\n'
+                     'print(C.f(21))\n')},
+        'main', '42\n', True),
+    # The same class-body shape with a function of the SAME module: a function
+    # value that reads no module global, so only the callable-value rule can
+    # store it (before the fix it was never stored and `C.f(21)` segfaulted).
+    'class_attr_local_function_value': (
+        {'main.py': ('def double_it(x: int) -> int:\n'
+                     '    return x * 2\n'
+                     'class C:\n'
+                     '    f = double_it\n'
+                     'print(C.f(21))\n')},
+        'main', '42\n', False),
+    # A class of the module, bound through the alias as a VALUE. Modeling a
+    # class as a value is a separate, larger feature (documented as a stub in
+    # `_lower_MemberExpr`), so the assertion here is narrower: the alias read
+    # must not fall through to a dynamic getattr of the class's name on the
+    # module marker, which raised `AttributeError: Widget` at run time. The
+    # program does not print the class value.
+    'class_value_through_alias_does_not_raise': (
+        {'helper.py': 'class Widget:\n    pass\n',
+         'main.py': 'import helper as h\nW = h.Widget\nprint(21)\n'},
+        'main', '21\n', False),
 }
 
 
@@ -176,8 +231,13 @@ def _run_case(files, entry, want, value_read, gcc):
                 # The defect itself: a function VALUE must be the registered
                 # function's address, not a runtime attribute read on the
                 # alias's placeholder module marker.
-                if '_mojo_dispatch_getattr' in c_text and re.search(
-                        r'"(double_it|dt)"', c_text):
+                # `mojo_class_register(..., "double_it")` names a class the
+                # importer DEFINES, which is legitimate; only a member name
+                # reaching a dynamic getattr is the defect.
+                _dyn_text = '\n'.join(ln for ln in c_text.splitlines()
+                                      if 'mojo_class_register' not in ln)
+                if '_mojo_dispatch_getattr' in _dyn_text and re.search(
+                        r'"(double_it|dt|Widget)"', _dyn_text):
                     failures.append(
                         "the importer's C still carries a member NAME as a "
                         "dynamic-getattr string — the read fell through to "
