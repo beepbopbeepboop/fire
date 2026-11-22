@@ -94,9 +94,15 @@ Fixed: the interpreter no longer declines a module that declares a top-level
 `alias` (`myinterpreter.execute_ExprStmt` skips the marker), so `fire.py run`
 interprets such a module and both spellings word the refusal identically.
 
-Left: `fire.py build` still routes the alias spelling to the compiler. Its
-interpreter invocation is not the one `fire.py run` uses -- find where `build`
-decides to interpret (fire.py's `_invoke` / `static_module_diagnostics` region)
-and why an interpreter refusal there falls back to a compile. Until then
-`python3 test_where_alias_diagnostic.py` is 8/9 and
+Left: `fire.py build` still routes the alias spelling to the compiler. It is not
+the same engine `fire.py run` uses -- `driver.py` contains no reference to
+`myinterpreter` at all, so `build`'s `driver.compile_program` never interprets.
+The literal spelling's output is modular's format, and that exact note text also
+sits in the generated `fire.ci`, so the compile path producing it is the
+self-hosted/stage2 one; the alias spelling declines THERE and falls back to the
+Python compiler, whose elaborate check leaks `note: WhereConformanceError: ...`.
+Next step: find what in that compile path declines on a top-level `alias` (the
+same marker myinterpreter fix skips) -- `fire.py build`'s `Error building:` line
+is `_is_user_diagnostic` catching the Python compiler's fallback, not the first
+failure. Until then `python3 test_where_alias_diagnostic.py` is 8/9 and
 `reg-where-alias-diagnostic` stays red.
