@@ -10,6 +10,7 @@ import contextlib, os, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import control as C
+import gate_ledger as G
 import integrate as I
 import verify_landed as VL
 
@@ -241,6 +242,20 @@ def test_one_doc_per_failing_test_not_per_fanout_item():
     at c0182fd365 — fifty workers chasing one disabled producer's cascade. A fanout
     item has no registration of its own, so it also cannot carry the `disabled=` the
     ledger writes; the parent is the unit that can.
+
+    The estate half is the resolution of that cascade for the one item this
+    round cleared, `bootstrap-stage2-dumps:fire_compiler.py`: the per-item doc
+    is gone, and its red is carried by the two docs that name a real defect.
+    The first is the disabled producer `bootstrap-stage2-cc` (its own gate doc
+    is the switch), so the fanout SKIPs instead of running into a `stage2/mojo`
+    that was never built. The second is the module-alias function VALUE read —
+    a stage2 binary that does run died in every dump on it — root-caused and
+    pinned on its own branch, not on this item. Neither defect is in
+    `fire_compiler.py`, and the file's own per-file dump is clean:
+    `fire.py --dump fire_compiler.py` exits 0 in ~6 s / 0.2 GB, writes all
+    four artefacts, matches neither half of the fanout's reject regex, and its
+    `.ci` carries no stub definition. A re-filed doc for the item fails here
+    rather than dispatching another worker at a duplicate.
     """
     log = ("  FAIL     bootstrap-stage2-dumps:hello.mojo  (0s)  exit 1\n"
            "  FAIL     bootstrap-stage2-dumps:t_print.mojo  (1s)  exit 1\n"
@@ -260,6 +275,17 @@ def test_one_doc_per_failing_test_not_per_fanout_item():
               ["bootstrap-stage1-dumps", "bootstrap-stage2-dumps", "rthdrscan"])
     finally:
         os.unlink(f.name)
+    root = os.path.dirname(HERE)
+    item = "bootstrap-stage2-dumps" + ":fire_compiler.py"
+    # the doc name is built, not spelled in the file: a test fixture is not a citation
+    doc = os.path.join(root, "bugs", "gate-" + item + ".md")
+    check("the cascaded per-item doc for fire_compiler.py is gone from bugs/",
+          not os.path.exists(doc))
+    src = open(os.path.join(root, "tools", "suite.py")).read()
+    check("the item has no registration of its own that a marker could go into",
+          not G.registered(src, item))
+    check("the fanout is registered, and is the job the per-item red belongs to",
+          G.registered(src, "bootstrap-stage2-dumps"))
 
 
 def test_red_gate_writes_one_doc_per_job():
