@@ -206,6 +206,17 @@ CASES = {
                      'print(h.double_it(21))\n'
                      'print(double_it(5))\n')},
         'main', '42\n0\n', False),
+    # A keyword-only parameter passed BY NAME through the module alias. The
+    # call is re-dispatched on the module-qualified C symbol, and its keyword
+    # arguments must still land in the slots they name. Before the fix they
+    # padded by position, so `b=2` was bound to `a`.
+    'call_module_function_keyword_only': (
+        {'helper.py': ('def pick(p: int, *, a: int = 0, b: int = 0) -> int:\n'
+                       '    return a * 10 + b\n'),
+         'main.py': ('import helper as h\n'
+                     'print(h.pick(1, b=2))\n'
+                     'print(h.pick(1, a=3))\n')},
+        'main', '2\n30\n', False),
     # A class of the module, bound through the alias as a VALUE. Modeling a
     # class as a value is a separate, larger feature (documented as a stub in
     # `_lower_MemberExpr`), so the assertion here is narrower: the alias read
