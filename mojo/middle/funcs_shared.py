@@ -1286,6 +1286,23 @@ def register_module_member_value(gen, module_name: str, member_name: str):
     _entry = dict(_entry)
     _entry['module'] = definer
     _entry['csym'] = sym
+    # The DEFINING unit's measured return type, from its per-definition store
+    # (`_home_def_return_types`, keyed by the definer's qualifier and name —
+    # the same answer the extern emitter reads for a bare name). The scan's
+    # own `int64_t` is only a default for an unannotated `def`; left in place
+    # it declares `int64_t sym (void)` against a definition that returns
+    # `MojoList *` (measured: `import fgn_b; fgn_b.make()` conflicting types).
+    _measured_ret = _as_dict(getattr(gen, '_home_def_return_types', None)).get(
+        _pair_key(sanitize_module_qualifier(gen, definer), def_name))
+    if _measured_ret:
+        _ret = _as_str(_measured_ret)
+        _entry['c_return_type'] = _ret
+        _entry['c_return_type_is_default'] = False
+        if _entry.get('signature'):
+            _sig = _as_str(_entry['signature'])
+            _m = re.match(r'.*?' + re.escape(def_name), _sig)
+            if _m and _m.end() < len(_sig):
+                _entry['signature'] = _ret + ' ' + def_name + _sig[_m.end():]
     if _entry.get('signature'):
         _entry['signature'] = gimple_ctypes._replace_first_ident(
             _as_str(_entry['signature']), def_name, sym)

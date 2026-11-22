@@ -72,6 +72,7 @@ every `bootstrap-stage2-dumps` job exits 1 with:
   `_fc._as_comptimevar_node` read named above is gone from master; the fix covers the general shape
   that produced it.
 - Adjacent open shapes (not needed for this doc's criterion 1): a module-alias CALL `h.f(...)` whose
-  name a same-named class or local def also holds, `bugs/CODEGEN_module_alias_call_shadowed_by_same_named_def.md`.
+  name a same-named class or local def also holds (fixed 2026-11-22: the CALL spelling is keyed by the
+  module-qualified C symbol and pinned by `test_codegen_module_alias_function_value.py`).
   The value, class-body and class-as-value shapes of the same per-file read are fixed (pinned by
   `test_codegen_module_alias_function_value.py`).

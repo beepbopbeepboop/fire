@@ -3597,6 +3597,14 @@ def _func_mangleable(gen, name: str) -> bool:
             or name in gen._extra_no_mangle
             or name in gen.struct_field_types):
         return False
+    # An entry keyed by its OWN final C symbol (`funcs_shared.register_module_
+    # member_value`: `helper_double_it_9f63a2`, recorded `csym == name`) is
+    # already the mangled name. Mangling it again would double-qualify it, so
+    # a call re-dispatched on that symbol emits exactly the extern the value
+    # form and the import stubs name.
+    _final = _as_dict(_as_dict(getattr(gen, 'imported_symbols', None)).get(name))
+    if _final and _as_str(_final.get('csym')) == name:
+        return False
     # A local user def is authoritative — mangle it even if it shares a name
     # with a libc symbol (e.g. `abs` overloaded in math vs complex: both rename
     # to mojo_abs and would otherwise collide at link).
