@@ -610,6 +610,12 @@ MEASURED_PEAK_GB = {
     'coro-future-await':       (0.12, 'measured'),   # 15.4 s, 17 cases
     'nested-async-generic':    (0.12, 'measured'),   # 2.8 s
     'coro-detached-async':     (0.11, 'measured'),   # 1.8 s
+    # The pure-parser pin registered with its fix (2026-11-22): 0.6 s, 2 cases,
+    # and 25.9 MB maximum RSS by `/usr/bin/time -l` (below memcap's 0.1 GB
+    # report, hence the finer instrument). `tiny` is 133x the recorded value,
+    # which is the ladder's floor and therefore the exception `--list` names
+    # rather than a class assigned from a resemblance.
+    'coro-paramflow-cycle':    (0.03, 'measured'),
     'x86-containers':          (0.06, 'measured'),   # 47.6 s, 60 cases x 2 backends
     'gimple-async-runner':     (0.04, 'measured'),   # 0.6 s, 38 cases
     # …and the three that were registered, ungated, and NOT expect-marked —
@@ -2284,6 +2290,30 @@ test('new-syntax-parse', [PY, 'test_new_syntax_parsing.py'], cache=True, mem='ti
             + GIMPLE_SOURCES),
      desc="the new-modular syntax parses, and still does NOT parse where it "
           "must not (ellipsis, float literals, attribute access)")
+# The pure-parser half of `mojo/middle/coro.py`: `_ParamFlow`'s cycle rule in
+# `_mixed_generator_callee` (492d9fffd). An unfed pass-through cycle used to
+# answer "fed", so the mixed-generator specialization cloned a caller for a
+# generator that never reaches it and recursed until `RecursionError` (seen on
+# cpp_core.py once its printers were split). The file landed with the fix and
+# was registered NOWHERE until this entry: `test_suite.py`'s estate check named
+# it as "not run by any registered spec, not in UNREGISTERED, and in no
+# declared family", so the regression ran only when someone typed its name.
+#
+# `check` is the bucket the bug doc names, and it is the right one: this parses
+# source and calls `_mixed_generator_callee` directly, so there is no build and
+# no compiled path. The `coroutine` bucket is the compile-and-RUN coro cluster;
+# this is the analysis pin that keeps their generator routing honest. Measured
+# 0.6 s and 25.9 MB maximum RSS (`/usr/bin/time -l`, two runs agreeing) before
+# registration, well under what memcap's own 0.1 GB poll resolves.
+test('coro-paramflow-cycle', [PY, 'test_coro_paramflow_cycle.py'], cache=True,
+     mem='tiny', deps=['preflight'],
+     # Every `mojo/middle/*.py` is in GIMPLE_SOURCES, `mojo/middle/coro.py`
+     # among them, and coro.py imports several of its siblings; `fire_compiler`
+     # is the parser/AST the fixture is tokenized and parsed with. Without both
+     # in the key, editing either replayed a recorded PASS.
+     extra=GIMPLE_SOURCES + ['test_coro_paramflow_cycle.py', 'fire_compiler.py'],
+     desc='a pass-through cycle nothing feeds is not a generator source, so '
+          'the mixed-generator specialization does not recurse on it')
 # The x86-64 PARITY differential, registered 2026-10-06 (`work/x86-coverage-endtoend`)
 # because it was in NO bucket and in no `UNREGISTERED` list — the shape
 # `test_suite.py`'s estate check exists to report: a test file neither
@@ -5400,6 +5430,9 @@ BUCKETS['check'].append('codegen-container-param-unknown-arg')
 BUCKETS['check'].append('comptime-generic-alias-fold')
 BUCKETS['check'].append('extend-register-refusal')
 BUCKETS['check'].append('gates-coro-jobs-not-off')
+# The pure-parser `_ParamFlow` cycle pin; its registration above says why
+# `check` and not `coroutine`.
+BUCKETS['check'].append('coro-paramflow-cycle')
 BUCKETS['check'].append('stdlib-import-suffix')
 BUCKETS['check'].append('stdlib-syntax-quick-bench-math')
 BUCKETS['check'].append('land-doc-summary')
