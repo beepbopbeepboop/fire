@@ -720,8 +720,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             # described in this function's STRING_ONLY_METHODS note.
             if (isinstance(e, gimple_ctypes.CallExpr)
                     and isinstance(e.func, gimple_ctypes.IdentExpr)
-                    and _fn_ret_types.get(
-                        _as_ident_node(e.func).name) == 'char *'):
+                    and gimple_ctypes.TypeLattice.is_cstr(_fn_ret_types.get(
+                        _as_ident_node(e.func).name))):
                 return True
             return False
 
@@ -1430,7 +1430,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     _aug_all0 = True
                     for _amt0 in aug_member_targets:
                         if not (_amt0[0] == 'self'
-                                and gen.struct_field_types.get(owner_struct, {}).get(_amt0[1]) == 'char *'):
+                                and gimple_ctypes.TypeLattice.is_cstr(gen.struct_field_types.get(owner_struct, {}).get(_amt0[1]))):
                             _aug_all0 = False
                             break
                     _aug_into_str = (
@@ -1507,7 +1507,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                                     _fpn = _fnames[int(_fcxp[1])]
                                 except (ValueError, IndexError):
                                     continue
-                                if gen._inferred_param_types.get(_fcxp[0], {}).get(_fpn) == 'char *':
+                                if gimple_ctypes.TypeLattice.is_cstr(gen._inferred_param_types.get(_fcxp[0], {}).get(_fpn)):
                                     _os_path_arg = True
                         # ...or one handed on to another function's path-word
                         # parameter (`iglob` -> `_iglob`, a generator this
@@ -3416,7 +3416,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                     # `return` is typed with, so the two agree by
                     # construction; only a `char *` answer is taken, so no
                     # scalar, container or struct answer changes.
-                    if gen._quick_type(_v) == 'char *':
+                    if gimple_ctypes.TypeLattice.is_cstr(gen._quick_type(_v)):
                         cand = 'char *'
                 if cand is None:
                     # `q = p` -- a local bound from ANOTHER local this map
@@ -4203,7 +4203,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                     if isinstance(a, gimple_ctypes.ListExpr):
                         elem[v] = 'MojoList *'
                         nested[v] = gen._infer_list_elem_type(a.elements)
-                    elif isinstance(a, gimple_ctypes.IdentExpr) and elem.get(a.name) == 'MojoList *':
+                    elif isinstance(a, gimple_ctypes.IdentExpr) and gimple_ctypes.TypeLattice.is_list(elem.get(a.name)):
                         elem[v] = 'MojoList *'
                         if a.name in nested:
                             nested[v] = nested[a.name]

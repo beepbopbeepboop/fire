@@ -1268,7 +1268,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                 elif isinstance(_v, str):
                     try:
                         _sv = gen._emit_string_literal(_v)
-                        if gen.var_types.get(node.target) != 'char *':
+                        if (not gimple_ctypes.TypeLattice.is_cstr(gen.var_types.get(node.target))):
                             gen.var_types[node.target] = 'char *'
                         gen._safe_coerce_emit('char *', 'char *', _sv, node.target)
                     except Exception:
@@ -1331,7 +1331,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                         elif isinstance(_v, str):
                             try:
                                 _sv = gen._emit_string_literal(_v)
-                                if gen.var_types.get(_t) != 'char *':
+                                if (not gimple_ctypes.TypeLattice.is_cstr(gen.var_types.get(_t))):
                                     gen.var_types[_t] = 'char *'
                                 gen._safe_coerce_emit('char *', 'char *', _sv, _t)
                             except Exception:
@@ -1382,7 +1382,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                     elif isinstance(_v, str):
                         try:
                             _sv = gen._emit_string_literal(_v)
-                            if gen.var_types.get(node.target) != 'char *':
+                            if (not gimple_ctypes.TypeLattice.is_cstr(gen.var_types.get(node.target))):
                                 gen.var_types[node.target] = 'char *'
                             gen._safe_coerce_emit('char *', 'char *', _sv, node.target)
                         except Exception:
@@ -1431,7 +1431,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                             elif isinstance(_v, str):
                                 try:
                                     _sv = gen._emit_string_literal(_v)
-                                    if gen.var_types.get(_t) != 'char *':
+                                    if (not gimple_ctypes.TypeLattice.is_cstr(gen.var_types.get(_t))):
                                         gen.var_types[_t] = 'char *'
                                     gen._safe_coerce_emit('char *', 'char *', _sv, _t)
                                 except Exception:
@@ -4890,7 +4890,7 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
     for f in sdef.fields:
         if not isinstance(f, gimple_ctypes.VarDecl) or f.type_ann is None:
             continue
-        if fields.get(f.name) != 'MojoList *':
+        if (not gimple_ctypes.TypeLattice.is_list(fields.get(f.name))):
             continue
         _ann2 = _as_str(f.type_ann).strip()
         if not (_ann2.startswith('List[') and _ann2.endswith(']')):

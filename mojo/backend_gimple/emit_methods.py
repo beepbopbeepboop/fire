@@ -7526,7 +7526,7 @@ def _set_str_elem_arg(gen, ov: str, at: str, av: str) -> tuple:
     compiler's `_extra_no_mangle.add(m['body_name'])` (coro.register) lost
     every generator body that way, and each one was then overload-mangled
     under a name its trampoline does not call."""
-    if gimple_ctypes.TypeLattice.is_word(at) and gen._elem_of(ov) == 'char *':
+    if gimple_ctypes.TypeLattice.is_word(at) and gimple_ctypes.TypeLattice.is_cstr(gen._elem_of(ov)):
         return 'char *', gen._cast('char *', av)
     return at, av
 
