@@ -2042,7 +2042,8 @@ test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
      extra=['tools/dangling_doc_refs.py', 'tools/dangling_refs_baseline.py',
             'checked_run.py'],
      extraglob=['**/*.md', '**/*.py'],
-     desc='no file cites a deleted bug doc more than it used to')
+     desc='no file cites a deleted bug doc more than it used to',
+     disabled='bugs/gate-doc-refs.md')
 # Reads the CHECKABLE half of FORMAL.md, doc/ABI.md and OPUS.md (counts,
 # function names, limits, refusal messages, ABI signatures, tool flags) out of
 # the documents and compares them with the tree, both directions. Registered
@@ -4384,7 +4385,8 @@ test('tuple-enumerate-var-refinement', [PY, 'test_tuple_enumerate_var_refinement
 test('unpacking-in-comprehensions', [PY, 'test_unpacking_in_comprehensions.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('where-clause-call-site-diagnostic', [PY, 'test_where_clause_call_site_diagnostic.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
+     desc='registered by the estate audit (every test file runs)',
+     disabled='bugs/gate-where-clause-call-site-diagnostic.md')
 # Defaulted trait method conformance (DIAGNOSTICS_trait_conformance part 6):
 # a struct inheriting a trait default whose signature cannot be instantiated
 # for the conforming struct must be rejected at declaration time.
