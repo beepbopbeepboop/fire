@@ -2042,14 +2042,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             and node.member == 'fromkeys'):
         if node.obj.name == 'frozendict':
             gen._funcptr_builtins_needed.add('mojo_frozendict_fromkeys')
-            if not hasattr(gen, '_frozendict_fromkeys_callables'):
-                gen._frozendict_fromkeys_callables = set()
             t = gen._new_val('void *', '_funcptr_mojo_frozendict_fromkeys')
             gen._frozendict_fromkeys_callables.add(t)
             return 'void *', t
         gen._funcptr_builtins_needed.add('mojo_make_dict')
-        if not hasattr(gen, '_dict_fromkeys_callables'):
-            gen._dict_fromkeys_callables = set()
         t = gen._new_val('void *', '_funcptr_mojo_make_dict')
         gen._dict_fromkeys_callables.add(t)
         return 'void *', t

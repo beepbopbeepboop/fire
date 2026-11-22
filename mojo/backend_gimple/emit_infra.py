@@ -7422,8 +7422,6 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
         gen._copy(f"{gen._cname(_tgt)}", val)
         if api.get('mixed_slots') and gimple_ctypes.TypeLattice.is_word(vct):
             gen._word_mark_boxed(gen._cname(_tgt))
-            if not hasattr(gen, '_tagged_gen_vals'):
-                gen._tagged_gen_vals = set()
             gen._tagged_gen_vals.add(gen._cname(_tgt))
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._goto(bb_post)

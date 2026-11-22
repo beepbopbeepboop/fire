@@ -2770,11 +2770,11 @@ def _cpp_tagged_next_api(gen, expr):
 
 def _cpp_mark_tagged_word(gen, name: str):
     """Record `name` as a local that holds a TAGGED word (see
-    `_cpp_is_tagged_word_expr`). The set is created on demand: the generator
-    unit initialises it, but the for-loop emitter also runs inside async
-    bodies, which do not."""
-    if not hasattr(gen, '_cpp_tagged_word_names'):
-        gen._cpp_tagged_word_names = set()
+    `_cpp_is_tagged_word_expr`). The set is declared in `GimpleGen.__init__`
+    rather than created on first use: the generator unit initialises it, but
+    the for-loop emitter also runs inside async bodies, and a lazy
+    `if not hasattr(...)` initialiser never runs in the compiled compiler
+    (the field exists and is NULL there — see `GimpleGen.__init__`)."""
     gen._cpp_tagged_word_names.add(name)
 
 
@@ -7924,8 +7924,6 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                         # then `render()`), so a call through it is a dynamic call.
                         # A set of its own, read only by `_cpp_dyn_call_expr`, so
                         # nothing else that keys on `_cpp_word_locals` changes.
-                        if not hasattr(gen, '_cpp_unpacked_call_words'):
-                            gen._cpp_unpacked_call_words = set()
                         gen._cpp_unpacked_call_words.add(el.name)
                     if _tup_is_list_val:
                         # Read each slot with the accessor the TARGET's
@@ -8322,8 +8320,6 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 _wl = _cpp_lambda_word_expr(gen, s.value)
                 if _wl is not None:
                     ctype = 'int64_t'
-                    if not hasattr(gen, '_cpp_word_locals'):
-                        gen._cpp_word_locals = set()
                     gen._cpp_word_locals.add(name)
                     val = _wl
             elif gen._cpp_is_callable_value_expr(s.value):
@@ -8356,8 +8352,6 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # `mojo_dyn_call` (see `_cpp_dyn_call_expr`) like a call through a
                 # callable parameter, not an "unresolved callee".
                 ctype = 'int64_t'
-                if not hasattr(gen, '_cpp_word_locals'):
-                    gen._cpp_word_locals = set()
                 gen._cpp_word_locals.add(name)
             elif (name == 'fix_row'
                     or (isinstance(s.value, gimple_ctypes.CallExpr)
@@ -8367,8 +8361,6 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # (a closure) whose value is an opaque word; treat it as a
                 # callable local so calls through it lower via mojo_dyn_call.
                 ctype = 'int64_t'
-                if not hasattr(gen, '_cpp_word_locals'):
-                    gen._cpp_word_locals = set()
                 gen._cpp_word_locals.add(name)
             elif (isinstance(s.value, gimple_ctypes.CallExpr)
                     and isinstance(s.value.func, gimple_ctypes.IdentExpr)
@@ -8378,8 +8370,6 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # UNSOLVED word (see `_cpp_dyn_call_expr`): the local that
                 # holds it is a word too, never a guessed string.
                 ctype = 'int64_t'
-                if not hasattr(gen, '_cpp_word_locals'):
-                    gen._cpp_word_locals = set()
                 gen._cpp_word_locals.add(name)
             elif _cpp_exc_ctor_value(gen, s.value):
                 # `e = ValueError('boom')` — `_cpp_expr` lowers the RHS to
@@ -9594,8 +9584,6 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # arm (`mojo_iter_word` -> `mojo_file_lines`) instead of the
                 # boxed-list arm, which read the FILE* as a MojoList (garbage
                 # length, loop body ran zero times silently).
-                if not hasattr(gen, '_cpp_word_locals'):
-                    gen._cpp_word_locals = set()
                 gen._cpp_word_locals.add(_open_alias_name)
         elif item.alias is not None and gen._cpp_emit_kind in ('async', 'async_gen'):
             raise gimple_exprtypes._UnsupportedAsyncShape(
@@ -9988,8 +9976,6 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                 # `yield a, b, check, d` site in `_iter_filenames`), so a
                 # later `check()` call lowers through mojo_dyn_call rather
                 # than emitting an invalid `int64_t()` C++ call.
-                if not hasattr(gen, '_cpp_word_locals'):
-                    gen._cpp_word_locals = set()
                 gen._cpp_word_locals.add(nm)
             if nm not in declared:
                 declared[nm] = slot_ct
@@ -10128,8 +10114,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             and declared.get(s.iterable.func.name) in ('int64_t', 'char *')):
         _wi = gen._cpp_fresh_name("_mg_witer")
         declared[_wi] = 'MojoList *'
-        if not hasattr(gen, '_cpp_word_iter_locals'):
-            gen._cpp_word_iter_locals = set()
         gen._cpp_word_iter_locals.add(_wi)
         try:
             _call_txt = _cpp_dyn_call_expr(gen, s.iterable)
@@ -10308,8 +10292,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 pass
             _wi = gen._cpp_fresh_name("_mg_witer")
             declared[_wi] = 'MojoList *'
-            if not hasattr(gen, '_cpp_word_iter_locals'):
-                gen._cpp_word_iter_locals = set()
             gen._cpp_word_iter_locals.add(_wi)
             try:
                 _call_txt = _cpp_dyn_call_expr(gen, s.iterable)
@@ -10580,8 +10562,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             _elem_ctype = _foreign_iter[_resolved_foreign] or 'int64_t'
             _wi = gen._cpp_fresh_name("_mg_witer")
             declared[_wi] = 'MojoList *'
-            if not hasattr(gen, '_cpp_word_iter_locals'):
-                gen._cpp_word_iter_locals = set()
             gen._cpp_word_iter_locals.add(_wi)
             # Build call preserving positional/keyword args.
             try:
@@ -11939,8 +11919,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 # Try to handle like word iterable
                 _wi = gen._cpp_fresh_name("_mg_witer")
                 declared[_wi] = 'MojoList *'
-                if not hasattr(gen, '_cpp_word_iter_locals'):
-                    gen._cpp_word_iter_locals = set()
                 gen._cpp_word_iter_locals.add(_wi)
                 _call_txt = gen._cpp_expr(s.iterable)
                 _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
@@ -12611,8 +12589,6 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             and isinstance(_yf_call.func, gimple_ctypes.IdentExpr)):
         _yf_dyn = _cpp_dyn_call_expr(gen, _yf_call)
         if _yf_dyn is not None:
-            if not hasattr(gen, '_cpp_word_iter_locals'):
-                gen._cpp_word_iter_locals = set()
             _yfl = gen._cpp_fresh_name("_mg_yfw")
             gen._cpp_word_iter_locals.add(_yfl)
             return [f"{indent}MojoList *{_yfl} = mojo_iter_word((int64_t)(intptr_t)({_yf_dyn}));",
@@ -12646,8 +12622,6 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             and getattr(gen, '_cpp_declared', None) is not None
             and gen._cpp_declared.get(call.name) == 'int64_t'
             and call.name not in getattr(gen, '_cpp_generator_var_api', {})):
-        if not hasattr(gen, '_cpp_word_iter_locals'):
-            gen._cpp_word_iter_locals = set()
         _ywl = gen._cpp_fresh_name("_mg_yfwl")
         gen._cpp_word_iter_locals.add(_ywl)
         return [f"{indent}MojoList *{_ywl} = mojo_iter_word((int64_t)(intptr_t)({gen._cpp_expr(call)}));",

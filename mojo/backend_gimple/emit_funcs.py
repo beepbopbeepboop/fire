@@ -5241,7 +5241,7 @@ def _publish_imported_class(gen, module: str, name: str) -> bool:
         _module_is_in_unit, _module_source_path, _gmp_assign_struct_cnames,
         _gmp_register_struct_fields, _gmp_register_method_sigs)
     _pkey = _as_str(module) + '::' + _as_str(name)
-    if hasattr(gen, '_published_class_keys') and _pkey in gen._published_class_keys:
+    if _pkey in gen._published_class_keys:
         return True
     if not _module_is_in_unit(gen, module):
         return False
@@ -5304,10 +5304,6 @@ def _publish_imported_class(gen, module: str, name: str) -> bool:
             if cname not in gen.struct_field_types:
                 gen.struct_field_types[cname] = {}
     _gmp_register_struct_fields(gen, stmts, {}, defs, [])
-    if not hasattr(gen, '_method_param_names'):
-        # gen_module_impl creates this just before its own call to the
-        # signature pass; publishing can run from an earlier pass.
-        gen._method_param_names = {}
     _gmp_register_method_sigs(gen, defs)
     # The CALL-SITE qualifier half of every method symbol: `_struct_method_
     # qualifier` derives it from `_imported_struct_home`, which the defining
@@ -5330,8 +5326,6 @@ def _publish_imported_class(gen, module: str, name: str) -> bool:
     # the defining module's section can come AFTER this one (an ancestor
     # still mid-compile emits its section last), and a call before the
     # prototype is an implicit declaration (a hard error in C99+).
-    if not hasattr(gen, '_published_class_defs'):
-        gen._published_class_defs = []
     for sd in defs:
         _known = False
         for _pc in gen._published_class_defs:
@@ -5340,8 +5334,6 @@ def _publish_imported_class(gen, module: str, name: str) -> bool:
                 break
         if not _known:
             gen._published_class_defs.append(sd)
-    if not hasattr(gen, '_published_class_keys'):
-        gen._published_class_keys = set()
     gen._published_class_keys.add(_pkey)
     return True
 
