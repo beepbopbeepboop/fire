@@ -710,6 +710,24 @@ class ModuleLoader:
     # modules — one implementation, two entry points, per this project's
     # "consolidate, don't duplicate" convention. (self._path_cache is set
     # up in __init__.)
+    def _py_sibling_exports(self, content: str, pydir: str, path: str) -> dict:
+        """`{name: export entry}` for every name a column-0 `from SIBLING import
+        ...` in the `.py` source `content` pulls from a sibling in `pydir`
+        (never `path` itself). The first sibling that exports a name wins."""
+        out: dict = {}
+        _reexp = _ml_from_imports(content)
+        for _rxi in range(0, len(_reexp) - 1, 2):
+            _srcmod = _ml_as_str(_reexp[_rxi])
+            _names_blob = _ml_as_str(_reexp[_rxi + 1])
+            _sib = os.path.join(pydir, _srcmod.split('.')[-1] + '.py')
+            if not os.path.isfile(_sib) or _sib == path:
+                continue
+            _sib_exp = self.load_module_from_path(_sib)
+            for _nm in _ml_idents(_names_blob):
+                if _nm in _sib_exp:
+                    out.setdefault(_nm, _sib_exp[_nm])
+        return out
+
     def load_module_from_path(self, path: str) -> dict:
         """Extract exported fn/def signatures from an ARBITRARY .mojo file
         path (no STDLIB_PATH/TEST_PATH restriction — see docstring above).
@@ -1276,13 +1294,21 @@ class ModuleLoader:
                 # it through a `_funcptr_` stub, not the defining module's
                 # `M__mojo_global_get_NAME` accessor. Anything whose type is
                 # not decided here stays unexported, as before.
+                # Names this module imports from its compiler siblings, with
+                # the sibling's own export entry. A callee that is re-exported
+                # (`from stdlib_path import _find_stdlib_path`, then
+                # `STDLIB_PATH = _find_stdlib_path()`) is typed by the sibling
+                # that DEFINES it, exactly as the home module types its accessor.
+                _sib_exp_by_name = self._py_sibling_exports(content, _pydir, path)
+                _callee_exports = dict(_sib_exp_by_name)
+                _callee_exports.update(exports)
                 for _line in content.split('\n'):
                     if not _line or _line[0] in ' \t#':
                         continue
                     _sg = _ml_scalar_global(_line)
                     if len(_sg) == 0 or _sg[0] in exports:
                         continue
-                    _sgt = _ml_py_global_ctype(_sg[1], _sg[2], exports)
+                    _sgt = _ml_py_global_ctype(_sg[1], _sg[2], _callee_exports)
                     if _sgt == '':
                         continue
                     exports[_sg[0]] = {
@@ -1291,21 +1317,12 @@ class ModuleLoader:
                 # Re-exports: `from SIBLING import (a, b)` — a set global not
                 # defined locally but surfaced through this module carries the
                 # sibling's own home accessor.
-                _reexp = _ml_from_imports(content)
-                for _rxi in range(0, len(_reexp) - 1, 2):
-                    _srcmod = _ml_as_str(_reexp[_rxi])
-                    _names_blob = _ml_as_str(_reexp[_rxi + 1])
-                    _sib = os.path.join(_pydir, _srcmod.split('.')[-1] + '.py')
-                    if not os.path.isfile(_sib) or _sib == path:
-                        continue
-                    _sib_exp = self.load_module_from_path(_sib)
-                    for _nm in _ml_idents(_names_blob):
-                        _si = _sib_exp.get(_nm)
-                        if (isinstance(_si, dict) and _si.get('kind') == 'global_var'
-                                and _si.get('c_return_type') in (
-                                    'int64_t', 'MojoSet *', 'MojoDict *', 'MojoList *')
-                                and _nm not in exports):
-                            exports[_nm] = dict(_si)
+                for _nm, _si in _sib_exp_by_name.items():
+                    if (isinstance(_si, dict) and _si.get('kind') == 'global_var'
+                            and _si.get('c_return_type') in (
+                                'int64_t', 'MojoSet *', 'MojoDict *', 'MojoList *')
+                            and _nm not in exports):
+                        exports[_nm] = dict(_si)
 
             # Extract module-scope PLAIN `var NAME = EXPR` globals (not
             # `comptime` — those are handled separately, by re-parsing and
