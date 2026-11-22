@@ -152,6 +152,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # cannot see. A body that stores a different kind is then a genuine mix,
     # not a same-kind rebind. Empty for an unannotated parameter.
     gen._cur_param_ann = {}
+    # The parameter's DECLARED annotation spelling (as written), beside the
+    # resolved ctype above. The resolution erases None-ness (`Optional[Int]`
+    # -> `int64_t`), so a reader deciding whether the VALUE can be None must
+    # ask this map, not the ctype (see emit_exprs._declared_scalar_int_param).
+    gen._cur_param_decl_ann = {}
     # Caches keyed on the annotation/body pair, cleared here because both are
     # per-function (`boxed_param_names`, the per-parameter conflict answer).
     gen._cur_boxed_params = None
@@ -188,13 +193,17 @@ def _reset_func(gen, body: list = None, params: list = None,
                     and _p[1] is not None
                     and not _as_str(_p[0]).startswith('*')):
                 # An annotated parameter's declared kind, for the mixed-kind
-                # scans. A resolution this compile cannot perform is silence,
-                # exactly as an unannotated parameter is.
+                # scans, plus the annotation as WRITTEN. A resolution this
+                # compile cannot perform is silence, exactly as an unannotated
+                # parameter is — but the spelling is still recorded, so a
+                # reader can tell `Optional[Int]` from `Int` even though both
+                # resolve to `int64_t`.
                 try:
                     gen._cur_param_ann[_as_str(_p[0])] = _as_str(
                         _resolve_type(gen, _p[1]))
                 except Exception:
                     pass
+                gen._cur_param_decl_ann[_as_str(_p[0])] = _as_str(_p[1])
     # The lambda beta-reduction's cache is keyed by body IDENTITY (see
     # mojo/middle/lambdareduce.reducible_lambdas), so it deliberately
     # SURVIVES `_reset_func` — a lifted closure resets too, and a one-slot
@@ -1003,6 +1012,7 @@ class FuncState:
         self.fs_cur_untyped_params: set = set()
         self.fs_cur_default_none_params: set = set()
         self.fs_cur_param_ann: dict = {}
+        self.fs_cur_param_decl_ann: dict = {}
         self.fs_cur_boxed_params: object = None
         self.fs_param_conflict_cache: dict = {}
         self.fs_opaque_container_locals: set = set()
@@ -1115,6 +1125,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_cur_untyped_params = gen._cur_untyped_params
     st.fs_cur_default_none_params = gen._cur_default_none_params
     st.fs_cur_param_ann = gen._cur_param_ann
+    st.fs_cur_param_decl_ann = gen._cur_param_decl_ann
     st.fs_cur_boxed_params = gen._cur_boxed_params
     st.fs_param_conflict_cache = gen._param_conflict_cache
     st.fs_opaque_container_locals = gen._opaque_container_locals
@@ -1235,6 +1246,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._cur_untyped_params = st.fs_cur_untyped_params
     gen._cur_default_none_params = st.fs_cur_default_none_params
     gen._cur_param_ann = st.fs_cur_param_ann
+    gen._cur_param_decl_ann = st.fs_cur_param_decl_ann
     gen._cur_boxed_params = st.fs_cur_boxed_params
     gen._param_conflict_cache = st.fs_param_conflict_cache
     gen._opaque_container_locals = st.fs_opaque_container_locals

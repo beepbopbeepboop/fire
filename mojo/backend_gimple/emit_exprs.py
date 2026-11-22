@@ -4740,6 +4740,25 @@ def _narrow_int_binop(gen, lv: str, c_op: str, rv: str, dt: str) -> str:
     return gen._cast(dt, w)
 
 
+def _declared_scalar_int_param(gen, name: str) -> bool:
+    """Does PARAMETER `name` have a source annotation that names a scalar
+    integer (or bool) itself?
+
+    The DECLARED spelling is the evidence, not the resolved ctype: `_resolve_type`
+    erases `Optional[Int]` to `int64_t` (`Optional`'s inner type at
+    `mojo/middle/types.py`) and answers `int64_t` for `object`, `Any` and any
+    name it cannot resolve at all, so an `int64_t` parameter may still hold
+    None. `_annotation_scalar_family` is the one predicate that names a
+    scalar annotation (`Int`, `Int8`.., `UInt`.., `Bool`, `Byte`, `Index`,
+    `c_int`, `SIMD[DType.int32, N]`, ...) and answers None for a wrapper or an
+    unresolved alias, which is exactly the conservative answer this needs."""
+    _src = (getattr(gen, '_cur_param_decl_ann', None) or {}).get(name)
+    if _src is None:
+        return False
+    from mojo.backend_gimple.emit_stmts import _annotation_scalar_family
+    return _annotation_scalar_family(_src) in ('int', 'bool')
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -4811,10 +4830,21 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # is a constant False/True, because 0 is an integer and None is not it.
     # The generic identity arm below compares the words, and None is the word
     # 0 for a plain `int64_t` (`n = 0; n is None` answered True). Only
-    # evidence about the VALUE (a scalar-shaped expression, an annotated int
-    # parameter, or a local whose every binding is an int literal / int
-    # arithmetic) may answer this: an UNANNOTATED parameter is a word of
-    # unknown kind that may be None, and a `char *` keeps its NULL test.
+    # evidence about the VALUE (a scalar-shaped expression, a parameter whose
+    # DECLARED annotation is a scalar integer, or a local whose every binding
+    # is an int literal / int arithmetic) may answer this: an UNANNOTATED
+    # parameter is a word of unknown kind that may be None, and a `char *`
+    # keeps its NULL test.
+    #
+    # The parameter case reads the SOURCE annotation, never the resolved C
+    # type. `_resolve_type` maps `Optional[Int]` — and `object`, `Any`, and
+    # any name it cannot resolve — to `int64_t`, so the C type says nothing
+    # about whether the value can be None. Reading it folded
+    # `if stop is None:` to a constant False for
+    # `def try_index(..., stop: Optional[Int] = None)` (list.mojo), which took
+    # the wrong arm AND emitted a bare integer_cst into a `_Bool` temp that
+    # -fgimple rejects once the function is large enough — the 2026-11-21
+    # stdlib-dylib red (list/deque/interval/os/process fell back to source).
     if op in ('is', 'is not') and (_is_none_literal(left_node) != _is_none_literal(right_node)):
         _on = right_node if _is_none_literal(left_node) else left_node
         _ot = rt if _is_none_literal(left_node) else lt
@@ -4824,7 +4854,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         elif isinstance(_on, gimple_ctypes.IdentExpr) and gimple_ctypes.TypeLattice.is_int_word_or_bool(_ot):
             _onm = _as_str(_on.name)
             _oann = (getattr(gen, '_cur_param_ann', None) or {}).get(_onm)
-            if gimple_ctypes.TypeLattice.is_int_word_or_bool(_oann):
+            if (gimple_ctypes.TypeLattice.is_int_word_or_bool(_oann)
+                    and _declared_scalar_int_param(gen, _onm)):
                 _proven_int = True
             elif _onm not in getattr(gen, '_cur_untyped_params', ()):
                 try:
@@ -4835,7 +4866,11 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         if _proven_int:
             _t = gen._new_temp('_Bool')
             _ans = 0 if op == 'is' else 1
-            gen._copy(_t, f"{_ans}")
+            # An explicit `(_Bool)` cast, never a bare integer_cst: GIMPLE
+            # rejects `_t = 0;` for a `_Bool` lvalue ("non-trivial conversion
+            # in 'integer_cst'"), exactly as `_lower_compare_chain` documents
+            # for its own constant arms.
+            gen._cast_into(_t, '_Bool', f"{_ans}")
             return '_Bool', _t
 
     # Int / Int is true division: Python and Mojo answer a Float64, never an
