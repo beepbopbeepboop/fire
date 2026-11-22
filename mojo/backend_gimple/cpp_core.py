@@ -8706,6 +8706,15 @@ def _cps_aug_assign(gen, s, declared: dict, indent: str) -> list[str]:
     return [_cpp_assign_line(lhs, rhs, indent)]
 
 
+def _cpp_ir_line(ind: str, kind: str, text: str = '') -> str:
+    """One statement line at `ind`, printed from a stage-2b shape (mojo/ir/instr.py)."""
+    from mojo.ir.instr import Instr, ex_text
+    ins = Instr(kind)
+    if text:
+        ins.rhs = ex_text(text)
+    return ind + ins.show()
+
+
 def _cps_while_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     """`WhileStmt` in `_cpp_stmt`.
 
@@ -8738,28 +8747,32 @@ def _cps_while_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         cond = f"(mojo_dict_len({_cpp_as('MojoDict *', cond)}) != 0)"
     elif _cond_ct == 'MojoSet *':
         cond = f"(mojo_set_len({_cpp_as('MojoSet *', cond)}) != 0)"
+    # The loop's header, guard and closers are the stage-2b shapes
+    # (mojo/ir/instr.py `while` / `if` / `break` / `end`); the body is printed
+    # by the statement arms as before.
     if cond_yields:
-        loop_head = ([f"{indent}while (true) {{"] + pre
-                     + [f"{indent}    if (!({cond})) {{", f"{indent}        break;",
-                        f"{indent}    }}"])
+        loop_head = ([_cpp_ir_line(indent, 'while', 'true')] + pre
+                     + [_cpp_ir_line(indent + '    ', 'if', f'!({cond})'),
+                        _cpp_ir_line(indent + '        ', 'break'),
+                        _cpp_ir_line(indent + '    ', 'end')])
     else:
-        loop_head = [f"{indent}while ({cond}) {{"]
+        loop_head = [_cpp_ir_line(indent, 'while', cond)]
     if s.else_body:
         brk_var = gen._cpp_fresh_name("_mg_brk")
         lines.append(f"{indent}bool {brk_var} = false;")
         lines.extend(loop_head)
         for inner in s.body:
             lines.extend(gen._cpp_stmt_with_break_flag(inner, declared, indent + '    ', brk_var))
-        lines.append(f"{indent}}}")
-        lines.append(f"{indent}if (!{brk_var}) {{")
+        lines.append(_cpp_ir_line(indent, 'end'))
+        lines.append(_cpp_ir_line(indent, 'if', f'!{brk_var}'))
         for inner in s.else_body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-        lines.append(f"{indent}}}")
+        lines.append(_cpp_ir_line(indent, 'end'))
     else:
         lines.extend(loop_head)
         for inner in s.body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-        lines.append(f"{indent}}}")
+        lines.append(_cpp_ir_line(indent, 'end'))
     return lines
 
 

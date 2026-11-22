@@ -153,6 +153,10 @@ class Instr:
             if self.rhs.kind == 'none':
                 return 'return;'
             return 'return ' + self.rhs.show() + ';'
+        if k == 'while':
+            return 'while (' + self.rhs.show() + ') {'
+        if k == 'break':
+            return 'break;'
         if k == 'coreturn':
             # A C++ coroutine's `co_return` (the generator and async printers).
             if self.rhs.kind == 'none':

@@ -30,6 +30,17 @@ Stage 7's remaining half, in this order:
    `python3 tools/extract_arm.py --list mojo/backend_gimple/cpp_core.py <parent> 25`, which now
    prints `0 lines can be moved` for all five printers.
 
+## Status 2026-11-22 (eighth round): `_cps_while_stmt`'s header, guard and closers are on the IR
+
+- `mojo/ir/instr.py` gained `while` (`while (<cond>) {`) and `break` (`break;`) shapes; `if` and `end` were
+  already there.
+- `_cps_while_stmt` builds its loop header, the yield-condition guard (`if (!(...)) { break; }`), the
+  flag-tracked `if (!brk)`, and every closing `}` through `_cpp_ir_line`. Its body is still printed by the
+  statement arms; the `bool _mg_brk` declaration is still text.
+- Verified against `a47c26338`: `test_gimple_cpp_core_arms.py` 30/0; `c_oracle` identical on all 285 C
+  programs and all 13 coroutine C++ companions; `--closure` no new stubs (3 == 3).
+- Still returning text: 25 of 30 arms (`_cps_while_stmt` is partly on the IR, so it's counted with them).
+
 ## Status 2026-11-22 (seventh round): `co_return` is an IR shape; `_cps_return_stmt` is on the IR
 
 - `mojo/ir/instr.py` gained a `coreturn` kind (`co_return;` / `co_return <expr>;`).
