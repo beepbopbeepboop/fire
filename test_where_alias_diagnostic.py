@@ -118,12 +118,18 @@ def test_module_assignment_not_treated_as_constant():
 # --- existing integer/Bool literal and predicate behaviour preserved ---
 
 def test_integer_literal_where_still_enforced():
+    # The refusal is still a hard error; its WORDING is the modular shape
+    # introduced by 919ac6ba7 (`invalid call to 'f': violated constraint`
+    # with the constraint note), which updated the sibling
+    # test_where_clause_diagnostic.py but not this case. The alias cases
+    # above still reach elaborate's WhereConformanceError, whose own message
+    # appears in the note.
     _expect_refusal(
         'def f[x: Int]() where x < 2:\n'
         '    pass\n'
         'fn main():\n'
         '    f[5]()\n',
-        "requirement 'x < 2' is not satisfied")
+        "invalid call to 'f': violated constraint")
 
 
 def test_integer_literal_where_still_compiles():
