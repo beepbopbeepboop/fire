@@ -95,8 +95,10 @@ ratchet must not carry citations to docs the tree does not have):
   that commit message carries the branch's analysis (the item is not
   independently red; `0b0316114e` is the phantom bisect, not a culprit).
 - the branch's fanout-item doc — the first symptom above, including the
-  `known_bugs` item-name mismatch and the `set_disabled` no-op
-  (`ORCH_gate_ledger_false_skipped_paragraph` is that half). Its proposed fix
+  `known_bugs` item-name mismatch and the `set_disabled` no-op (the false
+  "Skipped" paragraph that no-op produced is fixed in
+  `tools/gate_ledger.py::report_text`, which now names only a marker the ledger
+  actually wrote). Its proposed fix
   in `main` (fold `fanout:item` with `k.split(':', 1)[0]`) is the rule
   `failed_jobs` now implements, pinned by
   `tools/test_gate_doc.py::test_one_doc_per_failing_test_not_per_fanout_item`.
