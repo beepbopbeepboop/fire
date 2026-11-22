@@ -14477,6 +14477,14 @@ def gen_module_impl(self, stmts: list):
             'line': 'int64_t',
             'col': 'int64_t',
         }
+        # `comptime_params` is the bracket parameter block of a generic
+        # comptime alias — the parser records it (a list of names, or None
+        # before the brackets), so the emitted struct must define the member
+        # or the first compiled reader of it (mojo/middle/comptime.py's
+        # `_comptime_alias_template` / `_eval_alias_application`) names a
+        # member gcc rejects. Container spelling per the `list` annotation,
+        # the one `ComptimeForStmt.body` uses; NOT boxed like `value` (that
+        # is an `object`, see struct_boxed_fields).
         self.struct_field_types['ComptimeVarStmt'] = {
             'target': 'char *',
             'value': 'int64_t',
@@ -14484,6 +14492,7 @@ def gen_module_impl(self, stmts: list):
             'where_clause': 'char *',
             'line': 'int64_t',
             'col': 'int64_t',
+            'comptime_params': 'MojoList *',
         }
         self.struct_field_types['GlobalStmt'] = {
             'names': 'MojoList *',

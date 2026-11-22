@@ -1871,6 +1871,22 @@ test('selfhost', [PY, 'test_selfhost.py'], mem='module', cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'fire_main.py', 'test_selfhost.py'],
      desc='the compiler compiles itself to a linked binary, cleanly')
+# Red on master 2026-11-21: `ComptimeVarStmt.comptime_params` was declared in
+# fire_compiler.py but had no row in module_gen.py's hardcoded
+# struct_field_types map, so the emitted C struct would define no such member
+# and the first compiled reader of it (mojo/middle/comptime.py's
+# `_comptime_alias_template` / `_eval_alias_application`) would have been a
+# gcc failure of the whole self-host TU — the defect class the test's
+# docstring records (Parser.errors, ImportStmt.lazy, StructDef.presence_fields).
+# Registered by no suite job, which is why no run ever saw it. It is a pure
+# source-text reader (0.0 GB, sub-second, no build) and it is NOT cached,
+# matching the reg-pin convention: the map it audits IS the input, and a
+# recorded PASS would replay over exactly the change this pin exists to catch.
+test('selfhost-struct-layout-map',
+     [PY, 'test_selfhost_struct_layout_map_regression.py'], mem='tiny',
+     desc='every field declared in fire_compiler.py has a row in the '
+          'hardcoded struct_field_types map in module_gen.py, so the emitted '
+          'self-host C struct defines every member the closure reads')
 test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'test_runtime_diff.py'],
@@ -5021,7 +5037,17 @@ BUCKETS = {
               # others because `proofs` is the whole formal picture in one
               # bucket, and in `check` for `formal-sys`'s reason: no Lean, four
               # seconds.
-              'formal-reproducible'],
+              'formal-reproducible',
+              # …and `selfhost-struct-layout-map`: a pure source-text reader
+              # (0.0 GB, sub-second, no build) in the everyday loop rather
+              # than in `regressions` because GATE registration is exactly
+              # the point — it was registered nowhere, which is why
+              # `ComptimeVarStmt.comptime_params` sat absent from the emitted
+              # self-host C struct and no `make` ever reported it. A field
+              # without a row is dropped from the struct the next reader of
+              # it makes gcc reject, so the everyday gate has to see the next
+              # one (bug doc deleted with the fix, 2026-11-21).
+              'selfhost-struct-layout-map'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus
