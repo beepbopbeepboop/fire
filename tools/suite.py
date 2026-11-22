@@ -4854,8 +4854,7 @@ test('function-body-alias-class-import',
      [PY, 'test_function_body_alias_class_import.py'], cache=True, mem='tiny',
      extra=['test_function_body_alias_class_import.py'],
      desc='a function-body `from M import Class as Alias` binds the class, '
-          'not an "unavailable in compiled mode" stub',
-     disabled='bugs/gate-function-body-alias-class-import.md')
+          'not an "unavailable in compiled mode" stub')
 test('gpu-offload-validation-part3',
      [PY, 'test_gpu_offload_validation_part3.py'], cache=True, mem='tiny',
      extra=['test_gpu_offload_validation_part3.py'],

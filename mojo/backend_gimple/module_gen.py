@@ -14160,7 +14160,13 @@ def _gmp_emit_toplevel_function(self, func_parts: list[str], has_toplevel_code: 
     # link time. The empty body is the whole of such a module's init.
     if not self.emit_entry_points:
         sub_fn = _module_toplevel_name(self.module_name)
-        if sub_fn not in self._sub_toplevels:
+        # Register `<mod>_toplevel` for the root's `main()` ONLY when this
+        # translation unit defines it: top-level code, or a standalone
+        # library compile (which emits the empty body below). A `do_imports`
+        # inline build of a def-only module defines no such body, so the root's
+        # `main()` calling it was an undefined symbol at link time.
+        defines_toplevel = has_toplevel_code or not self.do_imports
+        if defines_toplevel and sub_fn not in self._sub_toplevels:
             self._sub_toplevels.append(sub_fn)
         if not self.do_imports:
             if not has_toplevel_code:
