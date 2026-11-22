@@ -31,7 +31,7 @@ every `bootstrap-stage2-dumps` job exits 1 with:
 ## Status 2026-11-21
 
 - Upstream has DISABLED `bootstrap-stage1-transitive` and `bootstrap-stage2-cc` on master (their docs
-  `bugs/gate-bootstrap-stage1-transitive.md` and `bugs/gate-bootstrap-stage2-cc.md` are the switch). So the
+  `bugs/gate-bootstrap-stage1-transitive.md` and `bugs/mid/gate-bootstrap-stage2-cc.md` are the switch). So the
   stage2 dump jobs now run against a PARTIAL `stage1/fire.ci` (604 KB, not the ~135 MB closure). The
   `AttributeError` seen in that run is from the partial stage1, not a measured stage2 fact.
 - Tried: `mojo/middle/comptime.py` now `from fire_compiler import _as_comptimevar_node` (as `emit_funcs.py`

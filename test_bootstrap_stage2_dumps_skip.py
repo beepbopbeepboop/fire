@@ -1,13 +1,13 @@
 """Regression test: bootstrap-stage2-dumps items are SKIPPED, not red.
 
 The fanout depends on `bootstrap-stage2-cc` (gcc over the stage1 closure), which
-is disabled under `bugs/gate-bootstrap-stage2-cc.md`, so `stage2/mojo` is never
+is disabled under `bugs/mid/gate-bootstrap-stage2-cc.md`, so `stage2/mojo` is never
 built. Before the scheduler fix (`416ed660c`) a disabled dependency counted as
 satisfied, so all fifty fanout items ran against the missing binary and died in
 a second on `FileNotFoundError: './mojo'` — one red producer filed as fifty
 per-item docs (`bootstrap_test_edge_cases.mojo`, `bootstrap_test_classes.mojo`,
 `bootstrap_test_expressions.mojo`, ...). After the fix the fanout skips with
-`dependency is disabled: bootstrap-stage2-cc (bugs/gate-bootstrap-stage2-cc.md
+`dependency is disabled: bootstrap-stage2-cc (bugs/mid/gate-bootstrap-stage2-cc.md
 is the switch)`.
 
 This pins the resolved state on the REAL registry, without spawning anything:
@@ -33,7 +33,7 @@ import suite
 
 
 PRODUCER = 'bootstrap-stage2-cc'
-PRODUCER_DOC = 'bugs/gate-bootstrap-stage2-cc.md'
+PRODUCER_DOC = 'bugs/mid/gate-bootstrap-stage2-cc.md'
 FANOUT = 'bootstrap-stage2-dumps'
 
 # Per-item gate docs this fanout produced at c0182fd3 and that are now deleted:

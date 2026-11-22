@@ -191,7 +191,7 @@ Claude workers are not running.
    `bugs/GIR_stage5c_none_representation.md` has the repros.
 2. **Bootstrap visibility.** `bootstrap-stage1-transitive` and
    `bootstrap-stage2-cc` are disabled by `bugs/gate-bootstrap-stage1-transitive.md`
-   and `bugs/gate-bootstrap-stage2-cc.md`. While they are off, self-host breakage
+   and `bugs/mid/gate-bootstrap-stage2-cc.md`. While they are off, self-host breakage
    is only caught by the per-module stub count. Re-enabling them (fixing those
    docs) is the first thing that makes every later wave safe.
 3. **Budget.** A wave of six Haiku packets plus one Opus merge is the unit to

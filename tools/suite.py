@@ -2781,7 +2781,7 @@ test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='small',
             'only 1.46x and the run was RESOURCE-capped at it. Over the 4 GB debt '
             'line — see ' + MEM_DEBT_DOC,
      desc='gcc -fgimple + link: stage1/fire.ci -> stage2/mojo',
-     disabled='bugs/gate-bootstrap-stage2-cc.md')
+     disabled='bugs/mid/gate-bootstrap-stage2-cc.md')
 
 # `tiny` (4), down from `module` (24): 0.5 GB measured PER ITEM, the only
 # fanout item peak in the table, so the ratchet assigns 0.75 GB. `module` was

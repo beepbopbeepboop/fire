@@ -3,7 +3,7 @@
 The task claimed the bug
 `bugs/gate-bootstrap-stage2-dumps:t_print.mojo.md` — that the bootstrap-stage2-dumps
 fanout was red for t_print. The red was never in the item's code: the fanout depends on
-`bootstrap-stage2-cc`, which is disabled under `bugs/gate-bootstrap-stage2-cc.md`, and the
+`bootstrap-stage2-cc`, which is disabled under `bugs/mid/gate-bootstrap-stage2-cc.md`, and the
 scheduler used to satisfy deps on DISABLED anyway. After the scheduler fix (416ed660c) the fanout
 skips with `dependency is disabled: bootstrap-stage2-cc`.
 
