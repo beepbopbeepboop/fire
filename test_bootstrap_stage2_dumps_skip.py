@@ -39,9 +39,22 @@ FANOUT = 'bootstrap-stage2-dumps'
 # Per-item gate docs this fanout produced at c0182fd3 and that are now deleted:
 # the item was never the bug, the disabled producer was. Each entry is asserted
 # absent, so a re-filed doc fails here rather than resurrecting the work.
+CLASSES_DOC = 'bugs/gate-bootstrap-stage2-dumps:bootstrap_test_classes.mojo.md'
+
 DELETED_DOCS = [
     'bugs/gate-bootstrap-stage2-dumps:bootstrap_test_expressions.mojo.md',
-    'bugs/gate-bootstrap-stage2-dumps:bootstrap_test_classes.mojo.md',
+    CLASSES_DOC,
+]
+
+# A land doc is a question ("should this branch land?"); answering DROP deletes
+# the question. The branch `work/fix-gate-bootstrap-stage2-dumps-bootstrap-
+# test-classes-mojo` only added a Status section to the per-item doc above,
+# which master had already deleted as the producer's duplicate: it cannot merge
+# (modify/delete) and has nothing left to land. Pinned absent so a re-filed land
+# doc fails here instead of dispatching another worker at the same dead branch.
+DROPPED_LAND_DOCS = [
+    # Deliberate citation of a deleted doc: this list pins its absence.
+    'bugs/LAND-bootstrap-stage2-dumps-bootstrap-test-classes-mojo.md',  # deleted
 ]
 
 
@@ -96,6 +109,21 @@ class TestBootstrapStage2DumpsSkip(unittest.TestCase):
             self.assertFalse(
                 os.path.exists(os.path.join(HERE, doc)),
                 '%s still exists: the job is wrongly documented as red' % doc)
+
+    def test_dropped_land_docs_stay_dropped(self):
+        """A DROP leaves no land doc; re-filing it re-asks a settled question."""
+        for doc in DROPPED_LAND_DOCS:
+            self.assertFalse(
+                os.path.exists(os.path.join(HERE, doc)),
+                '%s exists: the branch it assesses was dropped' % doc)
+        # The branch's only edit was to this deleted per-item doc, which is what
+        # makes the land doc obsolete rather than merely stale. If that file
+        # ever comes back, the land question is a different one and this pin
+        # should be re-read rather than silently satisfied.
+        self.assertFalse(
+            os.path.exists(os.path.join(HERE, CLASSES_DOC)),
+            '%s exists: the dropped branch would have something to land'
+            % CLASSES_DOC)
 
 
 if __name__ == '__main__':
