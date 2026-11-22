@@ -2232,6 +2232,99 @@ def _run_isolated(thunk, label):
 
 
 
+def test_inlined_def_only_module_registers_no_toplevel_without_a_body():
+    """Every `<mod>_toplevel` the root's `main()` CALLS must be DEFINED in
+    the same translation unit: the call is a plain C call, not a weak
+    reference, so a registration with no definition is a link failure.
+
+    a342b09c1 moved the `_sub_toplevels` registration out of the
+    `has_toplevel_code` branch — to give a STANDALONE, def-only library
+    compile something for its exported `<mod>_init` to call — and registered
+    the name unconditionally. On the INLINE path (`do_imports=True`) a
+    def-only module is inlined with no module-scope body at all, so the root
+    declared and called `_m_toplevel` while nothing defined it:
+
+        Undefined symbols for architecture arm64:
+          "_alpha_module_toplevel", referenced from:
+              _main in main.gen.o
+
+    That is what made the `modcache` gate job red: its SB-1 per-scope-import
+    case imports a def-only module from INSIDE a function body, which inlines
+    the module's functions but emits no body for its top level. The fix
+    registers the name exactly when this module's own parts will define it —
+    always for a standalone library compile, only with top-level code when
+    inlined.
+
+    Asserted on the generated C, because that is where the contract lives,
+    and the shape is then built and RUN so a definition with the wrong
+    linkage (or one dropped from the object) still fails. CPython on the same
+    files is the expectation.
+    """
+    global _PASS, _FAIL
+    name = "inlined_def_only_module_registers_no_toplevel_without_a_body"
+    files = {
+        # No module-scope statements at all: the def-only sibling.
+        'alpha_module.py': 'def f(x: int) -> int:\n    return x + 111\n',
+        # A function-body import of it: the SB-1 per-scope-import shape.
+        'main.py': ('def call():\n'
+                    '    from alpha_module import f\n'
+                    '    return f(1)\n'
+                    '\n'
+                    'print(call())\n'),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        for rel, body in files.items():
+            with open(os.path.join(td, rel), 'w') as fh:
+                fh.write(body)
+        entry = os.path.join(td, 'main.py')
+        py = subprocess.run([sys.executable, entry], capture_output=True,
+                            text=True, cwd=td, timeout=RUN_TIMEOUT_S,
+                            env=dict(os.environ, PYTHONPATH=td))
+        if py.returncode != 0 or not py.stdout:
+            print(f"FAIL  {name}: CPython on the same program exited "
+                  f"{py.returncode} printing {py.stdout!r} "
+                  f"({py.stderr[:400]}) — the test program itself is "
+                  f"wrong, not the compiler")
+            _FAIL += 1
+            return
+        want = py.stdout
+        c_src = gimple_codegen._run_pipeline(
+            files['main.py'], filename=entry, do_imports=True)[0]
+        defined = set(re.findall(
+            r'^(?:void|static void) (_\w+_toplevel) \(void\)$', c_src, re.M))
+        called = set(re.findall(r'^\s*(_\w+_toplevel) \(\);$', c_src, re.M))
+        missing = sorted(called - defined)
+        if missing:
+            print(f"FAIL  {name}: the inline compile CALLS {missing} from "
+                  f"main() but defines none of them — a `_sub_toplevels` "
+                  f"registration with no body is an undefined-symbol link "
+                  f"failure")
+            _FAIL += 1
+            return
+        c_file = os.path.join(td, 'main.gen.c')
+        exe = os.path.join(td, 'main.exe')
+        with open(c_file, 'w') as fh:
+            fh.write(c_src)
+        cc = subprocess.run(
+            [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+             os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+        if cc.returncode != 0:
+            print(f"FAIL  {name}: gcc -fgimple failed:\n"
+                  f"{cc.stderr[:1200]}")
+            _FAIL += 1
+            return
+        run = subprocess.run([exe], capture_output=True, text=True,
+                             timeout=RUN_TIMEOUT_S)
+        if run.stdout != want:
+            print(f"FAIL  {name}: printed {run.stdout!r}, CPython "
+                  f"printed {want!r}")
+            _FAIL += 1
+            return
+    print(f"PASS  {name}")
+    _PASS += 1
+
+
 def run_tests():
     global _PASS, _FAIL
     # A comprehension's `for` target that SHADOWS a live local of the same name
@@ -15417,6 +15510,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_user_defined_dunder_repr_value(), 'test_user_defined_dunder_repr_value (line 12701)')
     _run_isolated(lambda: test_aliased_and_reexported_imports_resolve_to_the_defining_module(), 'test_aliased_and_reexported_imports_resolve_to_the_defining_module (line 12702)')
     _run_isolated(lambda: test_a_diamond_import_does_not_give_an_imported_function_a_void_prototype(), 'test_a_diamond_import_does_not_give_an_imported_function_a_void_prototype (line 12703)')
+    _run_isolated(lambda: test_inlined_def_only_module_registers_no_toplevel_without_a_body(), 'test_inlined_def_only_module_registers_no_toplevel_without_a_body')
     _run_isolated(lambda: test_two_modules_one_same_named_function_keep_their_own_return_types(), 'test_two_modules_one_same_named_function_keep_their_own_return_types (line 12704)')
     _run_isolated(lambda: test_gen_taking_middle_helper_is_never_reached_by_a_local_import(), 'test_gen_taking_middle_helper_is_never_reached_by_a_local_import (line 12705)')
     _run_isolated(lambda: test_dotted_import_two_hop_attribute_call(), 'test_dotted_import_two_hop_attribute_call (line 12706)')

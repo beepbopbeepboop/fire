@@ -1789,8 +1789,7 @@ test('modcache', [PY, 'test_module_cache.py'], mem='tiny', cache=True,
      timeout=1800,
      extra=GIMPLE_SOURCES + ['test_module_cache.py', 'exec_budget.py',
                              'myinterpreter.py', 'fire.py', 'fire_main.py'],
-     desc='module cache end-to-end stages',
-     disabled='bugs/gate-modcache.md')
+     desc='module cache end-to-end stages')
 # Registered 2026-09-27. Found while implementing FORMAL.md phase 0:
 # `reflect._PROTO_RE` could not match a pointer return (`char *name(...)` — the
 # `*` is attached to the type with no space before the name), so it silently
