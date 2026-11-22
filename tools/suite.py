@@ -2022,16 +2022,18 @@ test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
 # in every branch that did not cause it — so this is the one shape that can:
 # `--ratchet` fails only when a file GAINS a citation, against per-file ceilings
 # in `tools/dangling_refs_baseline.py`. The corpus drifted red while nothing
-# was watching it (2026-11-09: 28 files over their baselines, the same set at
-# master's tip and at this branch's base), which the `expect=` below declares:
-# a whole-job condition with no count, because the ratchet prints no summary
-# line the runner can check one against. Its doc
-# (the doc SUITE_doc_refs_ratchet_red, now retired) was the switch — the campaign landed,
-# the doc goes, and a still-marked `doc-refs` that now PASSES reports loudly
-# until the marker drops. An `expect=` in `check` runs against this bucket's
-# stated convention on purpose: the alternative is a permanently UNDECLARED red
-# in the everyday tally, and the anti-rot above is what makes the marker
-# temporary rather than permanent.
+# was watching it (2026-11-09: 28 files over their baselines) and the campaign
+# that cleared it landed, so the older `expect=` marker and its doc are both
+# gone and this job is plain green: measured 2026-11-22, `--ratchet` exits 0.
+#
+# It was briefly switched OFF with a `disabled=` marker after the gate at
+# 0d832b8d39, and the job is turned back on here because the red that filing
+# recorded is gone from master: the file that had gained the citations was the
+# `CODEGEN_imported_str_global_return_int64` bug report, which cited two
+# deleted gate-bootstrap-stage2-cc docs and has since been deleted with its own
+# fix (6148b8cbf), so the gain went with the file. A red this job reports is
+# fixed by the prose rewrite `--ratchet`'s own message asks for, never by
+# re-adding the marker.
 #
 # The key covers `**/*.md` and `**/*.py` because the walk's subject is every
 # `.md` and `.py` in the tree — `fire_compiler.py` alone is 24 of the citations,
@@ -2042,8 +2044,7 @@ test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
      extra=['tools/dangling_doc_refs.py', 'tools/dangling_refs_baseline.py',
             'checked_run.py'],
      extraglob=['**/*.md', '**/*.py'],
-     desc='no file cites a deleted bug doc more than it used to',
-     disabled='bugs/gate-doc-refs.md')
+     desc='no file cites a deleted bug doc more than it used to')
 # Reads the CHECKABLE half of FORMAL.md, doc/ABI.md and OPUS.md (counts,
 # function names, limits, refusal messages, ABI signatures, tool flags) out of
 # the documents and compares them with the tree, both directions. Registered

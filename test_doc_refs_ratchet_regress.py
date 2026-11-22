@@ -129,6 +129,28 @@ def test_gate_doc_refs_red_on_master_is_retired():
         f'ratchet red after the fixture entry landed:\n{result.stdout}{result.stderr}'
 
 
+def test_doc_refs_job_is_enabled():
+    """Deleting the doc is only HALF the retirement: the gate filing at
+    `0d832b8d39` also switched the job off with a `disabled=` marker, and a job
+    that is registered and never run cannot report the ratchet green. The
+    marker and the doc are the two halves of one state, so they must move
+    together — `disabled_problems()` refuses an import where only one of them
+    is left behind, and this pins the registration itself against a re-added
+    marker on a doc that is back.
+
+    No `expect=` either: the red this filing recorded was one file over its
+    ceiling and that file was deleted with its own fix, so the job is green and
+    an `expect=` would be a marker that forgives a real regression."""
+    sys.path.insert(0, os.path.join(HERE, 'tools'))
+    import suite  # noqa: E402 — after the sys.path line
+    spec = suite.REGISTRY['doc-refs']
+    assert not spec.disabled, \
+        f'doc-refs is switched off again (disabled={spec.disabled!r}); a ' \
+        f'green ratchet is a job the gate has to run'
+    assert not spec.expect, \
+        f'doc-refs is marked known-failing again (expect={spec.expect!r})'
+
+
 if __name__ == '__main__':
     test_doc_is_deleted()
     test_ratchet_does_not_gain_after_doc_removal()
@@ -137,4 +159,5 @@ if __name__ == '__main__':
     test_gate_doc_refs_ratchet_red_on_master_fixed()
     test_two_preexisting_gains_are_pinned()
     test_gate_doc_refs_red_on_master_is_retired()
+    test_doc_refs_job_is_enabled()
     print('regression: PASS')
