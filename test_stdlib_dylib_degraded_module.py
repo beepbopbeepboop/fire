@@ -6,6 +6,18 @@ _compile_one_object must report it as the job's error so the caller skips it).
 The live case (`std/simd.mojo`) no longer degrades, so this forces a degraded
 compile through the job with a stubbed elaboration result, the same way
 compile_stdlib.py's verdict test does.
+
+The second half pins the job's OTHER per-module verdict: a real module must
+reach an object. `std/math/math.mojo` is the one that made the job red at
+77c157bb07 — its own compile elaborates the monomorphized
+`_ldexp_impl[Float32, 1]`, whose comptime `FPUtils[...]` references used to
+erase to `float` (gcc: `invalid operands to binary << (have 'float' and
+'float')`), so `_compile_module_job` returned that error and the caller printed
+`skip std/math/math.mojo: ...`. The ratchet counts any skip not in
+EXPECTED_FAILURES as a regression, which is why the gate filed a bug for this
+job. This is that bug's Done-when quick test: it fails on the unfixed
+tree (verified at 244efdbef^, with the same 3-attempt gcc error) and passes
+once the comptime member references fold at elaboration (244efdbef).
 """
 
 import os
@@ -16,6 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import build_stdlib_dylib as bsd
+import module_loader
 
 PASS, FAIL = [], []
 
@@ -68,6 +81,20 @@ with tempfile.TemporaryDirectory() as wd:
     finally:
         bsd.compile_module_to_c = real_compile
         bsd._LAST_DEGRADED[:] = []
+
+# The job's per-module contract on the real module that made `stdlib-dylib`
+# red: `_ldexp_impl`'s monomorphized instance must compile, so this module
+# reaches an object instead of coming back as the job's error (a `skip` the
+# ratchet counts as an unexpected fallback to source). `use_cache=False` on
+# purpose: this is the cold path the job takes on a cache miss, and a cache
+# replay would not exercise the elaboration at all.
+with tempfile.TemporaryDirectory() as wd:
+    math_path = os.path.join(module_loader.STDLIB_PATH, "std", "math", "math.mojo")
+    path, name, ofile, exports, error, hit = bsd._compile_module_job(
+        math_path, wd, use_cache=False)
+    check("std/math/math.mojo compiles into an object (no dylib skip)",
+          error is None and ofile is not None and os.path.exists(ofile),
+          f"error={error!r} ofile={ofile!r}")
 
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
