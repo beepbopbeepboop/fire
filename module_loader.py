@@ -1287,14 +1287,23 @@ class ModuleLoader:
                     exports[_nm] = {
                         'kind': 'global_var', 'c_return_type': _crt,
                         'home_module_path': path}
-                # Scalar globals: `NAME: str = ...`, `NAME: int = ...`,
-                # `NAME = callee(...)` (see `_ml_py_global_ctype`). Without an
-                # export, a function-scoped `from M import NAME` declared the
-                # name as a no-signature `extern int64_t NAME (...)` and read
-                # it through a `_funcptr_` stub, not the defining module's
-                # `M__mojo_global_get_NAME` accessor. Anything whose type is
-                # not decided here stays unexported, as before.
-                # Names this module imports from its compiler siblings, with
+            # Scalar globals: `NAME: str = ...`, `NAME: int = ...`,
+            # `NAME = callee(...)` (see `_ml_py_global_ctype`), in ANY `.py`
+            # module, not only the compiler's own directory. The scan types a
+            # global exactly as its home module's accessor is typed, so an
+            # outside-dir definer exports the same entry a compiler sibling
+            # does. Gating it to `_selfhost_dir` left a separate compile of
+            # `from k_src import NAME` (k_src.py outside the compiler dir)
+            # reading `(int64_t)0` for a `str` global. Without an export, a
+            # function-scoped `from M import NAME` declared the name as a
+            # no-signature `extern int64_t NAME (...)` and read it through a
+            # `_funcptr_` stub, not the defining module's `M__mojo_global_get_
+            # NAME` accessor. Anything whose type is not decided here stays
+            # unexported, as before. The set/container scans above stay gated:
+            # they carry the conflicting-declaration cases documented there.
+            if path.endswith('.py'):
+                _pydir = os.path.dirname(path)
+                # Names this module imports from its sibling modules, with
                 # the sibling's own export entry. A callee that is re-exported
                 # (`from stdlib_path import _find_stdlib_path`, then
                 # `STDLIB_PATH = _find_stdlib_path()`) is typed by the sibling

@@ -278,8 +278,9 @@ def test_py_str_literal_global_is_read_through_accessor():
 def test_py_scalar_global_scanner_types_only_what_the_definer_types():
     # The `.py` export scan (module_loader.py) types a `NAME[: ANN] = RHS`
     # global exactly as the DEFINING module's accessor is typed, or leaves it
-    # unexported. Its own compile is not run here (the scan is gated to the
-    # compiler's directory); the rule is pinned directly.
+    # unexported. The rule is pinned directly here; the end-to-end separate
+    # compile of an outside-dir definer is test_separate_compile_reads_outside_
+    # dir_str_global_through_accessor.
     import module_loader as ml
     assert ml._ml_scalar_global("STDLIB_PATH = _find_stdlib_path()") == \
         ['STDLIB_PATH', '', '_find_stdlib_path()']
@@ -313,6 +314,33 @@ def test_py_scalar_global_scanner_types_only_what_the_definer_types():
     assert ml._ml_py_global_ctype('bool', 'True', {}) == 'int'
     assert ml._ml_py_global_ctype('float', '1.0', {}) == 'double'
     assert ml._ml_py_global_ctype('list[int]', '[]', {}) == ''
+
+
+def test_separate_compile_reads_outside_dir_str_global_through_accessor():
+    # The SEPARATE-compile shape (`do_imports=False`) of a definer OUTSIDE the
+    # compiler's own directory. The module_loader export scan used to run only
+    # for the compiler's `_selfhost_dir`, so an outside-dir definer's
+    # `NAME = "s"` global was unexported and the importer read `(int64_t)0`
+    # (a silent NULL where the string belongs). The definer's accessor is
+    # `char *`, so the importer must declare and read it that way.
+    import gimple_codegen
+    root = os.path.join(HERE, 'build', 'test_imported_global_stub')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='probe_', dir=root)
+    try:
+        with open(os.path.join(td, 'k_src.py'), 'w') as f:
+            f.write('NAME = "s"\n')
+        path = os.path.join(td, 'd_def.py')
+        src = 'from k_src import NAME\n\ndef f(x):\n    return NAME\n'
+        with open(path, 'w') as f:
+            f.write(src)
+        sep = gimple_codegen.compile_to_gimple(src, do_imports=False, filename=path)
+        assert '(int64_t)0' not in sep, sep
+        assert 'extern char * k_src__mojo_global_get_NAME (void);' in sep, sep
+        assert '_t1 = k_src__mojo_global_get_NAME ();' in sep, sep
+    finally:
+        import shutil
+        shutil.rmtree(td, ignore_errors=True)
 
 
 def test_py_global_typed_through_reexported_callee():
@@ -365,5 +393,6 @@ if __name__ == '__main__':
     test_py_scalar_global_scanner_types_only_what_the_definer_types()
     test_py_str_literal_global_is_read_through_accessor()
     test_py_global_typed_through_reexported_callee()
+    test_separate_compile_reads_outside_dir_str_global_through_accessor()
     test_def_returning_imported_str_global_is_char_ptr()
     print('PASS')
