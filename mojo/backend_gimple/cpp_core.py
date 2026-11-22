@@ -8126,19 +8126,19 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     s.value, gen._cpp_declared, self_fields, gen._async_api)
                 idx64 = f"(int64_t)({idx})"
                 if gimple_ctypes.TypeLattice.is_cstr(vctype):
-                    return [f"{indent}mojo_list_set_str(({obj}), {idx64}, {val});"]
+                    return [_cpp_call_line(indent, 'mojo_list_set_str', [f'({obj})', idx64, val])]
                 if gimple_ctypes.TypeLattice.is_double(vctype):
-                    return [f"{indent}mojo_list_set_double(({obj}), {idx64}, {val});"]
-                return [f"{indent}mojo_list_set_int(({obj}), {idx64}, (int64_t)({val}));"]
+                    return [_cpp_call_line(indent, 'mojo_list_set_double', [f'({obj})', idx64, val])]
+                return [_cpp_call_line(indent, 'mojo_list_set_int', [f'({obj})', idx64, f'(int64_t)({val})'])]
             if obj_ct == 'MojoDict *':
                 key_expr = gen._cpp_dict_key_expr(s.target.index, idx)
                 vctype = gimple_exprtypes._infer_simple_expr_ctype(
                     s.value, gen._cpp_declared, self_fields, gen._async_api)
                 if gimple_ctypes.TypeLattice.is_cstr(vctype):
-                    return [f"{indent}mojo_dict_set_str(({obj}), {key_expr}, {val});"]
+                    return [_cpp_call_line(indent, 'mojo_dict_set_str', [f'({obj})', key_expr, val])]
                 if gimple_ctypes.TypeLattice.is_double(vctype):
-                    return [f"{indent}mojo_dict_set_double(({obj}), {key_expr}, {val});"]
-                return [f"{indent}mojo_dict_set_int(({obj}), {key_expr}, (int64_t)({val}));"]
+                    return [_cpp_call_line(indent, 'mojo_dict_set_double', [f'({obj})', key_expr, val])]
+                return [_cpp_call_line(indent, 'mojo_dict_set_int', [f'({obj})', key_expr, f'(int64_t)({val})'])]
             return [f"{indent}*(&({obj}[{idx}])) = {val};"]
         # sys.stderr/stdout/stdin = val (task #150's remaining
         # non-self-MemberExpr gap, e.g. test_faulthandler.py's
@@ -8267,12 +8267,12 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # nothing" is just a clear, so this exact, real,
                 # confirmed shape (iter_builtin_types) needs no
                 # extend call at all.
-                return [f"{indent}mojo_list_clear({obj_lp});"]
+                return [_cpp_call_line(indent, 'mojo_list_clear', [obj_lp])]
             if (isinstance(s.value, gimple_ctypes.IdentExpr) and gen._cpp_declared is not None
                     and gimple_ctypes.TypeLattice.is_list(gen._cpp_declared.get(s.value.name))):
                 val = gen._cpp_expr(s.value)
-                return [f"{indent}mojo_list_clear({obj_lp});",
-                        f"{indent}mojo_list_extend({obj_lp}, {val});"]
+                return [_cpp_call_line(indent, 'mojo_list_clear', [obj_lp]),
+                        _cpp_call_line(indent, 'mojo_list_extend', [obj_lp, val])]
             # Any other RHS shape (a non-empty list/tuple literal,
             # a call result not statically known to be a
             # MojoList*, ...) has no safe representation to
