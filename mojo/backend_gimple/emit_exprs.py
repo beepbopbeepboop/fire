@@ -1060,6 +1060,38 @@ def _lie_imported_global_accessor(gen, name: str) -> tuple[str, str]:
     return _acc_ctype, t
 
 
+def _lie_builtin_value_map_fastpath(gen, name: str) -> tuple[str, str]:
+    """`name` of a Python builtin used as a value, with no shadowing global: the pre-declared function-pointer word (or a direct cast), plus the repr name.
+
+    The caller holds the gate (`name` in BUILTIN_VALUE_MAP, unshadowed, and
+    `bare_global_read_plan` says no module global wins); this is the body.
+
+    One arm of `_lower_IdentExpr`, which tests the condition and calls this."""
+    c_name = gen.BUILTIN_VALUE_MAP[name]
+    # Use a pre-declared static void* (emitted in non-GIMPLE context) to avoid
+    # the invalid `&func_name` syntax that GIMPLE strict mode rejects.
+    # Only add if c_name is a valid C identifier (skip casts like
+    # `((int)0)`). `not c_name.startswith('(')`, NOT
+    # `c_name[0] in '<letters>'` — subscripting a `char *` with `[0]`
+    # lowers to `mojo_list_get_int((MojoList*)c_name, 0)` on the
+    # self-hosted path (a hard segfault: `c_name` is
+    # `BUILTIN_VALUE_MAP[name]`, e.g. "mojo_make_list", reached via
+    # `ctor in (Fn, ...)` on `--dump myinterpreter.py`).
+    if c_name and not c_name.startswith('('):
+        gen._funcptr_builtins_needed.add(c_name)
+        static_name = f'_funcptr_{c_name}'
+        t = gen._new_val('void *', f'{static_name}')
+        # The BARE name, not `c_name`: CPython's repr is the name the
+        # source wrote (`<function step at 0x...>`), and `c_name` is the
+        # mangled C symbol (`step_9f63a2`) or a module qualifier.
+        gen._func_value_names[t] = name
+        return 'void *', t
+    else:
+        # For non-identifier expressions like ((int)0), emit directly
+        t = gen._cast('void *', f"{c_name}")
+        return 'void *', t
+
+
 def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # `node: IdentExpr` (not the bare-boxed-int64 default): once self-hosted,
     # an unannotated `node` compiled to `int64_t`, so `node.name` went
@@ -1205,29 +1237,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # `name in gen._global_var_types`) is deliberately NOT the gate here.
     if (name in gen.BUILTIN_VALUE_MAP and name not in gen.var_types
             and not bare_global_read_plan(gen, name)[0]):
-        c_name = gen.BUILTIN_VALUE_MAP[name]
-        # Use a pre-declared static void* (emitted in non-GIMPLE context) to avoid
-        # the invalid `&func_name` syntax that GIMPLE strict mode rejects.
-        # Only add if c_name is a valid C identifier (skip casts like
-        # `((int)0)`). `not c_name.startswith('(')`, NOT
-        # `c_name[0] in '<letters>'` — subscripting a `char *` with `[0]`
-        # lowers to `mojo_list_get_int((MojoList*)c_name, 0)` on the
-        # self-hosted path (a hard segfault: `c_name` is
-        # `BUILTIN_VALUE_MAP[name]`, e.g. "mojo_make_list", reached via
-        # `ctor in (Fn, ...)` on `--dump myinterpreter.py`).
-        if c_name and not c_name.startswith('('):
-            gen._funcptr_builtins_needed.add(c_name)
-            static_name = f'_funcptr_{c_name}'
-            t = gen._new_val('void *', f'{static_name}')
-            # The BARE name, not `c_name`: CPython's repr is the name the
-            # source wrote (`<function step at 0x...>`), and `c_name` is the
-            # mangled C symbol (`step_9f63a2`) or a module qualifier.
-            gen._func_value_names[t] = name
-            return 'void *', t
-        else:
-            # For non-identifier expressions like ((int)0), emit directly
-            t = gen._cast('void *', f"{c_name}")
-            return 'void *', t
+        return _lie_builtin_value_map_fastpath(gen, name)
     # C function name used as a value (e.g. tokenize, MojoParser passed to
     # Scope_define). Can't use a function name as rvalue in GIMPLE -- use the
     # pre-declared static void* this codegen uses for every such site.
@@ -4812,6 +4822,73 @@ def _declared_scalar_int_param(gen, name: str) -> bool:
     return _annotation_scalar_family(_src) in ('int', 'bool')
 
 
+def _lbt_proven_int_is_none(gen, op: str, left_node, lt: str, right_node, rt: str) -> tuple[str, str] | None:
+    """x is None / x is not None where x is provably an integer: the constant answer, because 0 is an int and None is not it.
+
+    One arm of `_lower_binary_tail`, which tests the condition and calls this."""
+    _on = right_node if _is_none_literal(left_node) else left_node
+    _ot = rt if _is_none_literal(left_node) else lt
+    _proven_int = False
+    if gimple_exprtypes.scalar_shape_arm_kind(_on) is not None:
+        _proven_int = True
+    elif isinstance(_on, gimple_ctypes.IdentExpr) and gimple_ctypes.TypeLattice.is_int_word_or_bool(_ot):
+        _onm = _as_str(_on.name)
+        _oann = (getattr(gen, '_cur_param_ann', None) or {}).get(_onm)
+        if (gimple_ctypes.TypeLattice.is_int_word_or_bool(_oann)
+                and _declared_scalar_int_param(gen, _onm)):
+            _proven_int = True
+        elif _onm not in getattr(gen, '_cur_untyped_params', ()):
+            try:
+                _proven_int = ginf_mid._local_is_provably_int(
+                    gen._cur_func_body, _onm)
+            except Exception:
+                _proven_int = False
+    if _proven_int:
+        _t = gen._new_temp('_Bool')
+        _ans = 0 if op == 'is' else 1
+        # An explicit `(_Bool)` cast, never a bare integer_cst: GIMPLE
+        # rejects `_t = 0;` for a `_Bool` lvalue ("non-trivial conversion
+        # in 'integer_cst'"), exactly as `_lower_compare_chain` documents
+        # for its own constant arms.
+        gen._cast_into(_t, '_Bool', f"{_ans}")
+        return '_Bool', _t
+    return None
+
+
+def _lbt_boxed_none_compare(gen, op: str, left_node, lt: str, lv: str, right_node, rt: str, rv: str) -> tuple[str, str] | None:
+    """x == None / is None on a boxed or tagged word: the answer is the box kind, which the plain word compare cannot see.
+
+    One arm of `_lower_binary_tail`, which tests the condition and calls this."""
+    _other = rv if _is_none_literal(left_node) else lv
+    _other_t = rt if _is_none_literal(left_node) else lt
+    _other_node = right_node if _is_none_literal(left_node) else left_node
+    _ident = op in ('is', 'is not')
+    # A for-loop target over a tagged generator (`for v in g()`) holds the
+    # loop's box in `_boxed_vals` but is not in `_tagged_word_vals`; the
+    # per-name rule `tagged_for_target_name` is what says every value the
+    # name holds is that box, so it takes the same kind read.
+    _for_tagged = (_ident and isinstance(_other_node, gimple_ctypes.IdentExpr)
+                   and ginf.tagged_for_target_name(gen, _other_node.name))
+    # A box-holding LOCAL (`mixed_box_name`, e.g. a local whose every
+    # binding is None) is read as a box for the same reason. Its bare int
+    # 0 is not None and its None is the shared box, which only the kind
+    # read can tell apart.
+    _mixed_none = (isinstance(_other_node, gimple_ctypes.IdentExpr)
+                   and ginf.mixed_box_name(gen, _other_node.name))
+    # Only an int word: a `char *` name keeps its NULL-pointer test below.
+    # A float box answers 0 here, which is the right answer for a float.
+    if (gimple_ctypes.TypeLattice.is_int_word(_other_t)
+            and (gen._word_may_be_box(_other) or _mixed_none)
+            and (not _ident or gen._word_is_tagged(_other)
+                 or _for_tagged or _mixed_none)):
+        _is_none = gen._call_expr('int', 'mojo_word_is_none', [('int64_t', _other)])
+        _cmp = '!= 0' if op in ('==', 'is') else '== 0'
+        _t = gen._new_temp('_Bool')
+        build.assign(gen, f'{_t}', f'{_is_none} {_cmp}')
+        return '_Bool', _t
+    return None
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -4852,33 +4929,9 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # is a bare NULL word with no box, which the kind read would call "not
     # None" (pinned by `run_tagged_none_identity_tests`).
     if op in ('==', '!=', 'is', 'is not') and _is_none_literal(left_node) != _is_none_literal(right_node):
-        _other = rv if _is_none_literal(left_node) else lv
-        _other_t = rt if _is_none_literal(left_node) else lt
-        _other_node = right_node if _is_none_literal(left_node) else left_node
-        _ident = op in ('is', 'is not')
-        # A for-loop target over a tagged generator (`for v in g()`) holds the
-        # loop's box in `_boxed_vals` but is not in `_tagged_word_vals`; the
-        # per-name rule `tagged_for_target_name` is what says every value the
-        # name holds is that box, so it takes the same kind read.
-        _for_tagged = (_ident and isinstance(_other_node, gimple_ctypes.IdentExpr)
-                       and ginf.tagged_for_target_name(gen, _other_node.name))
-        # A box-holding LOCAL (`mixed_box_name`, e.g. a local whose every
-        # binding is None) is read as a box for the same reason. Its bare int
-        # 0 is not None and its None is the shared box, which only the kind
-        # read can tell apart.
-        _mixed_none = (isinstance(_other_node, gimple_ctypes.IdentExpr)
-                       and ginf.mixed_box_name(gen, _other_node.name))
-        # Only an int word: a `char *` name keeps its NULL-pointer test below.
-        # A float box answers 0 here, which is the right answer for a float.
-        if (gimple_ctypes.TypeLattice.is_int_word(_other_t)
-                and (gen._word_may_be_box(_other) or _mixed_none)
-                and (not _ident or gen._word_is_tagged(_other)
-                     or _for_tagged or _mixed_none)):
-            _is_none = gen._call_expr('int', 'mojo_word_is_none', [('int64_t', _other)])
-            _cmp = '!= 0' if op in ('==', 'is') else '== 0'
-            _t = gen._new_temp('_Bool')
-            build.assign(gen, f'{_t}', f'{_is_none} {_cmp}')
-            return '_Bool', _t
+        _arm_r = _lbt_boxed_none_compare(gen, op, left_node, lt, lv, right_node, rt, rv)
+        if _arm_r is not None:
+            return _arm_r
     # `x is None` / `is not None` where `x` is PROVABLY an integer: the answer
     # is a constant False/True, because 0 is an integer and None is not it.
     # The generic identity arm below compares the words, and None is the word
@@ -4899,32 +4952,9 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # -fgimple rejects once the function is large enough — the 2026-11-21
     # stdlib-dylib red (list/deque/interval/os/process fell back to source).
     if op in ('is', 'is not') and (_is_none_literal(left_node) != _is_none_literal(right_node)):
-        _on = right_node if _is_none_literal(left_node) else left_node
-        _ot = rt if _is_none_literal(left_node) else lt
-        _proven_int = False
-        if gimple_exprtypes.scalar_shape_arm_kind(_on) is not None:
-            _proven_int = True
-        elif isinstance(_on, gimple_ctypes.IdentExpr) and gimple_ctypes.TypeLattice.is_int_word_or_bool(_ot):
-            _onm = _as_str(_on.name)
-            _oann = (getattr(gen, '_cur_param_ann', None) or {}).get(_onm)
-            if (gimple_ctypes.TypeLattice.is_int_word_or_bool(_oann)
-                    and _declared_scalar_int_param(gen, _onm)):
-                _proven_int = True
-            elif _onm not in getattr(gen, '_cur_untyped_params', ()):
-                try:
-                    _proven_int = ginf_mid._local_is_provably_int(
-                        gen._cur_func_body, _onm)
-                except Exception:
-                    _proven_int = False
-        if _proven_int:
-            _t = gen._new_temp('_Bool')
-            _ans = 0 if op == 'is' else 1
-            # An explicit `(_Bool)` cast, never a bare integer_cst: GIMPLE
-            # rejects `_t = 0;` for a `_Bool` lvalue ("non-trivial conversion
-            # in 'integer_cst'"), exactly as `_lower_compare_chain` documents
-            # for its own constant arms.
-            gen._cast_into(_t, '_Bool', f"{_ans}")
-            return '_Bool', _t
+        _arm_r = _lbt_proven_int_is_none(gen, op, left_node, lt, right_node, rt)
+        if _arm_r is not None:
+            return _arm_r
 
     # Int / Int is true division: Python and Mojo answer a Float64, never an
     # integer. The gate is on BOTH operands being plain signed C integers, not

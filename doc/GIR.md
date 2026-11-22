@@ -482,6 +482,13 @@ stage 7 has an oracle before it has a builder.
   -> 757 (`_lnc_*`), `_lower_MemberExpr` 1,728 -> 1,533 (`_lme_*`),
   `_lower_binary_tail` 1,421 -> 1,274 (`_lbt_*`), `_lower_struct_method_call`
   482 -> 410 (`_lsmc_*`). `test_gimple_arms_extracted.py` pins that state.
+  Three arms came back afterwards — `_lower_IdentExpr`'s builtin-value-map
+  arm in the 2026-11-21 stage-4 type-predicate codemods (`1b94b71d4`) and
+  `_lower_binary_tail`'s two `x == None` / `x is None` arms (the second
+  added by `70e483ef9`) — and the pin went 6/8. All three were re-extracted
+  on 2026-11-22 as `_lie_builtin_value_map_fastpath`,
+  `_lbt_boxed_none_compare` and `_lbt_proven_int_is_none`, with
+  byte-identical C on both corpora.
   Every other compiler source and test program in the dump corpus emits a
   byte-identical `.ci`; the new parameters have the C types the parent's
   locals had in the compiler's own output, the one exception being

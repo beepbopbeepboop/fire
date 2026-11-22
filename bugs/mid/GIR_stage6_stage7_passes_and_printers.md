@@ -85,9 +85,9 @@ Verified:
 - `python3 test_regress_cpp_oracle_covers_lowering.py`: 13 programs, 2 shapes, 0 failures.
 - `python3 test_type_string_ratchet.py`: 0 failures; `cpp_core.py`'s counts are unchanged
   (`== 'int64_t'` 11, `== 'char *'` 12, `== 'MojoList *'` 12), so the W1 packet is untouched.
-- `python3 test_gimple_arms_extracted.py` is 6/8, the separate pre-existing red
-  `bugs/GIR_arms_extracted_pin_has_two_movable_arms.md` (`_lower_IdentExpr` 25,
-  `_lower_binary_tail` 27) records; untouched here.
+- `python3 test_gimple_arms_extracted.py` is 6/8, a separate pre-existing red at the time
+  (two movable arms, in `_lower_IdentExpr` and `_lower_binary_tail`) that this round did not
+  touch; both arms have since been extracted and the test is 8/8.
 
 **Not done:** the builder half of stage 7. No arm returns an `Ex` yet and no `mojo/ir/build.py`
 exists. The self-hosted compile of `cpp_core.py` itself is not verified here (light lane, no
@@ -180,9 +180,9 @@ identical C++ companion; `python3 test_regress_cpp_oracle_covers_lowering.py` �
 0 failures (and 12 failures of 13 with the `MOJO_CORO=cpp` selection removed from `hash_tree`, and a
 `FAIL: tools/c_oracle.py has no CPP_CORPUS` against the previous commit's oracle);
 `python3 test_gimple_module_passes.py` — 27 passes pinned, 8674/8674 lines, 0 failures.
-`python3 test_gimple_arms_extracted.py` is 6/8 on this tree, which is the SEPARATE pre-existing red
-`bugs/GIR_arms_extracted_pin_has_two_movable_arms.md` records (`_lower_IdentExpr` 25 lines,
-`_lower_binary_tail` 27) — untouched here, and it is not registered, so no gate runs it.
+`python3 test_gimple_arms_extracted.py` is 6/8 on this tree, a SEPARATE pre-existing red at the
+time (two movable arms, in `_lower_IdentExpr` and `_lower_binary_tail`) — untouched here, and it
+is not registered, so no gate runs it. Both arms have since been extracted and it is 8/8.
 
 NOT done: stage 7 itself. No `cpp_core.py` emission moved onto a builder — `mojo/ir/build.py` (stage 2b)
 still does not exist — and nothing in this round changes emitted text (the oracle proves that: both
