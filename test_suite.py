@@ -4499,6 +4499,13 @@ _OPEN_STDLIB_DYLIB_PROBE_REASON = (
 
 UNREGISTERED = {
     'test_codegen_erased_container_values.py': _OPEN_PROBE_HARNESS_REASON,
+    # The `_as_comptimevar_node` stage2 `AttributeError` pin (2026-11-21): the
+    # per-file (`do_imports=False`) compile's module-alias function VALUE.
+    # Added with its fix and run directly (`python3
+    # test_codegen_module_alias_function_value.py`); the landing was told not
+    # to register in tools/suite.py, and this is a build-and-RUN case that
+    # wants a bucket beside `linkmode` when one is next touched.
+    'test_codegen_module_alias_function_value.py': _STANDALONE_TEST_REASON,
     # The cases-generator analyzer landing (2026-11-17) left these regression
     # pins next to their fixes without registering them. Each runs directly;
     # the `*_build.py` siblings compile one small source with `fire.py build`

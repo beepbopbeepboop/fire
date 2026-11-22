@@ -113,6 +113,7 @@ def _dict_val_domain(ctype):
 # `_lower_method_call` below and `_struct_cname_by_id` in
 # GimpleGen.__init__.
 from mojo.middle.funcs_shared import _ctor_cname_via_module, _resolve_struct_cname
+from mojo.middle.funcs_shared import register_module_member_function
 
 # Sentinel for "this api entry has no `receiver` key at all", so a
 # missing key is distinguishable from a recorded empty string (which is a
@@ -588,44 +589,15 @@ def _register_sibling_module_member(gen, module_name: str, method_name: str,
     written in the import, and the scan's (un-upgraded) entry when the member
     was not registered yet AND the defining module exports it, else None.
     The generic branch's factory-value accessor still keys on that raw entry.
+
+    The steps themselves live in `funcs_shared.register_module_member_
+    function`, so the module-qualified VALUE spelling (`x = m.f`, reached
+    through `_callable_value_symbol` / `_lower_MemberExpr`) registers the
+    member exactly as the call spelling does instead of keeping a second
+    copy of the resolution that can drift from this one.
     """
-    if sub_ref is None:
-        _info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
-        sub_ref = ((_info.get('module') if isinstance(_info, dict) else None)
-                   or module_name)
-    # A function the alias's module only RE-EXPORTS (`emit_resolve` does `from
-    # mojo.middle.resolve_shared import _calls_in_stmts`; the thin GimpleGen
-    # wrapper calls `grsl._calls_in_stmts(...)`) is DEFINED in another module,
-    # under that module's qualifier. Pinning the home to the alias's module left
-    # the re-dispatched bare call unqualified -- a weak "unavailable in compiled
-    # mode" stub while the real definition sat under its mangled name -- which
-    # is why the self-hosted compiler ran every wrapper as a no-op (~100 stubs).
-    # `_find_symbol_home_module` follows re-exports (memoised, cycle-guarded).
-    try:
-        _defining = gen._find_symbol_home_module(sub_ref, method_name, 'fn')
-    except Exception:
-        _defining = None
-    if _defining and _defining != sub_ref:
-        sub_ref = _defining
-    try:
-        gen._note_own_func_home(method_name, sub_ref, record_scope=False)
-    except Exception:
-        pass
-    if method_name in (getattr(gen, 'imported_symbols', None) or {}):
-        return sub_ref, None
-    try:
-        _exps, _qual = gen._local_sibling_module_exports(sub_ref)
-    except Exception:
-        _exps, _qual = None, None
-    _raw = (_exps or {}).get(method_name)
-    if _raw:
-        _entry = gen._resolved_export_entry(sub_ref, method_name, _raw)
-        if _entry:
-            _entry = dict(_entry)
-            _entry['module'] = sub_ref
-            gen._register_imported_symbol(method_name, _entry, method_name,
-                                          write_param_types=True)
-    return sub_ref, _raw
+    return register_module_member_function(gen, module_name, method_name,
+                                           sub_ref)
 
 
 def _lower_bound_method_value(gen, struct_name: str, method: str,
@@ -3966,6 +3938,36 @@ def _lmc_name_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, st
                 _mgc_src = ''
             _mgc_def_count = len(gimple_ctypes.source_decl_ends(
                 _mgc_src, ['fn', 'def'], method_name, '('))
+            # A module that only RE-EXPORTS the member (`from impl import
+            # double_it as dt`) has no `def dt` of its own; the definition —
+            # and therefore the mangled symbol and the plain-function call —
+            # lives in the module the hop names, under the DEFINER's
+            # spelling. Resolve both halves through the one hop walk the
+            # VALUE spelling uses (`_find_symbol_home_module` with
+            # `want_name`, then the same `_register_sibling_module_member`
+            # below), instead of falling through to the
+            # `mojo_module_not_compiled` raise for a function that is
+            # perfectly compilable.
+            _mgc_def_src = _mgc_src
+            _mgc_def_name = method_name
+            if _mgc_def_count == 0:
+                try:
+                    _mgc_home = gen._find_symbol_home_module(
+                        _mgc_sub_ref, method_name, 'fn', want_name=True)
+                except Exception:
+                    _mgc_home = None
+                _mgc_home_ref = _as_str(_mgc_home[0]) if _mgc_home else ''
+                if _mgc_home_ref and _mgc_home_ref != _mgc_sub_ref:
+                    for _mgc_cand in gen._module_candidate_paths(_mgc_home_ref):
+                        if gimple_ctypes.os.path.exists(_mgc_cand):
+                            try:
+                                _mgc_def_src = open(_mgc_cand).read()
+                            except Exception:
+                                _mgc_def_src = _mgc_src
+                            break
+                    _mgc_def_name = _as_str(_mgc_home[1])
+                    _mgc_def_count = len(gimple_ctypes.source_decl_ends(
+                        _mgc_def_src, ['fn', 'def'], _mgc_def_name, '('))
             # Try libm for math functions early
             try:
                 _libm_m = None
@@ -3975,8 +3977,8 @@ def _lmc_name_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, st
                 pass
             _mgc_is_plain_fn = (
                 _mgc_def_count == 1
-                and not gimple_ctypes.source_declares(_mgc_src, ['fn', 'def'], method_name, '[')
-                and not gimple_ctypes.source_declares(_mgc_src, ['struct'], method_name, '[(:'))
+                and not gimple_ctypes.source_declares(_mgc_def_src, ['fn', 'def'], _mgc_def_name, '[')
+                and not gimple_ctypes.source_declares(_mgc_def_src, ['struct'], _mgc_def_name, '[(:'))
             if _mgc_is_plain_fn:
                 # Re-dispatch as a BARE-name call through `_lower_call`
                 # (exactly `_selfhost_sibling_member_kind`'s own

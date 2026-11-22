@@ -25,8 +25,19 @@ every `bootstrap-stage2-dumps` job exits 1 with:
 
 ## Done when
 
-`make bootstrap` gets past `bootstrap-stage2-dumps` (stage2 dumps all exit 0), then
-`bootstrap-verify` compares stage1 and stage2 byte for byte. Delete this doc in the same commit.
+1. **Quick (the pin):**
+
+        python3 tools/memslot.py --gb 8 --label x -- python3 test_codegen_module_alias_function_value.py
+
+   passes. It builds fixture modules through `build_stdlib_dylib.compile_module_to_c` (the per-file
+   `do_imports=False` shape), links each with `runtime/fire_runtime.c`, runs it, and compares with
+   CPython. It fails on master: a module-alias function VALUE (`f = h.double_it`) lowers to
+   `_mojo_dispatch_getattr(NULL, "double_it")`, which raises at run time. The doc's symptom
+   (`AttributeError: _as_comptimevar_node` from `_fc._as_comptimevar_node`) has the same shape;
+   that link is inferred from the error text, not reproduced end to end.
+2. **Full:** `make bootstrap` gets past `bootstrap-stage2-dumps` (stage2 dumps all exit 0), then
+   `bootstrap-verify` compares stage1 and stage2 byte for byte. Delete this doc in the same commit
+   as the full chain going green. (Quick criterion 1 alone does not close the doc.)
 
 ## Status 2026-11-21
 
@@ -39,3 +50,26 @@ every `bootstrap-stage2-dumps` job exits 1 with:
   It is NOT committed yet.
 - Next: re-enable `bootstrap-stage1-transitive` (delete its doc only when green), regenerate the full closure,
   then rerun the stage2 dumps.
+
+## Status 2026-11-22 (root cause fixed; full chain still open)
+
+- **Root cause (landed on `work/bug-codegen-selfhost-stage2-attributeerr`):** a module-alias member
+  read as a VALUE (`f = h.double_it`, `f = h.dt`, a parameter default, a function-scoped import) in
+  the per-file `do_imports=False` compile fell to `_mojo_dispatch_getattr` on the NULL module marker,
+  which is the fatal `AttributeError`. `_fc._as_comptimevar_node` was exactly such a read. The fix
+  is in the lowering: `funcs_shared.register_module_member_function` is the one writer for
+  "`<alias>.<member>` is a function of the held module", used by both the call path and the value
+  path (`calls_shared._callable_value_symbol`), resolving through one hop walk so a renaming
+  re-export gets the definer's symbol.
+- **Quick test, measured:** `test_codegen_module_alias_function_value.py` FAILS on a `git archive`
+  snapshot of master (`AttributeError: double_it`, `AttributeError: dt`, `NotImplementedError:
+  helper.dt ...`) and PASSES on the branch (6 shapes print CPython's answer).
+- **Measured, covering:** `test_link_mode.py` (see the commit report for the count).
+- **Not measured here:** the full chain (`bootstrap-stage1-transitive` and `bootstrap-stage2-cc`
+  are still disabled upstream, so `stage1/fire.ci` is partial). Criterion 2 is the integrator's to
+  run after those two jobs are re-enabled. Until then the doc stays open.
+- Master's `comptime.py` already imports `_as_comptimevar_node` directly (`5128d44f3`), so the exact
+  `_fc._as_comptimevar_node` read named above is gone from master; the fix covers the general shape
+  that produced it.
+- Adjacent open shapes (not needed for this doc's criterion 1):
+  `bugs/CODEGEN_module_alias_attr_per_file_remaining_shapes.md`.

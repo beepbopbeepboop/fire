@@ -59,6 +59,10 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 # emit_calls the way its other callers reach it, rather than imported here, so
 # there is exactly one spelling of it in the tree.
 from mojo.middle.calls_shared import _callable_value_symbol
+# The shared writer for "`<alias>.<member>` names a function of the module the
+# alias holds" — see the module-alias function-value branch in
+# `_lower_MemberExpr`.
+from mojo.middle.funcs_shared import register_module_member_function
 from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
 from mojo.middle.calls_shared import _struct_operator_receiver, _STRUCT_OP_DUNDER
@@ -2263,20 +2267,29 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # reference, not an arbitrary/unknown module attribute (which
         # still falls through to the generic dynamic-dispatch fallback
         # below, unchanged).
+        #
+        # That table carries only the defs of modules this compile INLINED
+        # (plus this module's own), so a per-file `do_imports=False` compile
+        # — the shape the bootstrap `--dump` stages use — knows none of an
+        # imported module's functions and used to fall through to the generic
+        # dynamic-dispatch fallback for `f = _fc._as_comptimevar_node`: a
+        # `_mojo_dispatch_getattr(NULL, ...)` on the module marker, i.e. a
+        # fatal `AttributeError: _as_comptimevar_node` the moment the
+        # statement runs. Register the member through the same writer the
+        # module-qualified CALL path uses, then answer through
+        # `_callable_value_symbol` — the tree's ONE answer to "the function
+        # `f` as a bare C value" — rather than a second copy of the
+        # `_funcptr_` emission that can drift from it.
         if (module_name in gen.imported_symbols
-                and node.member in gen.func_return_types
                 and node.member not in gen.struct_field_types):
-            # Can't use a function name as a bare rvalue under -fgimple
-            # (same restriction the "C function name used as a value"
-            # case in _lower_IdentExpr already documents) — go through
-            # the same pre-declared-static-void* mechanism it uses
-            # (_funcptr_builtins_needed / `_funcptr_{c_name}`) rather
-            # than emitting an inline `(void *)csym` cast here.
-            csym = gen._func_csym(node.member)
-            gen._funcptr_builtins_needed.add(csym)
-            static_name = f'_funcptr_{csym}'
-            t = gen._new_val('void *', f'{static_name}')
-            return 'void *', t
+            _mv = _as_str(node.member)
+            if (_mv not in gen.func_return_types
+                    and module_name in getattr(gen, '_module_alias_names', ())):
+                register_module_member_function(gen, module_name, _mv)
+            if _mv in gen.func_return_types:
+                _cvs = _callable_value_symbol(gen, node)
+                if _cvs is not None:
+                    return _cvs
 
         # `submod.GLOBAL` — a plain module-level global/constant read
         # off a real SUBMODULE marker (`from PKG import submod`, see

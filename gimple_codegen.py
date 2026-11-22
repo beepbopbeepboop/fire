@@ -5318,9 +5318,11 @@ class GimpleGen:
     def _find_struct_home_module(self, module: str, name: str, depth: int = 0) -> str | None:
         return gfn._find_struct_home_module(self, module, name, depth=depth)
     def _find_symbol_home_module(self, module: str, name: str, kind: str,
-                                 depth: int = 0, want_abs: bool = False):
+                                 depth: int = 0, want_abs: bool = False,
+                                 want_name: bool = False):
         return gfn._find_symbol_home_module(self, module, name, kind,
-                                           depth=depth, want_abs=want_abs)
+                                           depth=depth, want_abs=want_abs,
+                                           want_name=want_name)
     def _reexported_defining_qualifier(self, module: str, name: str,
                                        kind: str = 'fn') -> str:
         return gfn._reexported_defining_qualifier(self, module, name, kind)
