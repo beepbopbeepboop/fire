@@ -4012,7 +4012,16 @@ def _lmc_name_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, st
                 # answered here, and keeps the bare-name registration.
                 _mgc_csym = register_module_member_value(
                     gen, module_name, method_name)
-                if _mgc_csym is not None:
+                # A compiled GENERATOR member is not a plain call: its callable
+                # surface is `<base>_start/_resume/_value/_destroy`, and
+                # `_generator_api` is keyed by the definer's bare name. Re-
+                # dispatching it by the C symbol lowers a plain call to a
+                # function nothing defines (`mlines_iter_lines_9f63a2`, undefined
+                # at link time). It takes the bare-name route, as it did before
+                # the symbol route existed, and `_lower_call` finds its api.
+                if (_mgc_csym is not None
+                        and _as_str(_mgc_csym[1]) not in (
+                            getattr(gen, '_generator_api', None) or {})):
                     _mgc_raw = None
                     _mgc_callee = _as_str(_mgc_csym[0])
                 else:

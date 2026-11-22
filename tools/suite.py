@@ -2124,8 +2124,7 @@ test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True, me
                              'exec_budget.py',      # imported: must be in the key
                              'build_config.py', RUNTIME_SRC, RUNTIME_HDR]
          + CORO_RUNTIME,
-     desc='compile-and-execute: every generator/coroutine shape, both backends',
-     disabled='bugs/gate-gimplegenerators.md')
+     desc='compile-and-execute: every generator/coroutine shape, both backends')
 
 test('runtimere', [PY, 'test_runtime_re.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_runtime_re.py', 'build_config.py', 'exec_budget.py',
