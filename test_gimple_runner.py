@@ -3853,6 +3853,125 @@ else:
     print("remainder falsy")
 """)
 
+    # The root cause BEHIND the three cases above: `eval_const_bool_state`
+    # answered CONST_FALSE both for "the fold produced a falsy value" and for
+    # "the shape is foldable but the fold declined". `[1] + [2]` is foldable by
+    # SHAPE (a BinaryOp of two foldable list literals) and the folder has no
+    # list `+` arm, so its None was read as false and a module-level `if`
+    # deleted its then-arm. Teaching the folder one more operator would leave
+    # the class open; the condition now answers CONST_UNKNOWN and the backend
+    # emits BOTH arms as a runtime branch, so CPython's answer is what runs.
+    # The empty rows are the control (their empty result is falsy either way),
+    # and the `x`/`x - 3` rows pin that a genuine non-constant condition still
+    # resolves to a runtime branch instead of being pruned.
+    test_gimple_matches_cpython(
+        "gimple_module_constant_operator_fold_declined_condition", """\
+def main():
+    pass
+
+if [1] + [2]:
+    print("list-plus THEN")
+else:
+    print("list-plus ELSE")
+
+if [1] + []:
+    print("list-plus-empty THEN")
+else:
+    print("list-plus-empty ELSE")
+
+if (1,) + (2,):
+    print("tuple-plus THEN")
+else:
+    print("tuple-plus ELSE")
+
+if (1,) * 2:
+    print("tuple-mul THEN")
+else:
+    print("tuple-mul ELSE")
+
+if "ab" * 2:
+    print("str-mul THEN")
+else:
+    print("str-mul ELSE")
+
+if {1: 2} | {3: 4}:
+    print("dict-or THEN")
+else:
+    print("dict-or ELSE")
+
+if {1: 2} | {}:
+    print("dict-or-empty THEN")
+else:
+    print("dict-or-empty ELSE")
+
+if [] + []:
+    print("empty-list-plus THEN")
+else:
+    print("empty-list-plus ELSE")
+
+if () * 2:
+    print("empty-tuple-mul THEN")
+else:
+    print("empty-tuple-mul ELSE")
+
+if "ab" * 0:
+    print("empty-str-mul THEN")
+else:
+    print("empty-str-mul ELSE")
+
+x = 0
+if x:
+    print("runtime THEN")
+else:
+    print("runtime ELSE")
+
+if x - 3:
+    print("runtime-diff THEN")
+else:
+    print("runtime-diff ELSE")
+
+main()
+""")
+
+    # The decision the CONST_UNKNOWN change forces: a fold that RAISES at
+    # compile time (`1 // 0`) is no longer reported FALSE. The build still
+    # refuses to fold it (`fold_arith` answers None for a zero divisor), the
+    # condition is now a runtime branch, and CPython's ZeroDivisionError is the
+    # observable answer — so the program prints its first statement and then
+    # exits non-zero naming the error, instead of silently printing the else
+    # arm. Pinned by the runtime-error harness because `matches_cpython`
+    # refuses a program whose oracle exits non-zero.
+    test_gimple_runtime_error(
+        "gimple_module_constant_division_by_zero_condition",
+        """\
+print("before")
+if 1 // 0:
+    print("div THEN")
+else:
+    print("div ELSE")
+""", "ZeroDivisionError")
+
+    # The `comptime if` spelling of the same decision, and the reason it has to
+    # be a runtime branch rather than a silent else: `comptime` is not Python,
+    # so there is no oracle for "which arm", but there is one for "the
+    # condition raises" — and the old CONST_FALSE answer hid that entirely.
+    test_gimple_runtime_error(
+        "gimple_comptime_if_division_by_zero_condition",
+        """\
+def f():
+    comptime if 1 // 0:
+        print("ct div THEN")
+    else:
+        print("ct div ELSE")
+    return 0
+
+def main():
+    print("before")
+    f()
+
+main()
+""", "ZeroDivisionError")
+
     # measured wrong independently of the rows above: a lambda that is
     # RETURNED as a value is lifted into its own C function taking a heap env
     # struct, so the captured `double` crosses a struct field, a `malloc`'d env
