@@ -201,6 +201,43 @@ def test_probe_distinguishes_calls_from_mentions():
         check(got == want, f'probe: {why}', f'want {want}, got {got}')
 
 
+def test_this_job_compiles_no_import_closure():
+    """A QUICK suite job must not compile an import closure.
+
+    The gate's red at `ce55ca85bf` was exactly this shape: one case here
+    compiled the compiler's whole import closure (`from build_config import
+    find_gcc` with `do_imports=True`) and cost 681 s / 8.06 GB, past the
+    job's 600 s cap. That is a self-host step's cost, not a quick test's.
+    The property it pinned survives without the closure (see
+    `test_probe_ignores_the_runtime_signature_table`); this check is what
+    stops the shape from coming back, and it is deliberately cheaper than the
+    measurement it prevents -- it reads this file's AST, it compiles nothing.
+    """
+    import ast
+    with open(os.path.abspath(__file__)) as f:
+        tree = ast.parse(f.read())
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, 'id', None) or getattr(node.func, 'attr', None)
+        if name not in ('compile_to_gimple', 'compile_to_gimple_cached'):
+            continue
+        if not node.args:
+            continue
+        src = node.args[0]
+        if not (isinstance(src, ast.Constant) and isinstance(src.value, str)):
+            continue
+        if 'import ' not in src.value and 'from ' not in src.value:
+            continue
+        if any(k.arg == 'do_imports' and isinstance(k.value, ast.Constant)
+               and k.value.value is True for k in node.keywords):
+            offenders.append(src.lineno)
+    check(not offenders,
+          'no case here compiles an import closure (do_imports=True on a '
+          'source that imports)', f'line(s) {offenders}')
+
+
 def test_probe_ignores_the_runtime_signature_table():
     """The self-host case specifically: the compiler's own generated C.
 
@@ -379,6 +416,7 @@ def main():
     test_registry_is_derived_from_the_headers()
     test_fire_python_is_deliberately_excluded()
     test_probe_distinguishes_calls_from_mentions()
+    test_this_job_compiles_no_import_closure()
     test_probe_ignores_the_runtime_signature_table()
     test_programs_build_link_and_run()
     test_a_program_without_sqlite_does_not_link_it()
