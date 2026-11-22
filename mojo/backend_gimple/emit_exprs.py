@@ -59,10 +59,10 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 # emit_calls the way its other callers reach it, rather than imported here, so
 # there is exactly one spelling of it in the tree.
 from mojo.middle.calls_shared import _callable_value_symbol
-# The shared writer for "`<alias>.<member>` names a function of the module the
-# alias holds" — see the module-alias function-value branch in
-# `_lower_MemberExpr`.
-from mojo.middle.funcs_shared import register_module_member_function
+# "Does the module `<alias>` holds define `<member>` as a class?" — the
+# class-as-value stub in `_lower_MemberExpr` asks the module, not the TU-wide
+# `struct_field_types`.
+from mojo.middle.funcs_shared import module_member_is_struct
 from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
 from mojo.middle.calls_shared import _struct_operator_receiver, _STRUCT_OP_DUNDER
@@ -2275,17 +2275,24 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # dynamic-dispatch fallback for `f = _fc._as_comptimevar_node`: a
         # `_mojo_dispatch_getattr(NULL, ...)` on the module marker, i.e. a
         # fatal `AttributeError: _as_comptimevar_node` the moment the
-        # statement runs. Register the member through the same writer the
-        # module-qualified CALL path uses, then answer through
-        # `_callable_value_symbol` — the tree's ONE answer to "the function
-        # `f` as a bare C value" — rather than a second copy of the
-        # `_funcptr_` emission that can drift from it.
-        if (module_name in gen.imported_symbols
+        # statement runs. Answer through `_callable_value_symbol` — the tree's
+        # ONE answer to "the function `f` as a bare C value", which resolves
+        # the member through its module (`register_module_member_value`) —
+        # rather than a second copy of the `_funcptr_` emission that can drift
+        # from it.
+        #
+        # A genuine module alias is answered by its MODULE alone
+        # (`_callable_value_symbol` -> `register_module_member_value`): the
+        # importer's own class or def of the same name is not a candidate, so
+        # the bare-name struct gate below does not apply to it.
+        _mv = _as_str(node.member)
+        if module_name in getattr(gen, '_module_alias_names', ()):
+            if module_name in gen.imported_symbols:
+                _cvs = _callable_value_symbol(gen, node)
+                if _cvs is not None:
+                    return _cvs
+        elif (module_name in gen.imported_symbols
                 and node.member not in gen.struct_field_types):
-            _mv = _as_str(node.member)
-            if (_mv not in gen.func_return_types
-                    and module_name in getattr(gen, '_module_alias_names', ())):
-                register_module_member_function(gen, module_name, _mv)
             if _mv in gen.func_return_types:
                 _cvs = _callable_value_symbol(gen, node)
                 if _cvs is not None:
@@ -2716,8 +2723,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # feature gap — just no longer a hard runtime crash for it).
         if (module_name in gen.imported_symbols
                 and module_name not in gen.struct_field_types
-                and node.member in gen.struct_field_types
-                and node.member not in gen.var_types):
+                and node.member not in gen.var_types
+                and (node.member in gen.struct_field_types
+                     or (module_name in getattr(gen, '_module_alias_names', ())
+                         and module_member_is_struct(gen, module_name, node.member)))):
             t = gen._new_temp('int')
             build.assign(gen, f'{t}', f'0', f'  /* class value {module_name}.{node.member} — UNRESOLVED, class-as-value not modeled */')
             return 'int', t

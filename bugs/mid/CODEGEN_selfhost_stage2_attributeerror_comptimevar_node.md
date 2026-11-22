@@ -71,5 +71,7 @@ every `bootstrap-stage2-dumps` job exits 1 with:
 - Master's `comptime.py` already imports `_as_comptimevar_node` directly (`5128d44f3`), so the exact
   `_fc._as_comptimevar_node` read named above is gone from master; the fix covers the general shape
   that produced it.
-- Adjacent open shapes (not needed for this doc's criterion 1):
-  `bugs/CODEGEN_module_alias_attr_per_file_remaining_shapes.md`.
+- Adjacent open shapes (not needed for this doc's criterion 1): a module-alias CALL `h.f(...)` whose
+  name a same-named class or local def also holds, `bugs/CODEGEN_module_alias_call_shadowed_by_same_named_def.md`.
+  The value, class-body and class-as-value shapes of the same per-file read are fixed (pinned by
+  `test_codegen_module_alias_function_value.py`).

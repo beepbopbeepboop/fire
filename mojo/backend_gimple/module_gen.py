@@ -99,6 +99,7 @@ import mojo.backend_gimple.emit_calls as _gmi_emit_calls
 import mojo.backend_gimple.cpp_async as _gca
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
+from mojo.middle.calls_shared import _callable_value_symbol
 import mojo.middle.itcursor as itc
 from mojo.middle.funcs_shared import param_default_pairs
 from mojo.middle.types import _TUPLE_ANN_BY_NAME, _unpack_target_leaf_names
@@ -3613,6 +3614,16 @@ def _module_class_attr_global_stores(gen, cls):
         if _cfd is None or _as_str(_cfd[0]) != _aname:
             continue
         _ct = _module_class_attr_global_ctype(gen, _cfd[1])
+        # A FUNCTION value (`f = double_it`, `f = h.double_it`) is recorded as
+        # callable, so `Cls.attr(...)` calls through its global
+        # (emit_methods._class_attr_callable_call). It reads no module global,
+        # so the ctype rule above has no answer for it: its word is the
+        # function's address, and the store is what makes the global hold it.
+        _callable = _callable_value_symbol(gen, _cfd[1]) is not None
+        if _callable:
+            gen._callable_cattr_globals.add(_as_str(_mangled))
+            if _ct is None:
+                _ct = 'int64_t'
         if _ct is None:
             continue
         _line = getattr(cls, 'line', 0)

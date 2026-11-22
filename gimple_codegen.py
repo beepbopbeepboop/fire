@@ -1984,6 +1984,7 @@ class GimpleGen:
         # inner dict's value type fell back to a generic default and the
         # write lowered as `mojo_list_set_int`, SIGBUS. Confirmed via lldb.
         self._class_attrs: dict[str, dict[str, str]] = {}
+        self._callable_cattr_globals: set = set()    # _classattr_ globals whose class-body value is a FUNCTION (module scope), so `Cls.attr(...)` calls through the global (emit_methods._class_attr_callable_call)
         # Nested-annotated for the same reason as `_class_attrs` just above:
         # bare `dict` left the inner value kind unknown, so the compiled
         # compiler read `self._func_attrs[fn][attr]` through

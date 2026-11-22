@@ -1059,14 +1059,14 @@ def register_module_member_function(gen, module_name: str, member_name: str,
     of the module a bare `import M as module_name` alias names, so a use site
     resolves to that definition's real mangled symbol.
 
-    Both spellings of "a module member is a function" need exactly this:
-    the module-qualified CALL (`m.f(...)`, `_lower_method_call`'s two
-    branches) and the module-qualified VALUE (`x = m.f`, `_callable_value_
-    symbol` / `_lower_MemberExpr`). It lives here, in the middle tier, so
-    both reach one implementation — `_lower_MemberExpr` used to answer the
-    value form from `func_return_types` alone, and that table only carries
-    THIS module's own defs plus the defs of modules a whole-program INLINE
-    compile pulled in. The per-file (`do_imports=False`) path the bootstrap
+    This is the module-qualified CALL writer (`m.f(...)`, `_lower_method_call`'s
+    two branches, which re-dispatch on the bare name). The module-qualified
+    VALUE (`x = m.f`) does NOT use it: that form is answered by
+    `register_module_member_value`, keyed by the module-qualified C symbol, so
+    a same-named class or local def of the importer cannot shadow it. The
+    value form used to be answered from `func_return_types` alone, and that
+    table only carries THIS module's own defs plus the defs of modules a
+    whole-program INLINE compile pulled in. The per-file (`do_imports=False`) path the bootstrap
     dumps use inlines nothing, so `f = _fc._as_comptimevar_node` missed the
     branch and fell through to the generic dynamic-dispatch fallback — a
     `_mojo_dispatch_getattr(NULL, "_as_comptimevar_node")` on the module
@@ -1160,6 +1160,137 @@ def register_module_member_function(gen, module_name: str, member_name: str,
     else:
         _misses[_miss_key] = sub_ref
     return sub_ref, _raw
+
+
+def sanitize_module_qualifier(gen, q) -> str:
+    """The C qualifier a module's free functions carry in THIS compile: the
+    `module_qualifier` string rule, with the per-compile
+    `_inline_module_qualifiers` remap applied. An empty module name means "no
+    module" and sanitizes to no qualifier (the root compile's own GimpleGen is
+    built without one). `emit_funcs._func_qualifier` and
+    `module_member_function_csym` both need exactly this answer; this is the
+    one copy."""
+    from mojo.middle.module_shared import module_qualifier
+    if not q:
+        return ''
+    key = module_qualifier(q)
+    resolved = gen._inline_module_qualifiers.get(key, key)
+    return module_qualifier(resolved)
+
+
+def _module_member_home(gen, module_name: str, member_name: str, kind: str):
+    """`(module_ref, definer, defined_name)` for `<alias>.<member>` where
+    `alias` is a bare `import M as alias` binding, resolved through the
+    alias's own module and its re-export hops; None when no module behind the
+    alias defines `member` as a `kind` ('fn' or 'struct').
+
+    Answered by the MODULE, never by the TU-wide bare-name tables: a same-named
+    class or function in the importer is not a candidate at all."""
+    _info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
+    sub_ref = ((_info.get('module') if isinstance(_info, dict) else None)
+               or module_name)
+    try:
+        if kind == 'struct':
+            _defining = gen._find_struct_home_module(sub_ref, member_name)
+            if not _defining:
+                return None
+            return sub_ref, _as_str(_defining), member_name
+        _home = gen._find_symbol_home_module(sub_ref, member_name, kind,
+                                             want_name=True)
+    except Exception:
+        return None
+    if not _home or not _as_str(_home[0]):
+        return None
+    return sub_ref, _as_str(_home[0]), (_as_str(_home[1]) or member_name)
+
+
+def module_member_is_struct(gen, module_name: str, member_name: str) -> bool:
+    """Does the module `module_name` binds define `member_name` as a class?
+
+    The class-as-value read (`W = h.Widget`) asks THIS, not the TU-wide
+    `struct_field_types`, which holds only the classes of modules this compile
+    inlined: a per-file compile inlines nothing, so the class was invisible
+    and the read fell through to a dynamic `getattr` on the module marker."""
+    return _module_member_home(gen, module_name, member_name, 'struct') is not None
+
+
+def module_member_function_csym(gen, module_name: str, member_name: str):
+    """`(c_symbol, definer, defined_name, fs)` for `<alias>.<member>` read as a
+    FREE FUNCTION of the module the alias names, or None when no module behind
+    it defines a plain (non-generic) function of that name.
+
+    The C symbol is the one the DEFINING module's own compile emitted for
+    `def_name`: `<qualifier>_<name><overload suffix>` where the qualifier is the
+    definer's `sanitize_module_qualifier` and the suffix hashes the definer's
+    own parameter list (`_home_signature_ctypes`). Nothing here reads
+    `_func_csym(bare_name)`, `_func_mangleable(bare_name)` or any other
+    bare-name table, so an importer's class or local def of the same name
+    cannot change the answer (the case that used to hand back the class
+    typedef's address: `class double_it` beside `h.double_it`).
+
+    A name the definer defines twice (overloads) is not answered here: which
+    overload a bare value means needs a signature the value form does not
+    have, so None is returned and the caller keeps its own answer."""
+    _home = _module_member_home(gen, module_name, member_name, 'fn')
+    if _home is None:
+        return None
+    _sub_ref, definer, def_name = _home
+    _stmts = gen._parsed_import(definer)[2] or []
+    _defs = [s for s in _stmts
+             if isinstance(s, gimple_ctypes.FunctionDef) and _as_str(s.name) == def_name]
+    if len(_defs) != 1 or getattr(_defs[0], 'comptime_params', None):
+        return None
+    fs = _defs[0]
+    base = _as_str(gimple_ctypes._safe_name(def_name))
+    if def_name in gen._NO_OVERLOAD_MANGLE or def_name in gen._extra_no_mangle:
+        sym = base
+    else:
+        suffix = _as_str(gen.overload_suffix_for(gen._home_signature_ctypes(definer, fs)))
+        qualifier = sanitize_module_qualifier(gen, definer)
+        sym = (qualifier + '_' + base if qualifier else base) + suffix
+    return sym, definer, def_name, fs
+
+
+def register_module_member_value(gen, module_name: str, member_name: str):
+    """`(c_symbol, defined_name)` for the module-member function VALUE
+    `<alias>.<member>`, registering its extern under the C SYMBOL, or None
+    when the member is not a function of the aliased module.
+
+    The registration is keyed by `c_symbol` (e.g. `helper_double_it_9f63a2`),
+    not by the bare member name. A bare key is what the extern pass and every
+    `_func_csym(bare)` read go through, and that key is occupied TU-wide by any
+    same-named class, local def or other import, so a bare registration either
+    loses to it or is skipped (`_gmp_emit_imported_symbol_stubs` skips any
+    name in `struct_field_types`). A `csym` on the entry is the
+    extern's own name (`module_gen._gmp_emit_imported_symbol_stubs` reads it
+    before deriving one), and the signature is rewritten to say it too.
+
+    Idempotent: a second read of the same member finds the entry and returns."""
+    _found = module_member_function_csym(gen, module_name, member_name)
+    if _found is None:
+        return None
+    sym, definer, def_name, _fs = _found
+    _syms = _as_dict(gen.imported_symbols)
+    if sym in _syms:
+        return sym, def_name
+    try:
+        _exps, _qual = gen._local_sibling_module_exports(definer)
+    except Exception:
+        return None
+    _raw = (_exps or {}).get(def_name)
+    if not _raw:
+        return None
+    _entry = gen._resolved_export_entry(definer, def_name, _raw)
+    if not _entry:
+        return None
+    _entry = dict(_entry)
+    _entry['module'] = definer
+    _entry['csym'] = sym
+    if _entry.get('signature'):
+        _entry['signature'] = gimple_ctypes._replace_first_ident(
+            _as_str(_entry['signature']), def_name, sym)
+    gen._register_imported_symbol(sym, _entry, None, write_param_types=True)
+    return sym, def_name
 
 
 def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
@@ -1541,10 +1672,9 @@ def _note_struct_attr_alias(gen, module: str, alias: str, member: str) -> str | 
         `UnaryOp.operand` for a negative-step `range` by calling a NULL
         class value through `mojo_fnptr_call_1`.
 
-    No home-module confirmation, unlike the from-import spelling: there the
-    bare name could be an unrelated function, whereas `module.member` names
-    the attribute explicitly, so `member in struct_field_types` plus a base
-    that is a real module marker IS the confirmation. The base test is
+    The confirmation is that the aliased module itself defines `member` as a
+    class (`module_member_is_struct`), and that the class is one this compile
+    registered (`struct_field_types`). The base test is
     `gen._module_alias_names` — the set the plain-`import X as Y` scan
     fills, and the only one that means "namespace, not value"
     (`imported_symbols` also holds every `from X import name` binding, so
@@ -1555,6 +1685,14 @@ def _note_struct_attr_alias(gen, module: str, alias: str, member: str) -> str | 
     if member not in gen.struct_field_types:
         return None
     if module not in getattr(gen, '_module_alias_names', ()):
+        return None
+    # `member in struct_field_types` is a TU-wide bare-name test: a class of the
+    # IMPORTER with the same name would pass it, and `f = h.double_it` (where
+    # `h` is a module that defines only a FUNCTION `double_it`) then recorded
+    # `f -> double_it`, so every later `f(21)` built the importer's class
+    # instead of calling the function. The aliased module has to define the
+    # class itself; that is the confirmation the comment above relies on.
+    if not module_member_is_struct(gen, module, member):
         return None
     if module in gen.var_types or module in gen.struct_field_types:
         return None
