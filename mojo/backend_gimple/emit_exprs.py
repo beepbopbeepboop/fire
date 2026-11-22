@@ -4416,7 +4416,8 @@ def _kind_arith_operand(gen, ctype: str, val: str, op: str) -> bool:
         return False
     if not gen._word_may_be_box(val):
         return False
-    return not _as_str(gen._get_actual_type(ctype, val)).endswith(' *')
+    return not gimple_ctypes.TypeLattice.ends_in_star(
+        _as_str(gen._get_actual_type(ctype, val)))
 
 
 def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
