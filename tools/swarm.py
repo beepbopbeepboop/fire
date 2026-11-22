@@ -315,8 +315,8 @@ def enqueue_doc(doc, base, cls, name, start=None):
     p = T.plan(doc, continue_from=start)
     if start and not p["start_branch"]:        # the branch no longer has the doc (it was fixed there): start from master
         log("%s: its branch %s has no doc; starting from master" % (doc, start))
-    cmd = [sys.executable, os.path.join(HERE, "control.py"), "enqueue", name, "--claim", "bug:" + base,
-           "--task", p["text"], "--cls", cls]
+    cmd = [sys.executable, os.path.join(HERE, "control.py"), "enqueue", name,
+           *sum((["--claim", c] for c in C.doc_claims(base)), []), "--task", p["text"], "--cls", cls]
     if p["start_branch"]:
         cmd += ["--base", p["start_branch"]]
     return subprocess.run(cmd, capture_output=True, text=True, cwd=C.MAIN).returncode == 0
@@ -689,7 +689,7 @@ def replan_unserved():
             text = REPLAN_TASK % {"doc": "bugs/%s/%s.md" % (cls, base), "cls": cls,
                                   "slots": ", ".join(slots), "servable": ", ".join(servable)}
             subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "enqueue", name,
-                            "--claim", "bug:" + base, "--task", text, "--cls", "easy"],
+                            *sum((["--claim", c] for c in C.doc_claims(base)), []), "--task", text, "--cls", "easy"],
                            capture_output=True, text=True, cwd=C.MAIN)
             log("replan bugs/%s/%s.md: class %s has no slot (%s); queued %s to split it into parts at easy"
                 % (cls, base, cls, ", ".join(slots), name))
