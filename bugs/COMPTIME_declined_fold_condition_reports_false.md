@@ -78,6 +78,34 @@ answers `None`, and `eval_const_bool_state`'s last two lines turn that into
    the exact silent verdicts `CLAUDE.md` says a type/fold change can regress
    without failing anything.
 
+## Status 2026-11-22: option 2 measured, and it is blocked by 8 stdlib modules
+
+Option 2 was implemented and measured (the `eval_const_bool_state` change:
+`eval_const_bool(...) is None` -> CONST_UNKNOWN). Results:
+
+* The doc's whole table passes -- all 7 rows now print CPython's arm, checked
+  with `test_gimple_matches_cpython` (the oracle, not a hand-written
+  expectation), so the class IS closed by the change.
+* `test_gimple_runner.py`: 570 cases passed, 0 failed, before the run hit its
+  40-minute timeout (658 total).
+* `test_suite.py`: 458/0.
+* `compile_stdlib.py`: **FAILED: 8 (0 expected, 8 unexpected)** -- against a
+  recorded baseline of 610/0 unexpected. All 8 are `std/collections/deque.mojo`
+  and `std/collections/interval.mojo`, failing with
+  `error: non-trivial conversion in 'integer_cst'` (deque.mojo:798 is
+  `raise "ValueError: Given element is not in deque"`).
+
+So the change is exactly the regression the doc predicted: emitting BOTH arms
+for a declinable condition compiles code that used to be pruned, and that code
+does not build. **Option 2 is not landable until those 8 are understood** --
+either the newly-emitted arms are fixed, or the UNKNOWN answer is narrowed to
+the shapes that are safe. The change was reverted, not landed.
+
+Option 1 (teach `eval_const` the operators) is untested and has its own risk:
+`comptime.py` is compiled by the self-hosted compiler, so `l + r` on lists /
+`{**l, **r}` must be constructs that backend supports, which wants a
+`make bootstrap` byte-compare before it is trusted.
+
 ## Done when
 
 A module-level `if` over each row of the table above prints the CPython arm.
