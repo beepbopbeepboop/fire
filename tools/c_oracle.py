@@ -55,7 +55,10 @@ CORPUS = 'tools/pydiff_corpus'
 # MOJO_CORO=cpp, where every program MUST produce a companion .cpp.
 CPP_CORPUS = 'tools/cpp_corpus'
 STUB = re.compile(r'\{ mojo_print \(\(char \*\)"([^"]*): unavailable in compiled mode')
-CLOSURE_GB = 8
+# The whole-closure dump peaks above 8 GB (measured 2026-11-22: the base dump was
+# killed by memcap at the old 8 GB ceiling, a RESOURCE failure that the check then
+# recorded as a stub list). 20 GB leaves room; the memslot reservation is the same class.
+CLOSURE_GB = 20
 
 # Run in a child, with cwd and sys.path set to the tree being measured.
 CHILD = r'''
@@ -159,11 +162,19 @@ def closure_stubs(tree: str) -> list:
     cmd = [sys.executable, os.path.join(HERE, 'tools', 'memslot.py'), '--gb', str(CLOSURE_GB),
            '--label', 'c_oracle-closure', '--',
            sys.executable, os.path.join(tree, 'fire.py'), '--dump-full', os.path.join(tree, 'fire.py')]
-    subprocess.run(cmd, cwd=tmp, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log = os.path.join(tmp, 'dump.log')
+    with open(log, 'w') as lf:
+        rc = subprocess.run(cmd, cwd=tmp, env=env, stdout=lf, stderr=subprocess.STDOUT).returncode
     ci = os.path.join(tmp, 'fire.ci')
     if not os.path.exists(ci):
+        # Raise, never return a sentinel: a sentinel is cached as the base's
+        # stub list, and every later check then reports the whole closure as
+        # NEW stubs (measured 2026-11-22: the base dump failed silently and the
+        # real stub set, which the tree shares, was reported as a regression).
+        tail = open(log, errors='replace').read()[-800:]
         shutil.rmtree(tmp, ignore_errors=True)
-        return ['<no fire.ci: the closure dump failed>']
+        raise RuntimeError('closure dump of %s produced no fire.ci (exit %s); tail:\n%s'
+                           % (tree, rc, tail))
     names = sorted(set(STUB.findall(open(ci, errors='replace').read())))
     shutil.rmtree(tmp, ignore_errors=True)
     return names
