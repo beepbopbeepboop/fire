@@ -98,6 +98,27 @@ def ex_none() -> Ex:
     return Ex('none')
 
 
+def ex_text(text: str) -> Ex:
+    """An operand already spelled as C/C++ text (a lowered sub-expression)."""
+    e = Ex('str')
+    e.text = text
+    return e
+
+
+def ex_bin(a: Ex, op: str, b: Ex) -> Ex:
+    e = Ex('bin')
+    e.op = op
+    e.a = a
+    e.b = b
+    return e
+
+
+def ex_deref(a: Ex) -> Ex:
+    e = Ex('deref')
+    e.a = a
+    return e
+
+
 class Instr:
     def __init__(self, kind: str):
         self.kind: str = kind

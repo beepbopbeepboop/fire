@@ -8654,6 +8654,15 @@ def _cps_var_decl(gen, s, declared: dict, indent: str) -> list[str]:
     return []
 
 
+def _cpp_assign_line(lhs, rhs, indent: str) -> str:
+    """`lhs = rhs;` at `indent`, printed from the stage-2b `Instr` shape."""
+    from mojo.ir.instr import Instr
+    i = Instr('assign')
+    i.lhs = lhs
+    i.rhs = rhs
+    return indent + i.show()
+
+
 def _cps_aug_assign(gen, s, declared: dict, indent: str) -> list[str]:
     """`AugAssignStmt` in `_cpp_stmt`.
 
@@ -8684,11 +8693,17 @@ def _cps_aug_assign(gen, s, declared: dict, indent: str) -> list[str]:
     op = gimple_ctypes._GD_BIN_OPS.get(s.op, s.op)
     val = gen._cpp_expr(s.value)
     name = s.target.name
-    # Same by-reference dereference as AssignStmt just above --
-    # test_locks.mojo's own `rawCounter += 1` shape.
+    # `name = name op val;`, built as the stage-2b assignment shape
+    # (mojo/ir/instr.py). Same by-reference dereference as AssignStmt just
+    # above -- test_locks.mojo's own `rawCounter += 1` shape.
+    from mojo.ir.instr import ex_bin, ex_deref, ex_text, ex_var
     if name in gen._cpp_mut_capture_names:
-        return [f"{indent}*{name} = *{name} {op} {val};"]
-    return [f"{indent}{name} = {name} {op} {val};"]
+        lhs = ex_deref(ex_var(name))
+        rhs = ex_bin(ex_deref(ex_var(name)), op, ex_text(val))
+    else:
+        lhs = ex_var(name)
+        rhs = ex_bin(ex_var(name), op, ex_text(val))
+    return [_cpp_assign_line(lhs, rhs, indent)]
 
 
 def _cps_while_stmt(gen, s, declared: dict, indent: str) -> list[str]:

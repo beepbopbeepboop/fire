@@ -30,32 +30,31 @@ Stage 7's remaining half, in this order:
    `python3 tools/extract_arm.py --list mojo/backend_gimple/cpp_core.py <parent> 25`, which now
    prints `0 lines can be moved` for all five printers.
 
-## Status 2026-11-22 (sixth round): the first arm onto the IR is blocked by a self-host stub
+## Status 2026-11-22 (sixth round): the first printer arm is on the IR; the "blocker" was a checker fault
 
-Output: a measured blocker and a stashed change, no commit to `cpp_core.py`.
+Landed: `_cps_aug_assign` (the smallest arm) builds its `name = name op val;` line from the stage-2b
+shapes (`Instr('assign')` with `ex_var`/`ex_bin`/`ex_deref`/`ex_text`, new in `mojo/ir/instr.py`), printed
+by `_cpp_assign_line`. Behaviour is unchanged.
 
-- **Attempt.** `_cps_aug_assign` (the smallest arm) now builds its `name = name op val;` line from the
-  stage-2b shapes (`Instr('assign')`, a new `ex_text`/`ex_bin`/`ex_deref` in `mojo/ir/instr.py`).
-  Verified: `test_gimple_cpp_core_arms.py` 30/0; `c_oracle check --base 58726afc8` identical on all 285
-  C programs and all 13 coroutine C++ companions (the corpus has `+=` inside generator/async bodies, so
-  the arm is reached); `compile_stdlib.py` unchanged (the same 18 unexpected failures as the pre-round
-  base, no new failing module).
-- **Blocker.** `c_oracle check --closure` reports 3 NEW self-host stubs: `PRESENCE_WORD`,
-  `_IDENT_CHARS`, `_NONE_TYPE_MARKER` (base has 1, which is unchanged). These are module-level constants
-  in `mojo/middle/types.py` (2092, 2179) and `resolve_shared.py` (1730). Their global reads are emitted
-  correctly (`_mojo_middle_types_globals.PRESENCE_WORD`), and no bare call to them exists in `fire.ci`,
-  so the stub is a weak definition the closure still emits for each name. The trigger is the `mojo/ir`
-  code joining the closure, not the import's position: moving `from mojo.ir.instr import ...` inside the
-  function gives the same three stubs (re-measured). Root cause is not yet known; the self-host gap is the
-  one the workers doc calls the blind spot.
-- **Parked, recoverable.** The change is in `git stash` as `stash@{0}` ("GIR stage7 _cps_aug_assign IR
-  move"), not landed, so `master` is unchanged by it.
+Verified against `5399414e1` (the commit before this round):
 
-**Next step (one bounded question):** find why a module-level constant read from a function in an
-already-closed module becomes a weak stub once `mojo.ir.*` is in the closure. Measure first:
-`grep -n 'PRESENCE_WORD' fire.ci` on a dump with and without the `mojo/ir` import, and the emitted
-definition for `mojo_middle_types__mojo_global_get_PRESENCE_WORD` in each. Land a fix for that before
-re-applying the stash, which then needs only `git stash pop` and the same oracle and closure checks.
+- `test_gimple_cpp_core_arms.py`: 30 arms, 0 failures.
+- `c_oracle check`: all 285 `pydiff_corpus` programs identical C; all 13 `cpp_corpus` coroutine programs
+  identical C++ companion (the corpus has `+=` inside generator and async bodies, so the arm is reached).
+- `c_oracle check --closure`: no new stubs, 3 == 3 (`PRESENCE_WORD`, `_IDENT_CHARS`, `_NONE_TYPE_MARKER`
+  on both sides).
+- `compile_stdlib.py`: the same 18 unexpected failures as the pre-round base, same module set.
+
+**Correction to the earlier "blocker".** Those three stubs were never new. They are in base too. The
+earlier report came from a checker fault, fixed in `5399414e1`: a failed closure dump (the base dump was
+killed at the old 8 GB memcap ceiling) was cached as a stub list, so the base and the tree were compared
+against failure messages. The ceiling is now 20 GB. The three stubs are a pre-existing self-host gap
+(module-level constants imported by `module_gen.py` and read in `resolve_shared.py`); they are not caused
+by stage 7 and are not fixed here.
+
+**Next arms** (one at a time, each with the same four checks): `_cps_while_stmt`, then the other
+`_cps_*` arms smallest first. Each one needs its own expression shapes in `mojo/ir/instr.py`, because
+the C++ text is built by the parent printer, not by `build.py`.
 
 ## Status 2026-11-22 (fifth round): stage 7's shape step is landed — all 30 printer arms are functions
 
