@@ -1116,10 +1116,27 @@ def register_module_member_function(gen, module_name: str, member_name: str,
         # a string (the same reason `_as_str` guards every other dict read in
         # this file).
         return _as_str(_misses[_miss_key]), None
+    # The DEFINER and the name it knows the member by, from ONE walk. A
+    # re-export that RENAMES (`from impl import double_it as dt`) binds `dt`
+    # only in the re-exporting namespace; `impl` exports `double_it`, and
+    # the export lookup below — and the mangled symbol `_func_csym` builds
+    # from the registered entry — are keyed on the DEFINER's spelling.
+    # `want_name` answers both halves from the same hop walk the module-only
+    # question uses, so the two cannot drift.
+    _def_name = member_name
+    _defining = None
     try:
-        _defining = gen._find_symbol_home_module(sub_ref, member_name, 'fn')
+        _home = gen._find_symbol_home_module(sub_ref, member_name, 'fn',
+                                             want_name=True)
     except Exception:
-        _defining = None
+        _home = None
+    if _home:
+        _home_mod = _as_str(_home[0])
+        _home_name = _as_str(_home[1])
+        if _home_mod:
+            _defining = _home_mod
+        if _home_name:
+            _def_name = _home_name
     if _defining and _defining != sub_ref:
         sub_ref = _defining
     try:
@@ -1132,13 +1149,13 @@ def register_module_member_function(gen, module_name: str, member_name: str,
         _exps, _qual = gen._local_sibling_module_exports(sub_ref)
     except Exception:
         _exps, _qual = None, None
-    _raw = (_exps or {}).get(member_name)
+    _raw = (_exps or {}).get(_def_name)
     if _raw:
-        _entry = gen._resolved_export_entry(sub_ref, member_name, _raw)
+        _entry = gen._resolved_export_entry(sub_ref, _def_name, _raw)
         if _entry:
             _entry = dict(_entry)
             _entry['module'] = sub_ref
-            gen._register_imported_symbol(member_name, _entry, member_name,
+            gen._register_imported_symbol(member_name, _entry, _def_name,
                                           write_param_types=True)
     else:
         _misses[_miss_key] = sub_ref
@@ -1168,7 +1185,7 @@ def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
     return False
 
 def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int = 0,
-                              want_abs: bool = False):
+                              want_abs: bool = False, want_name: bool = False):
     """The module ref whose own source DIRECTLY defines top-level `name`,
     starting from `module` and following its `from X import name` statements
     transitively (re-export chains). None if no reachable module defines it
@@ -1183,6 +1200,15 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
     caller absolutizing for itself and getting the base wrong (a relative
     ref resolved against the IMPORTING module is a different file whenever
     the hop chain is more than one level deep).
+
+    `want_name` answers with `(module, defined_name)` instead of the module
+    alone — the name the walk's LAST hop exported, which differs from the
+    caller's `name` exactly when a re-export RENAMES (`from impl import
+    double_it as dt` binds `dt` locally but the defining module knows the
+    symbol as `double_it`, and both the export lookup and the mangled
+    symbol are keyed on the DEFINER's spelling). The walk itself is the
+    same, which is why this is a mode of this function rather than a
+    second copy of the hop logic.
 
     Why this exists: the module a client imports a symbol FROM and the
     module that DEFINES it are two different modules whenever the former
@@ -1242,12 +1268,15 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
     key = kind + '\x1f' + module + '\x1f' + name
     if want_abs:
         key = key + '\x1fabs'
+    if want_name:
+        key = key + '\x1fname'
     if key in cache:
         return cache[key]
     cache[key] = None
     if _module_defines_symbol(gen, module, name, kind):
-        cache[key] = module
-        return module
+        _home = (module, name) if want_name else module
+        cache[key] = _home
+        return _home
     _path, _src, stmts = gen._parsed_import(module)
     if not stmts:
         return None
@@ -1262,9 +1291,18 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
             # and keep the cycle/depth guards the walk already has.
             sub = gen._abs_module(st.module, module) if st.module.startswith('.') else st.module
             r = _find_symbol_home_module(gen, sub, name, kind, depth + 1,
-                                         want_abs=want_abs)
+                                         want_abs=want_abs, want_name=want_name)
             if r:
-                _raw = r if want_abs else (st.module if st.module.startswith('.') else r)
+                if want_name:
+                    # Both halves through `_as_str`: a tuple read back
+                    # through a recursive call's `object` return is not
+                    # statically a string on the self-hosted path.
+                    _rm = _as_str(r[0])
+                    if not want_abs and st.module.startswith('.'):
+                        _rm = _as_str(st.module)
+                    _raw = (_rm, _as_str(r[1]))
+                else:
+                    _raw = r if want_abs else (st.module if st.module.startswith('.') else r)
                 cache[key] = _raw
                 return _raw
             continue
@@ -1275,7 +1313,7 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
                 continue
             sub = gen._abs_module(st.module, module) if st.module.startswith('.') else st.module
             r = _find_symbol_home_module(gen, sub, nm, kind, depth + 1,
-                                         want_abs=want_abs)
+                                         want_abs=want_abs, want_name=want_name)
             if r:
                 # `r` is the spelling the NEXT hop used to reach the
                 # definition, which for a relative hop is absolute
@@ -1285,8 +1323,15 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
                 # differ. `r == sub` (the non-relative, therefore identical
                 # case) is by far the common one and is left untouched. With
                 # `want_abs` the caller asked for the parseable spelling, so
-                # `r` is already the answer.
-                _raw = r if want_abs else (st.module if st.module.startswith('.') else r)
+                # `r` is already the answer. `want_name` answers both halves:
+                # the same module spelling, and the name THIS hop exported.
+                if want_name:
+                    _rm = _as_str(r[0])
+                    if not want_abs and st.module.startswith('.'):
+                        _rm = _as_str(st.module)
+                    _raw = (_rm, _as_str(r[1]))
+                else:
+                    _raw = r if want_abs else (st.module if st.module.startswith('.') else r)
                 cache[key] = _raw
                 return _raw
     return None

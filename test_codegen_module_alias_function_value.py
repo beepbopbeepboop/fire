@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Regression test: `f = <module alias>.<function>` — a function VALUE read
-through a bare `import MOD as alias`, in the per-file (`do_imports=False`)
-single-module compile the bootstrap `--dump` stages use.
+"""Regression test: a function read as a VALUE through a bare
+`import MOD as alias`, in the per-file (`do_imports=False`) single-module
+compile the bootstrap `--dump` stages use.
 
 Bug (fixed here; the `CODEGEN_selfhost_stage2_attributeerror_comptimevar_node`
 doc is deleted with this fix): `_lower_MemberExpr` answered
@@ -28,10 +28,15 @@ correct.
 The fix registers the member through the SAME writer the module-qualified
 CALL path uses (`funcs_shared.register_module_member_function`), so
 `_func_csym` gets the definer's qualifier + overload suffix and the
-`_gmp_emit_imported_symbol_stubs` pass emits the matching extern. The test
-is an end-to-end RUN against CPython's own stdout rather than a C-text
-assertion alone, so a value that compiles but calls the wrong address is a
-failure too.
+`_gmp_emit_imported_symbol_stubs` pass emits the matching extern. A member
+the aliased module only RE-EXPORTS is resolved through the same hop walk
+(`_find_symbol_home_module` with `want_name`), for both the VALUE and the
+CALL spelling, including a re-export that RENAMES
+(`from impl import double_it as dt`).
+
+Every case is an end-to-end RUN against CPython's own stdout rather than a
+C-text assertion alone, so a value that compiles but calls the wrong address
+is a failure too.
 """
 
 import os
@@ -56,86 +61,133 @@ HELPER_SRC = (
     '    return x + 7\n'
 )
 
-# MODULE-scope and FUNCTION-scope both bind a function VALUE through the
-# alias: the first is the exact shape comptime.py had, the second the same
-# lowering reached from inside a body (a different scope frame, same branch).
-MAIN_SRC = (
-    'import helper as h\n'
-    '\n'
-    'f = h.double_it\n'
-    '\n'
-    'def go():\n'
-    '    g = h.offset\n'
-    '    print(f(21))\n'
-    '    print(g(35))\n'
-    '\n'
-    'go()\n'
-)
-
 ENTRY_SRC = 'int main(void) { return 0; }\n'
 
+# name -> (files, entry module, expected stdout, value_read).
+# Each entry module is compiled through `compile_module_to_c` — the
+# per-file `do_imports=False` path `fire.py --dump` uses — then every
+# module in the case is linked with the runtime and RUN.
+CASES = {
+    # MODULE-scope and FUNCTION-scope both bind a function VALUE through the
+    # alias: the first is the exact shape comptime.py had, the second the same
+    # lowering reached from inside a body.
+    'value_module_and_function_scope': (
+        {'helper.py': HELPER_SRC,
+         'main.py': ('import helper as h\n'
+                     '\n'
+                     'f = h.double_it\n'
+                     '\n'
+                     'def go():\n'
+                     '    g = h.offset\n'
+                     '    print(f(21))\n'
+                     '    print(g(35))\n'
+                     '\n'
+                     'go()\n')},
+        'main', '42\n42\n', True),
+    # A re-export that RENAMES: `dt` is bound in helper's namespace but the
+    # definition is impl's `double_it`, and the mangled symbol is keyed on
+    # the DEFINER's spelling.
+    'value_through_renamed_reexport': (
+        {'impl.py': HELPER_SRC,
+         'helper.py': 'from impl import double_it as dt\n',
+         'main.py': 'import helper as h\nf = h.dt\nprint(f(21))\n'},
+        'main', '42\n', True),
+    # The same renamed re-export, CALLED through the alias (the CALL
+    # spelling shares the hop walk).
+    'call_through_renamed_reexport': (
+        {'impl.py': HELPER_SRC,
+         'helper.py': 'from impl import double_it as dt\n',
+         'main.py': 'import helper as h\nprint(h.dt(21))\n'},
+        'main', '42\n', False),
+    # A re-export under its own name, called through the alias.
+    'call_through_reexport': (
+        {'impl.py': HELPER_SRC,
+         'helper.py': 'from impl import double_it\n',
+         'main.py': 'import helper as h\nprint(h.double_it(21))\n'},
+        'main', '42\n', False),
+    # A parameter default bound to a module-alias function value (the
+    # default-parameter path reaches `_callable_value_symbol` directly).
+    'value_as_parameter_default': (
+        {'helper.py': HELPER_SRC,
+         'main.py': ('import helper as h\n'
+                     'def go(g=h.double_it):\n'
+                     '    print(g(21))\n'
+                     'go()\n')},
+        'main', '42\n', True),
+    # A function-scoped import whose alias is used as a VALUE.
+    'value_function_scoped_import': (
+        {'helper.py': HELPER_SRC,
+         'main.py': ('def go():\n'
+                     '    import helper as h\n'
+                     '    f = h.double_it\n'
+                     '    return f(21)\n'
+                     'print(go())\n')},
+        'main', '42\n', True),
+}
 
-def main() -> int:
-    gcc = find_gcc()
+
+def _run_case(files, entry, want, value_read, gcc):
     failures = []
     with tempfile.TemporaryDirectory() as td:
         paths = {}
-        for name, src in (('helper', HELPER_SRC), ('main', MAIN_SRC)):
-            paths[name] = os.path.join(td, name + '.py')
-            with open(paths[name], 'w') as fh:
+        for rel, src in files.items():
+            path = os.path.join(td, rel)
+            if os.path.dirname(path):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as fh:
                 fh.write(src)
-        with open(os.path.join(td, 'entry.c'), 'w') as fh:
-            fh.write(ENTRY_SRC)
+            paths[rel] = path
+        entry_rel = entry + '.py'
 
         # Oracle: the fixture must be a valid program, or a compile refusal
         # below would be a harness mistake rather than a compiler bug.
-        py = subprocess.run([sys.executable, paths['main']],
+        py = subprocess.run([sys.executable, paths[entry_rel]],
                             capture_output=True, text=True, cwd=td,
                             env=dict(os.environ, PYTHONPATH=td),
                             timeout=RUN_TIMEOUT_S)
         if py.returncode != 0:
-            print(f"FAIL: CPython on the fixture exited {py.returncode} "
-                  f"({py.stderr[:400]}) — the fixture itself is wrong")
-            return 1
-        want = py.stdout
-        if want.strip() != '42\n42':
-            print(f"FAIL: CPython printed {want!r}, expected '42\\n42' — "
-                  "the fixture is not the shape this test pins")
-            return 1
+            failures.append(f"CPython on the fixture exited {py.returncode} "
+                            f"({py.stderr[:400]}) — the fixture itself is wrong")
+            return failures
+        if py.stdout != want:
+            failures.append(f"CPython printed {py.stdout!r}, expected "
+                            f"{want!r} — the fixture is not the shape this "
+                            "test pins")
+            return failures
 
         objs = []
-        for name in ('helper', 'main'):
+        order = ([r for r in paths
+                  if r.endswith('.py') and r != entry_rel] + [entry_rel])
+        for rel in order:
+            module = rel[:-3].replace(os.sep, '.')
             try:
-                c_text = compile_module_to_c(
-                    open(paths[name]).read(), paths[name], name)
+                c_text = compile_module_to_c(open(paths[rel]).read(),
+                                             paths[rel], module)
             except Exception as e:  # noqa: BLE001 — reported, not swallowed
-                failures.append(f"compile_module_to_c({name}) raised "
+                failures.append(f"compile_module_to_c({module}) raised "
                                 f"{type(e).__name__}: {e}")
-                c_text = ''
-            if not c_text or not c_text.strip():
-                failures.append(f"compile_module_to_c({name}) produced no C")
                 continue
-            if name == 'main':
-                # Non-vacuity + the defect itself: the VALUE has to be the
-                # registered function's address, not a runtime attribute read
-                # on the alias's placeholder module marker.
-                if not re.search(r'_funcptr_helper_double_it_\w+', c_text):
+            if not c_text or not c_text.strip():
+                failures.append(f"compile_module_to_c({module}) produced no C")
+                continue
+            if rel == entry_rel:
+                # The defect itself: a function VALUE must be the registered
+                # function's address, not a runtime attribute read on the
+                # alias's placeholder module marker.
+                if '_mojo_dispatch_getattr' in c_text and re.search(
+                        r'"(double_it|dt)"', c_text):
                     failures.append(
-                        "the importer's C has no `_funcptr_helper_double_it_*`"
-                        " — `f = h.double_it` was not lowered to a function"
-                        " value")
-                if not re.search(r'extern\s+[^;]*\bhelper_double_it_\w+\s*\(', c_text):
+                        "the importer's C still carries a member NAME as a "
+                        "dynamic-getattr string — the read fell through to "
+                        "the runtime dispatch that raises AttributeError on "
+                        "the NULL module marker")
+                if value_read and not re.search(
+                        r'_funcptr_\w*double_it_\w+', c_text):
                     failures.append(
-                        "the importer's C has no `extern ... helper_double_it_"
-                        "* (...)` declaration for the value it takes")
-                if '"double_it"' in c_text or '"offset"' in c_text:
-                    failures.append(
-                        "the importer's C still carries the member NAME as a "
-                        "dynamic-getattr string — the read fell through to the"
-                        " runtime dispatch that raises AttributeError on the "
-                        "NULL module marker")
-            c_file = os.path.join(td, name + '.gen.c')
-            obj = os.path.join(td, name + '.o')
+                        "the importer's C has no `_funcptr_*double_it_*` — "
+                        "the function VALUE was not lowered to a function")
+            c_file = os.path.join(td, rel.replace(os.sep, '_') + '.gen.c')
+            obj = c_file + '.o'
             with open(c_file, 'w') as fh:
                 fh.write(c_text)
             cc = subprocess.run(
@@ -143,15 +195,18 @@ def main() -> int:
                  c_file, '-o', obj],
                 capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
             if cc.returncode != 0:
-                failures.append(f"gcc -fgimple rejected {name}'s C:\n"
+                failures.append(f"gcc -fgimple rejected {module}'s C:\n"
                                 f"{cc.stderr[:2000]}")
             else:
                 objs.append(obj)
 
-        if len(objs) == 2:
+        if len(objs) == len(order):
+            entry_c = os.path.join(td, 'entry.c')
+            with open(entry_c, 'w') as fh:
+                fh.write(ENTRY_SRC)
             exe = os.path.join(td, 'prog')
             link = subprocess.run(
-                [gcc, '-o', exe, *objs, os.path.join(td, 'entry.c'),
+                [gcc, '-o', exe, *objs, entry_c,
                  str(ROOT / 'runtime' / 'fire_runtime.c')],
                 capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
             if link.returncode != 0:
@@ -170,15 +225,25 @@ def main() -> int:
                     failures.append(
                         f"the built program printed {run.stdout!r}; CPython "
                         f"printed {want!r}")
+    return failures
+
+
+def main() -> int:
+    gcc = find_gcc()
+    failures = []
+    for name, (files, entry, want, value_read) in CASES.items():
+        for failure in _run_case(files, entry, want, value_read, gcc):
+            failures.append(f"[{name}] {failure}")
 
     if failures:
         print("FAILED:")
-        for f in failures:
-            print("  " + f)
+        for failure in failures:
+            print("  " + failure)
         return 1
 
-    print("PASS: `f = <module alias>.<function>` is a real function value in "
-          "the per-file compile; the program runs and prints CPython's answer")
+    print(f"PASS: a function VALUE read through a module alias is a real "
+          f"function value in the per-file compile ({len(CASES)} shapes); "
+          "each program runs and prints CPython's answer")
     return 0
 
 

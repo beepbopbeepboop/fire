@@ -3937,6 +3937,36 @@ def _lmc_name_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, st
                 _mgc_src = ''
             _mgc_def_count = len(gimple_ctypes.source_decl_ends(
                 _mgc_src, ['fn', 'def'], method_name, '('))
+            # A module that only RE-EXPORTS the member (`from impl import
+            # double_it as dt`) has no `def dt` of its own; the definition —
+            # and therefore the mangled symbol and the plain-function call —
+            # lives in the module the hop names, under the DEFINER's
+            # spelling. Resolve both halves through the one hop walk the
+            # VALUE spelling uses (`_find_symbol_home_module` with
+            # `want_name`, then the same `_register_sibling_module_member`
+            # below), instead of falling through to the
+            # `mojo_module_not_compiled` raise for a function that is
+            # perfectly compilable.
+            _mgc_def_src = _mgc_src
+            _mgc_def_name = method_name
+            if _mgc_def_count == 0:
+                try:
+                    _mgc_home = gen._find_symbol_home_module(
+                        _mgc_sub_ref, method_name, 'fn', want_name=True)
+                except Exception:
+                    _mgc_home = None
+                _mgc_home_ref = _as_str(_mgc_home[0]) if _mgc_home else ''
+                if _mgc_home_ref and _mgc_home_ref != _mgc_sub_ref:
+                    for _mgc_cand in gen._module_candidate_paths(_mgc_home_ref):
+                        if gimple_ctypes.os.path.exists(_mgc_cand):
+                            try:
+                                _mgc_def_src = open(_mgc_cand).read()
+                            except Exception:
+                                _mgc_def_src = _mgc_src
+                            break
+                    _mgc_def_name = _as_str(_mgc_home[1])
+                    _mgc_def_count = len(gimple_ctypes.source_decl_ends(
+                        _mgc_def_src, ['fn', 'def'], _mgc_def_name, '('))
             # Try libm for math functions early
             try:
                 _libm_m = None
@@ -3946,8 +3976,8 @@ def _lmc_name_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, st
                 pass
             _mgc_is_plain_fn = (
                 _mgc_def_count == 1
-                and not gimple_ctypes.source_declares(_mgc_src, ['fn', 'def'], method_name, '[')
-                and not gimple_ctypes.source_declares(_mgc_src, ['struct'], method_name, '[(:'))
+                and not gimple_ctypes.source_declares(_mgc_def_src, ['fn', 'def'], _mgc_def_name, '[')
+                and not gimple_ctypes.source_declares(_mgc_def_src, ['struct'], _mgc_def_name, '[(:'))
             if _mgc_is_plain_fn:
                 # Re-dispatch as a BARE-name call through `_lower_call`
                 # (exactly `_selfhost_sibling_member_kind`'s own

@@ -18,5 +18,7 @@ Step 4 of the plan: change the storage to ONE record per temp whose kind is one 
 
 - Generated C changes only where the new kind says it should; review the diff per function on
   `tools/pydiff_corpus` (hash `compile_to_gimple_with_cpp` before and after).
-- `test_gimple.py` passes, `make bootstrap` gets past stage2 dumps (blocked; see
-  `CODEGEN_selfhost_stage2_attributeerror_comptimevar_node.md`).
+- `test_gimple.py` passes, `make bootstrap` gets past stage2 dumps (blocked
+  upstream; the stage-1/2 gate docs under `bugs/` are the switches, and the
+  per-file module-alias attribute shapes still open are in
+  `bugs/CODEGEN_module_alias_attr_per_file_remaining_shapes.md`).
