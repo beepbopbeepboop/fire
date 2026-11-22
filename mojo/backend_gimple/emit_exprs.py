@@ -191,9 +191,9 @@ _INT_ARITH_OPS = frozenset(('+', '-', '*', '/', '&', '|', '^', '~', '<<', '>>', 
 
 def _mark_known_int(gen, operand_vals: list, res_type: str,
                     res_val: str) -> None:
-    """Record `res_val` as a proven integer (`gen._word_mark_int_word`) when
-    every value in `operand_vals` is already recorded there and `res_type` is
-    a plain integer.
+    """Record `res_val` in `gen._int_word_vals` when every value in
+    `operand_vals` is already recorded there and `res_type` is a plain
+    integer.
 
     `_lower_IntLiteral` seeds that set with integer LITERALS, which is enough
     for `d[3000000000] = 1` and for a local bound from one — but not for the
@@ -223,10 +223,11 @@ def _mark_known_int(gen, operand_vals: list, res_type: str,
     """
     if not gimple_ctypes.TypeLattice.is_int_word(res_type):
         return
+    _iwv = gen._words.int_word
     for _v in operand_vals:
-        if not gen._word_is_int_word(_v):
+        if _v not in _iwv:
             return
-    gen._word_mark_int_word(res_val)
+    _iwv.add(res_val)
 
 
 def _lower_IntLiteral(gen, node) -> tuple[str, str]:
@@ -4410,8 +4411,10 @@ def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
     whatever the box holds, and the tail's double arm already gives that."""
     if op not in ginf._FLOAT_PARAM_OPS:
         return None
-    _tag_l = gen._word_is_tagged(lv)
-    _tag_r = gen._word_is_tagged(rv)
+    _tagged = gen._words.tagged
+    _boxed = gen._words.boxed
+    _tag_l = lv in _tagged and lv in _boxed
+    _tag_r = rv in _tagged and rv in _boxed
     if not (_tag_l or _tag_r):
         return None
     if not gimple_ctypes.TypeLattice.is_int_word(lt) or not gimple_ctypes.TypeLattice.is_int_word(rt):
@@ -4453,8 +4456,10 @@ def _tagged_cmp_select(gen, op: str, left_node, lt: str, lv: str,
     temp (`_Bool`), or None when the shape does not apply."""
     if op not in ('<', '<=', '>', '>='):
         return None
-    _tag_l = gen._word_is_tagged(lv)
-    _tag_r = gen._word_is_tagged(rv)
+    _tagged = gen._words.tagged
+    _boxed = gen._words.boxed
+    _tag_l = lv in _tagged and lv in _boxed
+    _tag_r = rv in _tagged and rv in _boxed
     if not (_tag_l or _tag_r):
         return None
     if not gimple_ctypes.TypeLattice.is_int_word(lt) or not gimple_ctypes.TypeLattice.is_int_word(rt):
@@ -4735,25 +4740,6 @@ def _narrow_int_binop(gen, lv: str, c_op: str, rv: str, dt: str) -> str:
     return gen._cast(dt, w)
 
 
-def _declared_scalar_int_param(gen, name: str) -> bool:
-    """Does PARAMETER `name` have a source annotation that names a scalar
-    integer (or bool) itself?
-
-    The DECLARED spelling is the evidence, not the resolved ctype: `_resolve_type`
-    erases `Optional[Int]` to `int64_t` (`Optional`'s inner type at
-    `mojo/middle/types.py`) and answers `int64_t` for `object`, `Any` and any
-    name it cannot resolve at all, so an `int64_t` parameter may still hold
-    None. `_annotation_scalar_family` is the one predicate that names a
-    scalar annotation (`Int`, `Int8`.., `UInt`.., `Bool`, `Byte`, `Index`,
-    `c_int`, `SIMD[DType.int32, N]`, ...) and answers None for a wrapper or an
-    unresolved alias, which is exactly the conservative answer this needs."""
-    _src = (getattr(gen, '_cur_param_decl_ann', None) or {}).get(name)
-    if _src is None:
-        return False
-    from mojo.backend_gimple.emit_stmts import _annotation_scalar_family
-    return _annotation_scalar_family(_src) in ('int', 'bool')
-
-
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -4793,6 +4779,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # boxed operand keeps the word compare: a list or tuple slot that is None
     # is a bare NULL word with no box, which the kind read would call "not
     # None" (pinned by `run_tagged_none_identity_tests`).
+    _tagged = gen._words.tagged
     if op in ('==', '!=', 'is', 'is not') and _is_none_literal(left_node) != _is_none_literal(right_node):
         _other = rv if _is_none_literal(left_node) else lv
         _other_t = rt if _is_none_literal(left_node) else lt
@@ -4814,8 +4801,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # A float box answers 0 here, which is the right answer for a float.
         if (gimple_ctypes.TypeLattice.is_int_word(_other_t)
                 and (gen._word_may_be_box(_other) or _mixed_none)
-                and (not _ident or gen._word_is_tagged(_other)
-                     or _for_tagged or _mixed_none)):
+                and (not _ident or _other in _tagged or _for_tagged or _mixed_none)):
             _is_none = gen._call_expr('int', 'mojo_word_is_none', [('int64_t', _other)])
             _cmp = '!= 0' if op in ('==', 'is') else '== 0'
             _t = gen._new_temp('_Bool')
@@ -4825,21 +4811,10 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # is a constant False/True, because 0 is an integer and None is not it.
     # The generic identity arm below compares the words, and None is the word
     # 0 for a plain `int64_t` (`n = 0; n is None` answered True). Only
-    # evidence about the VALUE (a scalar-shaped expression, a parameter whose
-    # DECLARED annotation is a scalar integer, or a local whose every binding
-    # is an int literal / int arithmetic) may answer this: an UNANNOTATED
-    # parameter is a word of unknown kind that may be None, and a `char *`
-    # keeps its NULL test.
-    #
-    # The parameter case reads the SOURCE annotation, never the resolved C
-    # type. `_resolve_type` maps `Optional[Int]` — and `object`, `Any`, and
-    # any name it cannot resolve — to `int64_t`, so the C type says nothing
-    # about whether the value can be None. Reading it folded
-    # `if stop is None:` to a constant False for
-    # `def try_index(..., stop: Optional[Int] = None)` (list.mojo), which took
-    # the wrong arm AND emitted a bare integer_cst into a `_Bool` temp that
-    # -fgimple rejects once the function is large enough — the 2026-11-21
-    # stdlib-dylib red (list/deque/interval/os/process fell back to source).
+    # evidence about the VALUE (a scalar-shaped expression, an annotated int
+    # parameter, or a local whose every binding is an int literal / int
+    # arithmetic) may answer this: an UNANNOTATED parameter is a word of
+    # unknown kind that may be None, and a `char *` keeps its NULL test.
     if op in ('is', 'is not') and (_is_none_literal(left_node) != _is_none_literal(right_node)):
         _on = right_node if _is_none_literal(left_node) else left_node
         _ot = rt if _is_none_literal(left_node) else lt
@@ -4849,8 +4824,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         elif isinstance(_on, gimple_ctypes.IdentExpr) and gimple_ctypes.TypeLattice.is_int_word_or_bool(_ot):
             _onm = _as_str(_on.name)
             _oann = (getattr(gen, '_cur_param_ann', None) or {}).get(_onm)
-            if (gimple_ctypes.TypeLattice.is_int_word_or_bool(_oann)
-                    and _declared_scalar_int_param(gen, _onm)):
+            if gimple_ctypes.TypeLattice.is_int_word_or_bool(_oann):
                 _proven_int = True
             elif _onm not in getattr(gen, '_cur_untyped_params', ()):
                 try:
@@ -4861,11 +4835,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         if _proven_int:
             _t = gen._new_temp('_Bool')
             _ans = 0 if op == 'is' else 1
-            # An explicit `(_Bool)` cast, never a bare integer_cst: GIMPLE
-            # rejects `_t = 0;` for a `_Bool` lvalue ("non-trivial conversion
-            # in 'integer_cst'"), exactly as `_lower_compare_chain` documents
-            # for its own constant arms.
-            gen._cast_into(_t, '_Bool', f"{_ans}")
+            gen._copy(_t, f"{_ans}")
             return '_Bool', _t
 
     # Int / Int is true division: Python and Mojo answer a Float64, never an
@@ -4977,6 +4947,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # above answers it by the box's kind. The arm below serves what is left:
     # the comparisons and bitwise operators beside an int, which keep the
     # truncating read (`mojo_box_int`).
+    _tagged = gen._words.tagged
     # A tagged word beside an integer under arithmetic: the run-time select
     # by the box's kind (see `_tagged_arith_select`).
     _tsel = _tagged_arith_select(gen, op, left_node, lt, lv, right_node, rt, rv)
@@ -4993,9 +4964,10 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # the integer-operand case. A str operand is not numeric and is excluded:
     # `x + "!"` keeps its concatenation lowering.
     if op in ginf._FLOAT_PARAM_OPS:
-        if gen._word_is_tagged(lv) and (gimple_ctypes.TypeLattice.is_int_word(rt) or gimple_ctypes.TypeLattice.is_float(rt)):
+        _boxed = gen._words.boxed
+        if lv in _tagged and lv in _boxed and (gimple_ctypes.TypeLattice.is_int_word(rt) or gimple_ctypes.TypeLattice.is_float(rt)):
             lv = _none_arith_guard(gen, op, lv, _numeric_type_name(rt), 1)
-        if gen._word_is_tagged(rv) and (gimple_ctypes.TypeLattice.is_int_word(lt) or gimple_ctypes.TypeLattice.is_float(lt)):
+        if rv in _tagged and rv in _boxed and (gimple_ctypes.TypeLattice.is_int_word(lt) or gimple_ctypes.TypeLattice.is_float(lt)):
             rv = _none_arith_guard(gen, op, rv, _numeric_type_name(lt), 0)
     # A BOXED operand beside a str under `+` is a string concatenation, for any
     # boxed value and not only a tagged word: Python's `int + str` and
@@ -5031,7 +5003,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             lv = gen._rt_call('int64_t', 'mojo_box_word', [f"{lv}"])
             lt = 'int64_t'
             gen._word_mark_dyn(lv)
-        elif gen._word_is_tagged(lv) and rt not in ('double', 'float'):
+        elif lv in _tagged and rt not in ('double', 'float'):
             lv = gen._rt_call('int64_t', 'mojo_box_int', [f"{lv}"])
             lt = 'int64_t'
         elif not _lv_ptr_kind:
@@ -5047,7 +5019,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             rv = gen._rt_call('int64_t', 'mojo_box_word', [f"{rv}"])
             rt = 'int64_t'
             gen._word_mark_dyn(rv)
-        elif gen._word_is_tagged(rv) and lt not in ('double', 'float'):
+        elif rv in _tagged and lt not in ('double', 'float'):
             rv = gen._rt_call('int64_t', 'mojo_box_int', [f"{rv}"])
             rt = 'int64_t'
         elif not _rv_ptr_kind:

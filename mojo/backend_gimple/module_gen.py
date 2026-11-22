@@ -910,18 +910,18 @@ wrong-static-answer failure the whole table exists to avoid.
     The list-literal arm was MISSING, and the omission is what
     `CODEGEN_list_element_read_defaults_to_str_across_a_call` is:
     `_lower_list_literal` records the per-slot kinds of a heterogeneous
-    literal on the value (`mojo_list_set_kinds`) and records the per-slot
-    kinds fact on it (`gen._word_mark_slot_kinds`) — but only while THAT
-    function is being lowered. A `return [x, 1, s]` therefore described
-    itself perfectly and lost every word of it at the boundary, because this
-    function (which decides the cross-function half) did not recognise the
-    one producer that is not a `struct.unpack`. So
+    literal on the value (`mojo_list_set_kinds`) and marks it in
+    `gen._maybe_kinds_vals` — but only while THAT function is being
+    lowered. A `return [x, 1, s]` therefore described itself perfectly
+    and lost every word of it at the boundary, because this function
+    (which decides the cross-function half) did not recognise the one
+    producer that is not a `struct.unpack`. So
     `def mixed(x: Float64, s: String): return [x, 1, s]` bound to a local in
     the caller left that local's element type at the unknown-element default
     `str`, and every read of it went through `mojo_list_get_str` — so `a[0]`,
     which holds `2.5`'s IEEE-754 bit pattern `0x4004000000000000`, was handed
     to `strlen` and the program died with SIGSEGV. Marking the callee makes
-    the call site record the same per-slot-kinds fact on the result
+    the call site register the result in `_maybe_kinds_vals`
     (`emit_calls.py`'s `_lower_named_call`), which is the flag the subscript
     and iteration lowerings already consult for `mojo_list_get_boxed`.
 
@@ -1019,7 +1019,7 @@ def _infer_return_maybe_kinds(gen, body, params=None,
     (iteration, a computed subscript) has to be lowered as a BOXED read
     (mojo_list_get_boxed), and whether it may be is a compile-time
     decision. Inside one function the marker rides along on the local name
-    (`gen._word_has_slot_kinds`); across a `return` it cannot, so it is
+    (`gen._maybe_kinds_vals`); across a `return` it cannot, so it is
     inferred here and read back at the call site, the same
     whole-program-then-lower-the-callee shape Pass 2c already uses for
     `_return_elem_types`.
@@ -14477,6 +14477,14 @@ def gen_module_impl(self, stmts: list):
             'line': 'int64_t',
             'col': 'int64_t',
         }
+        # `comptime_params` is the bracket parameter block of a generic
+        # comptime alias — the parser records it (a list of names, or None
+        # before the brackets), so the emitted struct must define the member
+        # or the first compiled reader of it (mojo/middle/comptime.py's
+        # `_comptime_alias_template` / `_eval_alias_application`) names a
+        # member gcc rejects. Container spelling per the `list` annotation,
+        # the one `ComptimeForStmt.body` uses; NOT boxed like `value` (that
+        # is an `object`, see struct_boxed_fields).
         self.struct_field_types['ComptimeVarStmt'] = {
             'target': 'char *',
             'value': 'int64_t',
@@ -14484,6 +14492,7 @@ def gen_module_impl(self, stmts: list):
             'where_clause': 'char *',
             'line': 'int64_t',
             'col': 'int64_t',
+            'comptime_params': 'MojoList *',
         }
         self.struct_field_types['GlobalStmt'] = {
             'names': 'MojoList *',

@@ -289,75 +289,42 @@ that is meant to be behaviour-preserving:
   This CHANGES generated code: 33 compiler modules compile differently
   (about 770 fewer statements; a boxed fallback read becomes a typed read
   where the element type is now known). Small programs are unchanged.
-  The six dynamic-word facts (`_boxed_vals`, `_dyn_word_vals`,
+  NOT carried yet: the six dynamic-word SETS (`_boxed_vals`, `_dyn_word_vals`,
   `_tagged_word_vals`, `_int_word_vals`, `_maybe_kinds_vals`,
-  `_boxed_container_vals`) joined it in stage 5b step 4 (below), which
-  carries `dyn` / `int_word` / `slot_kinds` / `boxed_container` across a copy,
-  turns a copied Box into a `DynWord` (the read-side half), and records why
-  the Box kind itself does not travel: its carry needs the bind-side
-  "needs boxing" fact to be split from the read-side "is a box".
-- **Stage 5b. One value-info record. LANDED 2026-11-21 (steps 1-4).**
-  The name-keyed tables are fields of one `ValueInfo` record per temp:
-  `kind` is `Int / Erased(T) / DynWord / Box / Plain` and three flags
-  (`Tagged`, `SlotKinds`, `BoxedContainer`) carry the facts that are not a
-  kind. `int64_t` therefore splits into
+  `_boxed_container_vals`). Carrying them was measured and changes far more
+  (it adds ~1,200 box/repr calls); each needs its own look.
+- **Stage 5b. One value-info record.** The name-keyed tables become fields
+  of one `ValueInfo` object per temp. `int64_t` splits into
   Int / Erased(T) / DynWord / Box in the value's info.
   *Measured 2026-11-20 (the guide for the next round).* The six
   dynamic-word sets, by uses / files / writers (`.add`, `.update`, `[x] =`):
   `_boxed_vals` 93/11/30, `_dyn_word_vals` 75/8/51, `_tagged_word_vals`
   61/7/19, `_int_word_vals` 46/7/9, `_maybe_kinds_vals` 84/11/33,
-  `_boxed_container_vals` 17/6/8: about 376 sites.
-  Plan, in order, each step byte-identical C on `tools/pydiff_corpus` except
-  step 4, which the plan allows to change C (hash
-  `compile_to_gimple_with_cpp` output before and after, review per program):
+  `_boxed_container_vals` 17/6/8: about 376 sites. Each is created in
+  `GimpleGen.__init__` AND again in `emit_infra.py` (lines near 248, 424, 509,
+  698), emptied per function (`.clear()` near 368, 549, 1296-1305), and saved
+  and restored across nested function bodies by `FuncState`
+  (`emit_infra.py` ~958-1310: an `fs_*` field and an `fs_*_items` copy for
+  each). Two of them (`_boxed_vals`, `_tagged_word_vals`) have the save code
+  written TWICE in `FuncState`; the rebinding is deliberate (a rebind in
+  `__init__` leaks under the self-hosted compiler), so do not "simplify" it.
+  Plan, in order, each step byte-identical C on `tools/pydiff_corpus` (hash
+  `compile_to_gimple_with_cpp` output before and after):
   1. (LANDED 2026-11-20, byte-identical on 284 programs) A plain class `WordFacts` (new `mojo/middle/valueinfo.py`) that OWNS the
      six sets and has `save()` / `restore(saved)`; `FuncState` keeps ONE
-     `fs_words` instead of twelve fields.
-   (Steps 2 and 3 LANDED 2026-11-20: 100 readers and 148 writers go through the `gen._word_*` wrappers; `test_type_string_ratchet.py` counts the direct spelling, now 0. `== 'int64_t'` also moved to `TypeLattice.is_word`, 405 -> 101.)
+     `fs_words` instead of twelve fields; the six `gen._x_vals` names stay
+     bound to the same set objects (assigned once at construction, `.clear()`
+     per function), so no reader changes.
+  (Steps 2 and 3 LANDED 2026-11-20: 100 readers and 148 writers go through `gen._words`; `test_type_string_ratchet.py` counts the direct spelling, baseline 10 = the six `bind` lines and docs. `== 'int64_t'` also moved to `TypeLattice.is_word`, 405 -> 101.)
   2. Add read predicates on it (`words.may_be_box(name)`, `words.is_tagged(name)`,
      `words.is_dyn(name)`, `words.is_int_word(name)`) and move the ~200 readers
      (`x in gen._boxed_vals`) onto them by codemod, as the type-string codemods
      did. Ratchet: a text count of `gen._boxed_vals` etc. may only shrink.
   3. Add writers (`words.mark_tagged(name)` ...) and move the ~150 writers.
-  4. (LANDED 2026-11-21) The storage is one `ValueInfo` record per temp,
-     holding the `Int / Erased(T) / DynWord / Box` kind and the three flags the
-     old sets spelled (`Tagged`, `SlotKinds`, `BoxedContainer`); the six
-     historical sets are derived READ-ONLY views (`WordFacts.boxed`, ...).
-     Two consequences a single kind forces, each measured over the 285 corpus
-     programs (`compile_to_gimple_with_cpp` output, before vs after) and
-     reviewed per program:
-     * `is_dyn` is true for a Box (a box is a word whose kind only the runtime
-       knows). 9 programs change C and NONE changes its CPython verdict (all 9
-       were already WRONG/CRASH): 4 print a boxed word through
-       `mojo_cstr_or_int_str` instead of `mojo_repr_boxed`, 4 ask
-       `mojo_truthy_word` instead of comparing the box against 0 (the correct
-       truthiness for a `False` box), and one stops folding an `isinstance`
-       over a word of runtime-known kind. Only 2 of the 9 change their stdout
-       at all, and in both the old and the new output is an address where
-       CPython prints a value — the programs were wrong before too. A Box may
-       also be a CONTAINER pointer (`mojo_list_get_boxed` hands one back), so
-       a lowering that asks `is_dyn` takes the runtime-word path there instead
-       of the typed-pointer one (e.g. an `or` merge of a boxed container
-       becomes an `int64_t` iterated through the runtime's kind dispatch).
-       That is safe (`mojo_truthy_word` handles registered lists/dicts/sets and
-       `mojo_cstr_or_int_str` renders boxes by kind), just less precise; the
-       bind/read split in the next item is where it gets refined.
-     * `Box` still does not travel AS a Box, and that is recorded, not
-       pending: a copy gets the READ-side half as `DynWord` (the runtime
-       decides the kind) but not the BIND-side one, and `Tagged` stays with
-       the Box kind. Carrying the Box kind for real makes
-       `mojo/middle/infra_infer.py` — a self-host-closure module — refuse to
-       compile (`_pn2 = _chosen.get('param_names') or []`: the `or` merge's
-       dict-get arm is tagged and the merge temp is stored into a
-       `MojoList *` local), because the bind path reads the value's tag as a
-       decision about the NAME's representation. Splitting the read-side
-       "kind is a runtime fact" from the bind-side "this name holds a box"
-       is the next step; `carry`'s docstring carries the full measurement and
-       `bugs/GIR_stage5b_box_carry_needs_the_bind_fact_split.md` is the work
-       doc.
-     `test_gimple.py`'s `test_word_facts_one_record_per_temp` pins the record,
-     the read-only views and the carry boundary; `test_gimple_runner.py`'s
-     `test_copy_of_a_dynamic_word_keeps_it` pins the copied dynamic word.
+  4. Only then change the storage to one `ValueInfo` per temp and give it the
+     `Int / Erased(T) / DynWord / Box` kind; that step is allowed to change C
+     (it is the one that carries the sets across copies, +~1,200 box/repr
+     calls measured), and must be landed alone with its own diff review.
 - **Stage 5c. Optional values (measured 2026-11-20; first slice landed).**
   Why the split in 5b matters, measured on `tools/pydiff_corpus`: of 240
   programs only 60 matched CPython, and the largest single cause (about a

@@ -39,11 +39,9 @@ PATTERNS = {
     # models yet, so it is the same debt and must not become the way around
     # the count above. Only `_emit_raw` itself should call it.
     "build.raw( text": r"""\bbuild\.raw\(""",
-    # Stage 5b: the per-temp word facts are ONE `WordFacts` record map
-    # (mojo/middle/valueinfo.py: `may_be_box`, `mark_tagged`, ...). A direct
-    # `gen._boxed_vals` is the old spelling. The six sets themselves are gone
-    # (stage 5b step 4, 2026-11-21), and no prose names them through `gen.`
-    # either, so the baseline is 0 (it was 10 while the `bind` lines existed).
+    # Stage 5b: the six dynamic-word sets are read and written through
+    # `gen._words` (mojo/middle/valueinfo.py: `may_be_box`, `mark_tagged`, ...).
+    # A direct `gen._boxed_vals` is the old spelling.
     "direct word-set use": r"""(?m)^(?![ \t]*#).*\b(?:gen|self)\._(?:boxed_vals|tagged_word_vals|dyn_word_vals|int_word_vals|maybe_kinds_vals|boxed_container_vals)\b""",
 }
 
@@ -59,7 +57,7 @@ BASELINE = {
     # call, and `build.raw` is the only text channel left (its own baseline).
     "gen._emit( text": 0,
     "build.raw( text": 1,
-    "direct word-set use": 0,
+    "direct word-set use": 10,
 }
 
 # A pattern whose SUBJECT is narrower than "every backend module".  The
