@@ -116,6 +116,18 @@ def main() -> int:
     if len(files) < 10:
         failures.append('%s has %d program(s); the C++ lowering needs a corpus '
                         'that covers its shapes' % (oracle.CPP_CORPUS, len(files)))
+    # A program is Mojo source, and a Mojo-only one (a `struct`) is written as
+    # `.mojo`. corpus() has to list every such file, or it drops out of the
+    # oracle without any error: this is the case that was silently lost when
+    # corpus() globbed only `*.py`.
+    listed = {rel for rel, _ in files}
+    for dirpath, _dirs, names in os.walk(os.path.join(ROOT, oracle.CPP_CORPUS)):
+        for name in names:
+            if name.endswith('.mojo'):
+                rel = os.path.relpath(os.path.join(dirpath, name), ROOT)
+                if rel not in listed:
+                    failures.append('%s is a Mojo program but corpus() does not '
+                                    'list it, so the oracle never compares it' % rel)
 
     texts = {}
     for rel, path in files:
