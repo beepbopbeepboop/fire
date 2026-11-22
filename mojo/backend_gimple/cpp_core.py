@@ -8880,7 +8880,10 @@ def _cps_return_stmt(gen, s, indent: str) -> list[str]:
                 "bare `return` (no value) not supported in an async "
                 "function this step — a scalar return value is "
                 "required")
-        return [f"{indent}co_return {gen._cpp_expr(s.value)};"]
+        from mojo.ir.instr import Instr, ex_text
+        i = Instr('coreturn')
+        i.rhs = ex_text(gen._cpp_expr(s.value))
+        return [indent + i.show()]
     if s.value is not None:
         # Value-carrying `return` in an ELIGIBLE generator (see
         # _gen_cpp_generator_unit's eligibility computation): store
@@ -8893,13 +8896,21 @@ def _cps_return_stmt(gen, s, indent: str) -> list[str]:
         if _ret_store:
             _slot, _rct = _ret_store
             _rct_cpp = gimple_exprtypes._c_to_cpp_scalar_type(_rct)
-            return [f"{indent}{_slot} = ({_rct_cpp})({gen._cpp_expr(s.value)});",
-                    f"{indent}co_return;"]
+            from mojo.ir.instr import Instr, ex_none, ex_text
+            _st = Instr('assign')
+            _st.lhs = ex_text(_slot)
+            _st.rhs = ex_text(f"({_rct_cpp})({gen._cpp_expr(s.value)})")
+            _co = Instr('coreturn')
+            _co.rhs = ex_none()
+            return [indent + _st.show(), indent + _co.show()]
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             "`return <value>` inside a generator is not supported "
             "(a generator's `return` ends iteration with no value, "
             "unlike an ordinary function's `return`)")
-    return [f"{indent}co_return;"]
+    from mojo.ir.instr import Instr, ex_none
+    _co = Instr('coreturn')
+    _co.rhs = ex_none()
+    return [indent + _co.show()]
 
 
 def _cps_multi_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:

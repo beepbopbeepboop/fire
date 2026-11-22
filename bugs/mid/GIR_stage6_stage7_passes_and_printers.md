@@ -30,6 +30,18 @@ Stage 7's remaining half, in this order:
    `python3 tools/extract_arm.py --list mojo/backend_gimple/cpp_core.py <parent> 25`, which now
    prints `0 lines can be moved` for all five printers.
 
+## Status 2026-11-22 (seventh round): `co_return` is an IR shape; `_cps_return_stmt` is on the IR
+
+- `mojo/ir/instr.py` gained a `coreturn` kind (`co_return;` / `co_return <expr>;`).
+- `_cps_return_stmt` now builds all three of its branches from the IR: the helper `return` (earlier),
+  the async `co_return <expr>;`, and the generator's value store plus `co_return;` (an `assign` followed by a
+  `coreturn`), and the bare generator `co_return;`. No branch returns a literal text line any more.
+- Verified against `6f4d25d30`: `test_gimple_cpp_core_arms.py` 30/0; `c_oracle` identical on all 285 C
+  programs and all 13 coroutine C++ companions (the coroutine corpus exercises every `co_return` form);
+  `--closure` reports no new stubs (3 == 3).
+- Printer arms still returning C++ text: 26 of 30 (the `_cpx_*`/`_cps_*`/`_cpw_*`/`_cpy_*`/`_cpf_*`
+  arms other than `_cps_aug_assign` and `_cps_return_stmt`).
+
 ## Status 2026-11-22 (sixth round): the first printer arm is on the IR; the "blocker" was a checker fault
 
 Landed: `_cps_aug_assign` (the smallest arm) builds its `name = name op val;` line from the stage-2b

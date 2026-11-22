@@ -153,6 +153,11 @@ class Instr:
             if self.rhs.kind == 'none':
                 return 'return;'
             return 'return ' + self.rhs.show() + ';'
+        if k == 'coreturn':
+            # A C++ coroutine's `co_return` (the generator and async printers).
+            if self.rhs.kind == 'none':
+                return 'co_return;'
+            return 'co_return ' + self.rhs.show() + ';'
         if k == 'label':
             return self.label + ':'
         if k == 'comment':
