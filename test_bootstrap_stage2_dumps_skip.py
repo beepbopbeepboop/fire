@@ -54,6 +54,29 @@ class TestBootstrapStage2DumpsSkip(unittest.TestCase):
             os.path.exists(os.path.join(HERE, STALE_DOC)),
             '%s still exists: the job is wrongly documented as red' % STALE_DOC)
 
+    def test_edge_cases_is_skipped_not_red(self):
+        """bootstrap_test_edge_cases.mojo is one fanout item of bootstrap-stage2-dumps;
+        with bootstrap-stage2-cc disabled, it SKIPs behind the producer instead of
+        running against a missing stage2/mojo and dying on FileNotFoundError.
+
+        Before the scheduler fix (416ed660c) this item ran against a stage2/mojo
+        that was never built and died in a second on FileNotFoundError: './mojo'.
+        After the fix the whole fanout SKIPs behind the disabled producer, naming
+        bugs/gate-bootstrap-stage2-cc.md as the switch.
+        """
+        fanout = suite.REGISTRY.get('bootstrap-stage2-dumps')
+        self.assertIsNotNone(fanout, 'bootstrap-stage2-dumps fanout not registered')
+        self.assertIn('bootstrap-stage2-cc', fanout.deps,
+                      'bootstrap-stage2-dumps must depend on bootstrap-stage2-cc')
+        cc_spec = suite.REGISTRY.get('bootstrap-stage2-cc')
+        self.assertIsNotNone(cc_spec, 'bootstrap-stage2-cc not registered')
+        self.assertTrue(suite.is_disabled(cc_spec),
+                        'bootstrap-stage2-cc must be disabled so edge_cases SKIPs')
+        # edge_cases.mojo is tracked source and therefore an item of this fanout.
+        self.assertIn('bootstrap_test_edge_cases.mojo',
+                      ' '.join(fanout.items),
+                      'edge_cases must be one of the fanout items')
+
 
 if __name__ == '__main__':
     unittest.main()
