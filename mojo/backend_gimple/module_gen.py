@@ -13475,37 +13475,29 @@ def gen_module_impl(self, stmts: list):
     self._toplevel_dep_init_modules: list[str] = []
     self._import_module_comptime_vals = {}  # module qualifier → {name: comptime value} for import X
     _gmi_prefold_toplevel_comptime(self, stmts)
-    # Harvest module-level `alias NAME = <type>` declarations (two-statement
-    # form: `ExprStmt(IdentExpr('alias'))` + `AssignStmt(target=IdentExpr,
-    # value=<type expr>)`). Stored as annotation text so `_resolve_type` and
+    # Harvest module-level `alias NAME = <type>` declarations: the parser
+    # emits each as one AssignStmt marked `is_alias` (target=IdentExpr,
+    # value=<type expr>). Stored as annotation text so `_resolve_type` and
     # call lowering can expand the name wherever it is used as a type.
     try:
-        _stmts_list = list(stmts)
-        _i_alias = 0
-        while _i_alias + 1 < len(_stmts_list):
-            _s0 = _stmts_list[_i_alias]
-            _s1 = _stmts_list[_i_alias + 1]
-            if (isinstance(_s0, ExprStmt)
-                    and isinstance(getattr(_s0, 'value', None), IdentExpr)
-                    and _as_str(getattr(_s0.value, 'name', None)) == 'alias'
-                    and isinstance(_s1, AssignStmt)
+        for _s1 in stmts:
+            if not (isinstance(_s1, AssignStmt)
+                    and getattr(_s1, 'is_alias', False)
                     and isinstance(getattr(_s1, 'target', None), IdentExpr)):
-                _aname = _as_str(getattr(_s1.target, 'name', None))
-                if _aname:
+                continue
+            _aname = _as_str(getattr(_s1.target, 'name', None))
+            if _aname:
+                try:
+                    _aval = self._type_expr_to_ann(_s1.value)
+                except Exception:
+                    _aval = None
+                if not _aval:
                     try:
-                        _aval = self._type_expr_to_ann(_s1.value)
+                        _aval = _ann_to_str(self, _s1.value)
                     except Exception:
                         _aval = None
-                    if not _aval:
-                        try:
-                            _aval = _ann_to_str(self, _s1.value)
-                        except Exception:
-                            _aval = None
-                    if _aval:
-                        self._type_aliases[_aname] = _aval
-                _i_alias += 2
-                continue
-            _i_alias += 1
+                if _aval:
+                    self._type_aliases[_aname] = _aval
     except Exception:
         pass
     # Handle FromImportStmt (from X import NAME)

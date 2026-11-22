@@ -9851,15 +9851,14 @@ class Parser:
         # `alias` keyword, so `alias = ...`, `alias.attr`, `alias(...)` and
         # `alias, x = ...` are all ordinary identifier uses. Only commit to a
         # declaration when the shape that follows could actually BE one:
-        # `alias` then a name-like token then `=`, `:` or `[`. The binding
-        # stays an ordinary AssignStmt in the statement list (every consumer,
-        # including the interpreter and module_gen's type-alias harvest, sees
-        # exactly the two-statement form it saw before) but is marked
-        # `is_alias`, so a declaration is distinguishable from a plain
-        # module-level assignment without a line-pairing heuristic. The marker
-        # is what keeps unknown_decl_check from reporting the alias's value as
-        # a read — an alias value the folder cannot resolve must leave its
-        # consumer undecided, not become a false positive.
+        # `alias` then a name-like token then `=`, `:` or `[`. The declaration
+        # is the AssignStmt alone, marked `is_alias`: the keyword itself is not
+        # a statement, so no consumer (the interpreter, module_gen's type-alias
+        # harvest, the diagnostics passes) has to recognise a sentinel before
+        # it. The marker is also what keeps unknown_decl_check from reporting
+        # the alias's value as a read — an alias value the folder cannot
+        # resolve must leave its consumer undecided, not become a false
+        # positive.
         if t.kind == "NAME" and t.value == "alias":
             nxt, nxt2 = self._peek(1), self._peek(2)
             name_like = nxt.kind in ("NAME", "KW") or (
@@ -9867,10 +9866,11 @@ class Parser:
             if name_like and nxt2.kind in ("ASSIGN", "COLON", "LBRACKET"):
                 self._advance()  # consume 'alias'
                 inner = self._parse_stmt()
-                if isinstance(inner, AssignStmt):
-                    inner.is_alias = True
-                return [ExprStmt(IdentExpr(name='alias', line=line, col=col),
-                                 line=line, col=col), inner]
+                if not isinstance(inner, AssignStmt):
+                    raise SyntaxError(
+                        f"{self._loc(t)}`alias` must bind a name with `=`")
+                inner.is_alias = True
+                return inner
         if t.kind == "NAME" and t.value == "__enum":
             return self._parse_struct()
         if t.kind == "KW":
