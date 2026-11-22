@@ -315,9 +315,24 @@ def test_py_scalar_global_scanner_types_only_what_the_definer_types():
     assert ml._ml_py_global_ctype('list[int]', '[]', {}) == ''
 
 
+def test_py_global_typed_through_reexported_callee():
+    # `module_loader.STDLIB_PATH = _find_stdlib_path()`: the finder is defined
+    # in the leaf sibling `stdlib_path` and only re-exported here (f72b741eb),
+    # so a same-file callee lookup alone left the global unexported and its
+    # importers read it through a weak `extern int64_t STDLIB_PATH (...)` stub.
+    # The callee must be typed by the sibling that defines it.
+    import module_loader as ml
+    exports = ml.ModuleLoader().load_module_from_path(
+        os.path.join(HERE, 'module_loader.py'))
+    assert exports.get('STDLIB_PATH') == {
+        'kind': 'global_var', 'c_return_type': 'char *',
+        'home_module_path': os.path.join(HERE, 'module_loader.py')}, exports.get('STDLIB_PATH')
+
+
 if __name__ == '__main__':
     test_imported_global_has_no_function_stub()
     test_function_scoped_str_global_reads_accessor_not_stub()
     test_py_scalar_global_scanner_types_only_what_the_definer_types()
     test_py_str_literal_global_is_read_through_accessor()
+    test_py_global_typed_through_reexported_callee()
     print('PASS')
