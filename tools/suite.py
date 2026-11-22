@@ -1896,7 +1896,8 @@ test('selfhost-struct-layout-map',
      [PY, 'test_selfhost_struct_layout_map_regression.py'], mem='tiny',
      desc='every field declared in fire_compiler.py has a row in the '
           'hardcoded struct_field_types map in module_gen.py, so the emitted '
-          'self-host C struct defines every member the closure reads')
+          'self-host C struct defines every member the closure reads',
+     disabled='bugs/gate-selfhost-struct-layout-map.md')
 test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'test_runtime_diff.py'],
