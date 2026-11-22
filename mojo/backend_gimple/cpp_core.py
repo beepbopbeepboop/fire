@@ -7804,6 +7804,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     """`AssignStmt` in `_cpp_stmt`: every assignment shape the C++ emitter knows.
 
     One arm of `_cpp_stmt`, which tests the condition and calls this."""
+    from mojo.ir.instr import ex_deref, ex_text
     if (isinstance(s.target, gimple_ctypes.IdentExpr)
             and isinstance(s.value, gimple_ctypes.YieldExpr)):
         return _cpp_assign_received_yield(gen, s, declared, indent)
@@ -8545,11 +8546,11 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         if val is None:
             val = gen._cpp_expr(s.value)
         if isinstance(val, str) and val.startswith('@@CSYM:'):
-            return [f"{indent}{cpp_name} = _mj_w({val});"]
+            return [_cpp_assign_line(ex_text(cpp_name), ex_text(f"_mj_w({val})"), indent)]
         _acast0 = _cpp_assign_cast_type(gen, val)
         if _acast0 is not None and gimple_ctypes.TypeLattice.is_word(ctype) and _acast0 != ctype:
-            return [f"{indent}{cpp_name} = (int64_t)(intptr_t)({val});"]
-        return [f"{indent}{cpp_name} = {val};"]
+            return [_cpp_assign_line(ex_text(cpp_name), ex_text(f"(int64_t)(intptr_t)({val})"), indent)]
+        return [_cpp_assign_line(ex_text(cpp_name), ex_text(val), indent)]
     if _rhs_tagged and (not gimple_ctypes.TypeLattice.is_cstr(declared.get(name))):
         _cpp_mark_tagged_word(gen, name)
     if _container_literal and declared.get(name) in ('MojoList *', 'MojoDict *', 'MojoSet *'):
@@ -8569,7 +8570,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     # WRITE must go through it (`*name = ...`), not overwrite the
     # pointer itself.
     if name in gen._cpp_mut_capture_names:
-        return [f"{indent}*{cpp_name} = {val};"]
+        return [_cpp_assign_line(ex_deref(ex_text(cpp_name)), ex_text(val), indent)]
     # Assigning a value whose C type is known to be a DIFFERENT pointer/word
     # type than the variable's declared one (a module function returning
     # `char *` into an unsolved `int64_t` word, a set built into a variable a
@@ -8578,7 +8579,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     _decl_t = declared.get(name)
     if (isinstance(val, str) and val.startswith('@@CSYM:')
             and gimple_ctypes.TypeLattice.is_word_value(_decl_t)):
-        return [f"{indent}{cpp_name} = _mj_w({val});"]
+        return [_cpp_assign_line(ex_text(cpp_name), ex_text(f"_mj_w({val})"), indent)]
     _acast = _cpp_assign_cast_type(gen, val)
     if (_acast is None and isinstance(s.value, gimple_ctypes.IdentExpr)
             and gen._cpp_declared is not None):
@@ -8588,7 +8589,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             _acast = _vt0
     if (_acast is not None and gimple_ctypes.TypeLattice.is_word_value(_decl_t)
             and _acast != _decl_t):
-        return [f"{indent}{cpp_name} = ({_decl_t})(intptr_t)({val});"]
+        return [_cpp_assign_line(ex_text(cpp_name), ex_text(f"({_decl_t})(intptr_t)({val})"), indent)]
     # A `lambda *a, **k` assigned into a variable that already holds a
     # callable as a WORD (a parameter): the word is a runtime variadic
     # function value (`MojoVarargFn`), whose callee is a captureless
@@ -8602,7 +8603,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 f"(void *)+[](void *_self, MojoList *_a, MojoDict *_k) -> int64_t {{ "
                 f"return (*({_sf} *)_self)(_a, _k); }}, "
                 f"(void *)new {_sf}({val}), 0, 1, 1);"]
-    return [f"{indent}{cpp_name} = {val};"]
+    return [_cpp_assign_line(ex_text(cpp_name), ex_text(val), indent)]
 
 
 def _cps_var_decl(gen, s, declared: dict, indent: str) -> list[str]:
