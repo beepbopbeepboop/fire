@@ -652,6 +652,47 @@ def f():
     print("PASS  proven_span_local_from_a_list_projection")
 
 
+def test_global_slot_info_is_declared_in_generator_init():
+    """Pin: the module-global slot-kind table exists on a fresh GimpleGen.
+
+    `emit_stmts._note_global_slot_kinds` used to create `_global_slot_info`
+    behind `if not hasattr(gen, '_global_slot_info')`. Self-hosted, every
+    `self.<field> = ...` anywhere in the class puts the field in GimpleGen's
+    compiled struct from the start, so `hasattr` answered True, the lazy
+    `dict()` never ran, and the first module-global store went through a NULL
+    MojoDict -- `_dict_set_raw_seq_kind_k` SIGSEGV in the stage2 dump of every
+    program with a module-level container assignment (array_ops_jit.mojo's
+    `arr = [1, 2, 3, 4, 5]`). Declaring it with the other module-scope global
+    tables in `GimpleGen.__init__` is the fix, so this asserts the table is
+    there BEFORE any statement lowers (Python's `hasattr` would happily
+    create it later, which is why the crash never reproduced here).
+    """
+    gen = gimple_codegen.GimpleGen()
+    if '_global_slot_info' not in vars(gen):
+        raise AssertionError(
+            "_global_slot_info is not initialised by GimpleGen.__init__; on "
+            "the self-hosted path hasattr() then reports the NULL struct "
+            "field as present and the first module-global store segfaults")
+    if not isinstance(gen._global_slot_info, dict):
+        raise AssertionError(
+            f"_global_slot_info starts as "
+            f"{type(gen._global_slot_info).__name__}, want dict")
+    # The record is a MODULE-scope fact, so the store path has to survive the
+    # table being present but empty: a global mixed list read after a function
+    # boundary (the table's whole reason to exist) must still compile.
+    ok, _c_src, stderr = gimple_compiles("""\
+a = [1, 2.5]
+def show():
+    print(a[1])
+show()
+""")
+    if not ok:
+        lines = stderr.splitlines()
+        raise AssertionError('the module-global mixed list did not compile: '
+                             + (lines[0] if lines else 'gcc reported no text'))
+    print("PASS  global_slot_info_is_declared_in_generator_init")
+
+
 def defined_param_ctype(c_src: str, func_name: str, param_name: str) -> str:
     """The C type `param_name` is declared with in `func_name`'s DEFINITION.
 
@@ -16058,6 +16099,8 @@ main()
                   'proven_list_local_keeps_element_type_across_inplace_store')
     _run_isolated(test_proven_span_local_from_a_list_projection,
                   'proven_span_local_from_a_list_projection')
+    _run_isolated(lambda: test_global_slot_info_is_declared_in_generator_init,
+                  'global_slot_info_is_declared_in_generator_init')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
