@@ -128,6 +128,14 @@ that is meant to be behaviour-preserving:
     # before and after the change, in two empty directories:
     for f in <corpus>; do python3 fire.py --dump $f; done ; diff -r before after
 
+`tools/c_oracle.py check` is the same oracle for both backends, and it has TWO
+corpora because one cannot see both printers: `tools/pydiff_corpus` (285
+programs, compiled with the default coroutine backend, so no companion `.cpp` at
+all) and `tools/cpp_corpus` (13 coroutine programs, compiled with `MOJO_CORO=cpp`,
+where an empty companion is an ERROR). A `cpp_core.py`/`cpp_async.py` change
+that leaves the first corpus identical and the second one changed is detected, so
+stage 7 has an oracle before it has a builder.
+
 - **Stage 0 (landed).** `mojo/ir` types, instructions, verifier, reader;
   `tools/gimple_lint.py`; `test_gimple_lint.py` registered as `gimple-lint`.
 - **Stage 1 (landed 2026-11-13). The call-argument hole is closed for
@@ -416,4 +424,7 @@ that is meant to be behaviour-preserving:
 - **Stage 7. Other printers.** The C++ coroutine lowering (`cpp_core.py`,
   `cpp_async.py`, 16,400 lines, a second walk of the same AST) and the direct
   GCC bridge (`gcc/fire/fire-gimple-bridge.cc`, today a stub that builds
-  `int main(){return 0;}`) become printers over GIR.
+  `int main(){return 0;}`) become printers over GIR. Its oracle is in place and
+  is the second corpus `tools/c_oracle.py` hashes (`tools/cpp_corpus`, 13
+  coroutine programs compiled with `MOJO_CORO=cpp`, both promise shapes); the
+  builder it prints through (stage 2b, `mojo/ir/build.py`) is still the blocker.

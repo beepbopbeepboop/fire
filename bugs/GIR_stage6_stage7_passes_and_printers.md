@@ -6,16 +6,80 @@ Plan source: `doc/GIR.md`, Stage 6 (counted loops, arms of the giant functions, 
 
 ## Still open
 
-- Stage 7: `cpp_core.py` is the C++ coroutine printer. Its lowering still spells types and
+- Stage 7 itself: `cpp_core.py` is the C++ coroutine printer. Its lowering still spells types and
   statements as strings; the plan moves it onto the same builder as stage 2b. **Blocked**: it starts
   after stages 2b and 3c, and `mojo/ir/build.py` (stage 2b) does not exist in the tree yet.
+- Its VERIFICATION is no longer blocked: `tools/c_oracle.py` now hashes the companion `.cpp` (see the
+  Status below), so a printer change can be proven byte-identical before it is made.
+- Its WRITE SET may be: `bugs/GIR_W1_cpp_core.md` still carries the W1 wave's `STOP: claimed` line for
+  `mojo/backend_gimple/cpp_core.py`, while `python3 tools/control.py claims` lists no live holder. Release
+  one of the two before moving a `cpp_core.py` emission, or the two lanes edit one file.
 
 ## Next step
 
-Stage 7: once `mojo/ir/build.py` (stage 2b) is in the tree, move one `cpp_core.py` emission at a
-time onto the builder, with `python3 tools/c_oracle.py check --base <the commit before> -j 4`
-reporting identical C for all 285 `tools/pydiff_corpus` programs after each move (the corpus
-includes the C++ companion output, so a coroutine-lowering change is hashed).
+Stage 7, in this order:
+
+1. Land `mojo/ir/build.py` (stage 2b, `bugs/GIR_stage2b_3c_builder_and_instr.md`) — or, if that lane is not
+   yours, do the shape step first: `tools/extract_arm.py --list mojo/backend_gimple/cpp_core.py _cpp_expr`
+   reports **3,389 movable lines in 8 arms** (`IdentExpr` 91, `MemberExpr` 284, `LambdaExpr` 132,
+   `BinaryOp` 245, `CompareChain` 42, `CallExpr` 2,212, `SubscriptExpr` 140, `AwaitExpr` 243 — every one
+   `returns`, `extra inputs: none`), `_cpp_stmt` **1,527** in 9 arms, `_cpp_with_stmt` 90 in 1; the `_cpp_for_stmt`
+   (1,425 in 6) and `_cpp_yield_from` (126 in 2) arms need `target`/`call` annotations. An extracted arm is exactly the
+   unit that later returns an `Ex` instead of a string, and each extraction is AST-identity-checked by the tool.
+2. Then move one extracted arm at a time onto the builder, with
+   `python3 tools/c_oracle.py check --base <the commit before> -j 4` reporting identical C **and** identical
+   C++ companion for all 285 `tools/pydiff_corpus` programs and all 13 `tools/cpp_corpus` programs.
+
+## Status 2026-11-21 (third round): the stage-7 oracle now hashes the C++ printer
+
+The doc's own Next step said `c_oracle.py check` "reporting identical C for all 285
+`tools/pydiff_corpus` programs" was evidence a coroutine-lowering change was safe, because "the corpus
+includes the C++ companion output, so a coroutine-lowering change is hashed". **That was false, and it
+is the defect this round fixes** — a stage-7 round following it would have landed a `cpp_core.py` change
+believing it had been verified.
+
+Measured:
+
+- `tools/pydiff_corpus` holds 285 programs and **0** of them produce a non-empty companion: none is a
+  coroutine program, and the default coroutine backend is the A3 stack-switch lowering
+  (`mojo.middle.coro.enabled()` is False only for `MOJO_CORO=cpp`), so `compile_to_gimple_with_cpp`
+  returns `cpp == ''` for every one.
+- The old `c_oracle.py` therefore compared `md5(c + '\0' + '')` per program — a hash with no slot the
+  companion could ever occupy.
+- Proof by a real lowering change: renaming the generator base symbol in `cpp_async.py` (`_mojogen_` ->
+  `_mojogen_probe_`) left the old oracle printing "all 285 programs generate identical C", exit 0.
+
+Landed (this commit), all outside `cpp_core.py` so the W1 write set above is untouched:
+
+- `tools/cpp_corpus/` — 13 coroutine programs, `generators/` (while+`co_yield`, `for range`, `yield from`,
+  `try`/`except`/`raise`, `with`, lambda+call+interpolated string, float/bool/comparison chain/subscript,
+  a generator METHOD on a struct, tuple target + value-carrying `return`, a captured closure) and `async/`
+  (`await` chain, async generator + `async for`, `try`/`except` in an async function). Every one produces
+  a non-empty companion: 8,869-13,895 chars, and the set covers both promise shapes (`co_yield` and
+  `co_await`).
+- `tools/c_oracle.py` hashes and compares a SECOND corpus with the backend pinned: `hash_tree(..., cpp=True)`
+  runs its child with `MOJO_CORO=cpp`, an EMPTY companion is an `ERR` (not a hashable no-op, so the corpus
+  cannot silently stop exercising the lowering), and `base`/`check` compare both corpora (the cache key
+  covers both, `--closure` unchanged). The same `_mojogen_probe_` rename now reports **9 of 13** programs
+  generating different C++ and exits 1.
+- `test_regress_cpp_oracle_covers_lowering.py` pins it: every `tools/cpp_corpus` program is accepted and
+  non-empty, both shapes are present, the oracle's per-program hash is neither `md5(C)` nor
+  `md5(companion)` alone, and the default backend still emits no companion (the reason a second corpus is
+  needed). It fails against the pre-fix oracle ("has no CPP_CORPUS"), and fails 12 of 13 if the
+  `MOJO_CORO=cpp` selection is dropped from `hash_tree`.
+
+Verified: `python3 tools/c_oracle.py check -j 4` — all 285 programs identical C, all 13 coroutine programs
+identical C++ companion; `python3 test_regress_cpp_oracle_covers_lowering.py` — 13 programs, 2 shapes,
+0 failures (and 12 failures of 13 with the `MOJO_CORO=cpp` selection removed from `hash_tree`, and a
+`FAIL: tools/c_oracle.py has no CPP_CORPUS` against the previous commit's oracle);
+`python3 test_gimple_module_passes.py` — 27 passes pinned, 8674/8674 lines, 0 failures.
+`python3 test_gimple_arms_extracted.py` is 6/8 on this tree, which is the SEPARATE pre-existing red
+`bugs/GIR_arms_extracted_pin_has_two_movable_arms.md` records (`_lower_IdentExpr` 25 lines,
+`_lower_binary_tail` 27) — untouched here, and it is not registered, so no gate runs it.
+
+NOT done: stage 7 itself. No `cpp_core.py` emission moved onto a builder — `mojo/ir/build.py` (stage 2b)
+still does not exist — and nothing in this round changes emitted text (the oracle proves that: both
+corpora identical to the previous commit).
 
 ## Status 2026-11-21 (second round): stage 6 is finished — 0 movable passes remain
 
@@ -54,5 +118,7 @@ light-worker round may not run it); the annotations above are the only way this 
 ## Done when
 
 - Stage 7: `cpp_core.py`'s lowering builds `mojo/ir` instructions instead of C++ text, with
-  `python3 tools/c_oracle.py check` reporting identical C for `tools/pydiff_corpus`.
+  `python3 tools/c_oracle.py check` reporting identical C for `tools/pydiff_corpus` **and** identical
+  C++ companion for `tools/cpp_corpus` (the second is the one that can see the lowering; the first
+  cannot).
 - The doc is deleted in that commit (with `python3 tools/dangling_doc_refs.py --ratchet`).
