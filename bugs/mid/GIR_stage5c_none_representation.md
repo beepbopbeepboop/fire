@@ -143,3 +143,19 @@ No caller yet, so no C changes: `c_oracle` is identical on 285 C and 13 C++ prog
 `--closure` reports no new stubs (3 == 3). Steps 2 to 4 (the store, the read, the acceptance) are not
 done.
 
+**Step 2 experiment (2026-11-22, measured, stashed, not landed).** Boxing a literal `None` stored into a
+word-typed field of the owning struct (owner from the receiver's `var_types` type, the field from
+`struct_field_types`), and counting non-literal stores as evidence of a second kind:
+
+- The reduction (`self.s` set to 42 in one method, `None` in another, read back through a local) prints
+  `42` and `None` under the runner. The store alone is enough for that shape.
+- The corpus program `classes/03_none_field_later_set.py` still differs. The field read sites are not
+  box-aware: `c.session is None` and `c.session is not None` answer from the word, not the box, and the
+  constructor default `self.session = None` in `__init__` is a struct-initialiser write that the store arm
+  does not see (the field starts as 0). Printing a field's box is also not yet a `None`.
+
+So steps 3 and 4 are not optional: every read of a mixed field (`is None`, printing, the constructor
+default) has to answer from the box, or the store change makes some programs worse. The experiment is
+`git stash` entry "stage 5c step 2 experiment" (diff also saved in the session scratchpad). Next step: the
+constructor default and the `is None` read, measured one at a time against the same runner check.
+
