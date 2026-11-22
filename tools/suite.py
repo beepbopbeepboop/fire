@@ -438,7 +438,9 @@ MEASURED_RUN = ('a full `gate`, 2026-11-15, master 5339685b5, per-job peaks from
                 'the run log (--apply-peaks); linkmode re-measured 2026-11-20 on '
                 '632a573a5 by a single-job --no-cache run; sqliteruntime '
                 're-measured 2026-11-21 on 6f7ff40ef after its whole-closure '
-                'case was replaced by a single-module one')
+                'case was replaced by a single-module one; gimple re-measured '
+                '2026-11-21 on 5adfcb546 by a single-job --no-cache run while '
+                'its `import cas` closure blowup was fixed')
 
 # `measured`: read off that run for this job.
     # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
@@ -750,7 +752,15 @@ MEASURED_PEAK_GB = {
     'coro':                                   (0.2, 'measured'),
     'coro-nested-capture':                    (0.2, 'measured'),
     'formal-ast':                             (0.1, 'measured'),
-    'gimple':                                 (0.4, 'measured'),
+    # 0.4 GB was this job's number until 2026-11-21, from a gate that ran
+    # BEFORE `test_known_function_not_shadowed_by_global_fnptr` was added: its
+    # `import cas` compile inlined the whole compiler closure (123 MB of C,
+    # 6.5-6.8 GB) because `cas.stdlib_fingerprint()` imported `module_loader`
+    # from inside a function, which RESOURCE-killed the job at this 4 GB class.
+    # That dependency is a leaf module now (`stdlib_path.py`); the job measures
+    # 0.4-0.9 GB again depending on how many gcc children overlap, and `tiny`
+    # covers it either way.
+    'gimple':                                 (0.9, 'measured'),
     'gimplegenerators':                       (0.2, 'measured'),
     'runtimere':                              (0.2, 'estimated'),
     'globcompiled':                           (0.2, 'estimated'),

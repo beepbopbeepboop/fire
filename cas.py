@@ -80,7 +80,7 @@ ABI_VERSION = "2"
 # and served stale .ci/.o. The mojo/** glob below closes that hole the same
 # way the gimple_* glob closed the 2026-08 one.
 _COMPILER_SOURCES = [
-    'mlir.py', 'module_loader.py', 'ast_rewriter.py',
+    'mlir.py', 'module_loader.py', 'stdlib_path.py', 'ast_rewriter.py',
     'generated_dispatch.py', 'fire_compiler.py',
     'elaborate.py', 'monomorphize.py', 'comptime.py',
     'imports.py', 'reflect.py', 'build_stdlib_dylib.py',
@@ -578,8 +578,16 @@ def stdlib_fingerprint() -> str:
     if _stdlib_fp_cache is None:
         h = hashlib.blake2b(digest_size=20)
         try:
-            from module_loader import STDLIB_PATH
-            root = STDLIB_PATH if STDLIB_PATH and os.path.isdir(STDLIB_PATH) else None
+            # `stdlib_path`, not `module_loader`: the latter is part of the
+            # compiler's own import closure (it imports `gimple_codegen`), and
+            # this compiler inlines a function-scoped import's whole module, so
+            # importing it from here put the ENTIRE compiler into the closure of
+            # any compile that touched `cas` (123 MB of C, 6.5 GB peak, which
+            # RESOURCE-killed the `gimple` job at its 4 GB class). This function
+            # needs a path, not a compiler.
+            from stdlib_path import _find_stdlib_path
+            _root = _find_stdlib_path()
+            root = _root if _root and os.path.isdir(_root) else None
         except Exception:
             root = None
         if root:
