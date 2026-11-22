@@ -195,6 +195,35 @@ def test_python_source_names_resolve_lazily():
     raise AssertionError("the .mojo spelling must still be rejected")
 
 
+def test_alias_declaration_value_is_not_a_read():
+    # `alias LIMIT = some_unknown_name` declares LIMIT; its value is a
+    # compile-time expression this pass does not model, so the unknown name in
+    # it must NOT be reported. Reporting it made an alias whose value is not
+    # foldable a hard error, so a `where` clause consuming it could not stay
+    # undecided.
+    src = (
+        "alias LIMIT = some_unknown_name\n"
+        "def f[x: Int]() where x < LIMIT:\n"
+        "    pass\n"
+    )
+    assert _reads(src) == [], _reads(src)
+
+
+def test_alias_declaration_targets_are_not_reads():
+    # A generic alias declares its bracket parameters, which the parser leaves
+    # in the subscript's index; a subscript target elsewhere is a mutation of
+    # a value read, but in an alias declaration every name is a declaration.
+    src = "alias Pair[T] = T\n"
+    assert _reads(src) == [], _reads(src)
+
+
+def test_plain_module_assignment_value_is_still_a_read():
+    # The control: only an `alias` declaration is exempt. A plain module-level
+    # assignment is an executable read of its value.
+    src = "LIMIT = some_unknown_name\n"
+    assert _reads(src) == ["some_unknown_name"], _reads(src)
+
+
 if __name__ == "__main__":
     test_unknown_name_reports_modular_layout()
     test_every_name_is_reported_in_source_order()
@@ -205,4 +234,7 @@ if __name__ == "__main__":
     test_compile_time_type_builtins_are_not_reported()
     test_awaitable_protocol_constructors_are_not_reported()
     test_python_source_names_resolve_lazily()
+    test_alias_declaration_value_is_not_a_read()
+    test_alias_declaration_targets_are_not_reads()
+    test_plain_module_assignment_value_is_still_a_read()
     print("ok")
