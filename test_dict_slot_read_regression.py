@@ -209,6 +209,45 @@ main()
         return 1
     print(f"  PASS: compiled ({len(c_text)} bytes of C)")
 
+    # Test 7: a tagged dict-get box that passes through an `or` merge into a
+    # name that ALSO holds a container. This is the shape that made carrying
+    # `Box`/`Tagged` through a copy refuse a self-host-closure module
+    # (`mojo/middle/infra_infer.py`'s `_pn2 = _chosen.get('param_names') or []`,
+    # where `_pn2` is a list elsewhere): the merge temp is a copy of the
+    # tagged dict-get box, and the bind path read the copy's tag as a decision
+    # about the NAME's representation. It must not — a pass-through temp is
+    # not a name anybody bound — so the program compiles and answers what
+    # CPython answers. `mojo/middle/valueinfo.py`'s bind/read split (`BindBox`
+    # does not travel through `carry`) is what makes this pass; with the bind
+    # path on the read-side predicates it refuses with
+    # "cannot also hold a value of another C type".
+    src7 = '''
+def pick(chosen, flag):
+    if flag:
+        _pn2 = [1, 2]
+    _pn2 = chosen.get('param_names') or []
+    return len(_pn2)
+
+def main():
+    print(pick({"param_names": None}, 0))
+    print(pick({"param_names": [9, 8, 7]}, 0))
+    print(pick({}, 1))
+main()
+'''
+    print("\nTest 7: a tagged dict-get through an `or` merge into a list name")
+    try:
+        stdout, stderr, returncode = run(src7)
+        if stderr and "refused" in stderr.lower():
+            print(f"  FAIL: Refusal detected in stderr: {stderr[:300]}")
+            return 1
+        if returncode != 0 or stdout != "0\n3\n0\n":
+            print(f"  FAIL: wrong answer (returncode={returncode}): {stdout!r}")
+            return 1
+        print("  PASS: compiled and printed the CPython answer")
+    except Exception as e:
+        print(f"  FAIL: compilation raised: {str(e)[:300]}")
+        return 1
+
     print("\n" + "="*60)
     print("All regression tests passed!")
     print("Dict slot reads are no longer incorrectly tagged as generator words.")

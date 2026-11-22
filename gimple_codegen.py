@@ -591,6 +591,8 @@ _SELFHOST_SIGS = {
     # weak "unavailable in compiled mode" stub that returned 0. The prototypes
     # match the definitions in `mojo_middle_valueinfo_WordFacts_*`.
     'WordFacts_carry': ('void', ['WordFacts *', 'char *', 'char *'], 'mojo_middle_valueinfo'),
+    'WordFacts_bind_box': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
+    'WordFacts_bind_tagged': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
     'WordFacts_has_slot_kinds': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
     'WordFacts_is_boxed_container': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
     'WordFacts_is_dyn': ('_Bool', ['WordFacts *', 'char *'], 'mojo_middle_valueinfo'),
@@ -6146,6 +6148,10 @@ class GimpleGen:
         return self._words.may_be_box(name)
     def _word_is_tagged(self, name: str) -> bool:
         return self._words.is_tagged(name)
+    def _word_bind_box(self, name: str) -> bool:
+        return self._words.bind_box(name)
+    def _word_bind_tagged(self, name: str) -> bool:
+        return self._words.bind_tagged(name)
     def _word_is_dyn(self, name: str) -> bool:
         return self._words.is_dyn(name)
     def _word_is_int_word(self, name: str) -> bool:

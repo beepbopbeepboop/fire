@@ -4395,24 +4395,52 @@ def _none_arith_guard(gen, op: str, val: str, other: str, none_is_left: int) -> 
     return _t
 
 
+def _kind_arith_operand(gen, ctype: str, val: str, op: str) -> bool:
+    """Is `val` an operand whose runtime KIND decides `op`'s answer, besides
+    the tagged generator words `_tagged_arith_select` was written for?
+
+    That is the READ-side box of stage 5b (`mojo/middle/valueinfo.py`): the
+    word a kind-mixed slot read hands back -- a double, str, bool or None box
+    -- whose `Box` fact `carry` now moves across a copy. Coercing such an
+    operand to a double asserts that it IS a float box; an int box then makes
+    the whole expression a C `double` (so an ordinary integer local becomes
+    one), and a str box repeats a pointer's bits. The answer is the one its
+    kind selects, exactly as for a tagged word.
+
+    Only `+ - *`: `/` has its own double lowering and `//`/`%` their own
+    dispatch below. A CONTAINER word is excluded -- it is not arithmetic, and
+    `mojo_mul_word` of a registered list would read the pointer as an integer
+    -- which is the same exclusion the tail's `_lv_ptr_kind` guard makes
+    before it coerces an operand to a double."""
+    if op not in ('+', '-', '*'):
+        return False
+    if not gen._word_may_be_box(val):
+        return False
+    return not _as_str(gen._get_actual_type(ctype, val)).endswith(' *')
+
+
 def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
                          right_node, rt: str, rv: str):
-    """`lhs OP rhs` where a TAGGED generator word (`_tagged_word_vals`) is an
-    operand beside an INTEGER, and OP is arithmetic. Returns the result temp,
-    or None when the shape does not apply.
+    """`lhs OP rhs` where a TAGGED generator word (`_tagged_word_vals`) or a
+    READ-side box (`may_be_box`, stage 5b's carried `Box` kind) is an operand
+    beside an INTEGER, and OP is arithmetic. Returns the result temp, or None
+    when the shape does not apply.
 
     The answer is the integer one or a double box holding the double answer,
     and which one is a run-time fact: the box's kind. That is the same select
     `_float_param_arith` runs for a maybe-float parameter, fed this operand's
-    kind tracking instead of a parameter name. The result is itself a tagged
-    word (a double box is rendered by kind and stays a box for the next
-    operator). A double operand is not handled here: its answer is a double
-    whatever the box holds, and the tail's double arm already gives that."""
+    kind tracking instead of a parameter name. The result is an int64_t WORD
+    (a double box is rendered by kind and stays a box for the next operator),
+    never a C double: the operand may be an int, so the answer may be one. A
+    double operand is not handled here: its answer is a double whatever the
+    box holds, and the tail's double arm already gives that."""
     if op not in ginf._FLOAT_PARAM_OPS:
         return None
     _tag_l = gen._word_is_tagged(lv)
     _tag_r = gen._word_is_tagged(rv)
-    if not (_tag_l or _tag_r):
+    _box_l = _tag_l or _kind_arith_operand(gen, lt, lv, op)
+    _box_r = _tag_r or _kind_arith_operand(gen, rt, rv, op)
+    if not (_box_l or _box_r):
         return None
     if not gimple_ctypes.TypeLattice.is_int_word(lt) or not gimple_ctypes.TypeLattice.is_int_word(rt):
         return None
@@ -4427,7 +4455,7 @@ def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
     # A str box (kind 'p') is not numeric: `x + x` concatenates and `x * n`
     # repeats, dispatched at run time because the same tagged name can hold an
     # int box on other iterations.
-    if op == '+' and _tag_l and _tag_r:
+    if op == '+' and _box_l and _box_r:
         _t = gen._call_expr('int64_t', 'mojo_add_words',
                             [('int64_t', lv),
                              ('int64_t', rv)])
@@ -4440,9 +4468,16 @@ def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
         gen._word_mark_dyn(_t)
         return _t
     _t = ginf._float_param_arith(gen, op, left_node, lt, lv, right_node, rt, rv,
-                                 lmaybe=_tag_l, rmaybe=_tag_r)
-    gen._word_mark_boxed(_t)
-    gen._word_mark_tagged(_t)
+                                 lmaybe=_box_l, rmaybe=_box_r)
+    if _tag_l or _tag_r:
+        # A tagged operand's result is a tagged word (the select's double box
+        # stays one for the next operator).
+        gen._word_mark_boxed(_t)
+        gen._word_mark_tagged(_t)
+    else:
+        # A plain box's select answers a bare int word or a double box; which
+        # one is the runtime's fact, not a tag.
+        gen._word_mark_dyn(_t)
     return _t
 
 

@@ -5,26 +5,35 @@ None/str, or an erased struct pointer, all at once (doc/GIR.md stage 5b). ONE
 `ValueInfo` record per temp says which of those it is:
 
     kind    Int | Erased(T) | DynWord | Box | Plain
-    flags   Tagged | SlotKinds | BoxedContainer
+    flags   Tagged | SlotKinds | BoxedContainer | BindBox
 
 `kind` is what the word IS, and only one kind can be true; the flags are facts
 that are orthogonal to the kind (`Tagged` is a Box that is a generator word,
 `SlotKinds` is a container whose slots carry their own kinds, `BoxedContainer`
-is a call result holding a container of unknown kind). The six historical
-name-keyed sets (`_boxed_vals`, `_tagged_word_vals`, `_dyn_word_vals`,
-`_int_word_vals`, `_maybe_kinds_vals`, `_boxed_container_vals`) are derived
-READ-ONLY views over the records (`WordFacts.boxed`, ...). The backend reads and
-writes through the predicates and `mark_*` methods below, never through a set.
+is a call result holding a container of unknown kind, `BindBox` is a word a
+NAME holding it represents as a box). The six historical name-keyed sets
+(`_boxed_vals`, `_tagged_word_vals`, `_dyn_word_vals`, `_int_word_vals`,
+`_maybe_kinds_vals`, `_boxed_container_vals`) are derived READ-ONLY views over
+the records (`WordFacts.boxed`, ...). The backend reads and writes through the
+predicates and `mark_*` methods below, never through a set.
 
-Why the sets could not express `boxed`: `_boxed_vals` meant both "this word may
-be a heap box, render it by kind" (a reader) and, at a bind site, "this word
-needs unboxing"; a copy could not keep one without claiming the other, and
-`mojo_box_word` UNBOXES a str/None/bool box. The `Box` kind plus the `Tagged`
-flag say both, which is what the record is for. A COPY carries the read-side
-half (a box becomes a `DynWord`: the runtime decides the kind) but not the
-bind-side one (the copy is not claimed to be a heap box that a name must
-unbox), and `Tagged` stays with the Box kind it modifies; the measured reason
-is in `carry`'s docstring below.
+Why the sets could not express `boxed`: `_boxed_vals` meant two different
+things, and the record gives them a KIND and a FLAG:
+
+* READ side: "this word's kind is a runtime fact; render it by kind"
+  (`mojo_repr_boxed`, `mojo_cstr_or_int_str`, `mojo_truthy_word`). That is the
+  `Box` kind, plus `Tagged` when the word is a generator's kind-mixed yield.
+  It is true of every copy of a box, so `carry` MOVES this half.
+* BIND side: "a NAME holding this word keeps the box" -- the representation
+  decision `emit_stmts._gen_stmt_AssignStmt` takes for a name (keep the box
+  for a tagged name, `mojo_box_word`-unwrap it otherwise). That is `BindBox`,
+  which `carry` does NOT move: a pass-through temp is not a name anybody
+  bound. `mark_boxed` / `mark_tagged` set it wherever the backend observes a
+  box as a value; a copy is not such an observation.
+
+Before the split, a copy could not keep one half without claiming the other,
+and `mojo_box_word` UNBOXES a str/None/bool box. The measured cost of the
+split is in `carry`'s docstring below.
 
 Keys are SSA temp / variable names, which repeat across functions, so a
 `WordFacts` is per function body (`_reset_func` makes a fresh one).
@@ -43,6 +52,11 @@ KIND_BOX = 4
 FLAG_TAGGED = 1           # a Box from a kind-mixed generator / tagged return
 FLAG_SLOT_KINDS = 2       # a container whose slots carry per-slot kinds
 FLAG_BOXED_CONTAINER = 4  # a call result holding a container of unknown kind
+# The BIND half of the old `_boxed_vals`: a NAME holding this word represents it
+# as a box (it keeps the box rather than unwrapping it with `mojo_box_word`).
+# `carry` deliberately does not move it -- see the module docstring and
+# `carry`'s own.
+FLAG_BIND_BOX = 8
 
 
 class ValueInfo:
@@ -142,39 +156,38 @@ class WordFacts:
         A fact is only ADDED, never moved: a caller that already knows better
         about `dst` (a declared annotation, a narrowing) wins, which is
         `carry_value_info`'s rule for every other table. A proven integer is
-        therefore not promoted to a dynamic word: the proof is the stronger
-        fact, and a name that really holds a box after an integer proof was
-        rebound, whose next store must re-prove it.
+        therefore not promoted to a box or a dynamic word: the proof is the
+        stronger fact, and a name that really holds a box after an integer
+        proof was rebound, whose next store must re-prove it.
 
-        WHICH facts travel, measured 2026-11-21 (`tools/pydiff_corpus`, the
-        C of each program hashed before vs after):
+        WHICH facts travel (stage 5b, the bind/read split): `dyn`, `int_word`,
+        `slot_kinds`, `boxed_container`, and now the `Box` KIND with its
+        `Tagged` flag. A copy of a box IS the same box, so every reader of
+        "this word's kind is a runtime fact" needs it: `print` renders it by
+        kind, arithmetic dispatches on its kind (`+ - *` beside an integer go
+        through `emit_exprs._tagged_arith_select`, extended from the tagged
+        words for exactly this: coercing the operand to a C `double` asserted
+        it was a float box, and an int box then made an ordinary integer local
+        a double), `_to_int64` truncates a double box instead of using its
+        address, and `is_dyn` (true of a box) keeps the truthiness/`str()`/`==`
+        answers.
 
-        * `dyn`, `int_word`, `slot_kinds`, `boxed_container`: they travel.
-        * A source `Box` travels as `DynWord`, NOT as `Box`. The two halves of
-          the old `boxed` predicate are exactly what the record separates: a
-          reader needs "this word's kind is a runtime fact" (true of every
-          box, and what `DynWord` says), while a BIND site needs "this word is
-          a heap box, unbox it with `mojo_box_word`" (`may_be_box`). The copy
-          is the same word, so the first half is true of it and must travel;
-          the second is a statement about how a NAME should be represented,
-          and a pass-through temp is not a name anybody bound. That is also
-          why `Tagged` does not travel: it is the Box flag the bind-side
-          `_keep_tagged_box` decision reads.
-        * Measured with `Box` carried for real (both `Box` and `Tagged`): the
-          self-host-closure module `mojo/middle/infra_infer.py` REFUSES to
-          compile. `_pn2 = _chosen.get('param_names') or []` lowers the `or`
-          merge through `_copy`; the dict-get arm is a tagged box, the tag
-          reached the merge temp, and the next statement stores that temp into
-          a `MojoList *` local — the "cannot also hold a value of another C
-          type" refusal (`emit_stmts._gen_stmt_AssignStmt`). The value fact is
-          not wrong (a truthy box could be selected), but the name cannot hold
-          it, and the program is one the compiler has always built. Carrying
-          `Box` alone builds and is C-identical, but only feeds the
-          `may_be_box -> mojo_box_word` unboxing half of the same overloaded
-          predicate. So the boundary is: the KIND is carried as far as it is a
-          fact about the word, and the bind-side "this name holds a box" waits
-          for the next step (splitting `may_be_box`'s two meanings) — the work
-          doc is `bugs/GIR_stage5b_box_carry_needs_the_bind_fact_split.md`."""
+        `BindBox` does NOT travel, and that is the whole reason the split
+        exists. The bind side is a statement about how a NAME is represented
+        ("this name keeps the box; a tagged value stored into a pointer-typed
+        name is a refusal"), not about the word: a pass-through temp -- an `or`
+        merge's result, a coercion temp -- is not a name anybody bound. Moving
+        it made the self-host-closure module `mojo/middle/infra_infer.py`
+        REFUSE to compile: `_pn2 = _chosen.get('param_names') or []` lowers the
+        `or` merge through `_copy`, the dict-get arm is a tagged box, the tag
+        reached the merge temp, and the next statement stores that temp into a
+        `MojoList *` local -- "a name bound to a container or pointer value
+        ... and also to a tagged generator word here cannot also hold a value
+        of another C type". The value fact is not wrong (a truthy box could be
+        selected) but the name cannot hold it, the program is one the compiler
+        has always built, and the bind path's answer must not change because a
+        box passed through a copy (`_tagged_bind` / `_keep_tagged_box` read
+        `bind_tagged`, which is `BindBox` + the tag, not `is_tagged`)."""
         if src == dst:
             return
         _s = self._info(src, False)
@@ -188,11 +201,12 @@ class WordFacts:
             if _d.kind == KIND_PLAIN or _d.kind == KIND_ERASED:
                 _d.kind = KIND_INT
         elif _s.kind == KIND_BOX:
-            # The READ-side half travels, the BIND-side half does not: the
-            # copy is a word whose kind the runtime decides (`DynWord`), but
-            # it is not claimed to be a heap box (see the docstring).
-            if _d.kind == KIND_PLAIN or _d.kind == KIND_ERASED:
-                _d.kind = KIND_DYN
+            # The READ-side half (the KIND, and the tag that modifies it)
+            # travels; the BIND-side flag does not (see the docstring).
+            if _d.kind != KIND_INT:
+                _d.kind = KIND_BOX
+                if (_s.flags & FLAG_TAGGED) != 0:
+                    _d.flags = _d.flags | FLAG_TAGGED
         elif _s.kind == KIND_DYN:
             if _d.kind == KIND_PLAIN or _d.kind == KIND_ERASED:
                 _d.kind = KIND_DYN
@@ -271,6 +285,24 @@ class WordFacts:
         _rec = self._info(name, False)
         return _rec is not None and (_rec.flags & FLAG_BOXED_CONTAINER) != 0
 
+    # The BIND side (see the module docstring): a NAME holding this word
+    # represents it as a box. Every writer that observes a box sets it, and
+    # `carry` does not move it, so a copy answers False here while answering
+    # True to `may_be_box` / `is_tagged` -- the two questions the old
+    # `_boxed_vals` conflated.
+    def bind_box(self, name: str) -> bool:
+        _rec = self._info(name, False)
+        return _rec is not None and (_rec.flags & FLAG_BIND_BOX) != 0
+
+    def bind_tagged(self, name: str) -> bool:
+        """The tagged-word bind: this word is a TAGGED box AND it is one a
+        name keeps (not a copy), which is what `_keep_tagged_box` and the
+        tagged-vs-container refusals in `emit_stmts` decide on."""
+        _rec = self._info(name, False)
+        return (_rec is not None and _rec.kind == KIND_BOX
+                and (_rec.flags & FLAG_TAGGED) != 0
+                and (_rec.flags & FLAG_BIND_BOX) != 0)
+
     # Writers. Two facts sometimes contradict — a name recorded both as a box
     # and as a proven integer — and one record has to pick. The BOX wins: it
     # is an observation of a heap cell at that temp, while the integer proof
@@ -279,13 +311,20 @@ class WordFacts:
     # `mark_dyn` does not demote a box (a box IS a word whose kind only the
     # runtime knows) and an integer mark never demotes a box or a dynamic
     # word.
+    #
+    # Both box writers also record the BIND-side fact: the observation is of a
+    # value a bind must represent as a box. `carry` is the one place the box
+    # kind moves without it, which is exactly the split the module docstring
+    # describes.
     def mark_boxed(self, name: str) -> None:
-        self._info(name, True).kind = KIND_BOX
+        _rec = self._info(name, True)
+        _rec.kind = KIND_BOX
+        _rec.flags = _rec.flags | FLAG_BIND_BOX
 
     def mark_tagged(self, name: str) -> None:
         _rec = self._info(name, True)
         _rec.kind = KIND_BOX
-        _rec.flags = _rec.flags | FLAG_TAGGED
+        _rec.flags = _rec.flags | FLAG_TAGGED | FLAG_BIND_BOX
 
     def mark_dyn(self, name: str) -> None:
         _rec = self._info(name, True)
