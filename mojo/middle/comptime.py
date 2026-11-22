@@ -1187,9 +1187,22 @@ def _eval_compilation_target_pred(node):
     return None
 
 
-def folded_truth(value):
-    """The truth value of a value `eval_const` folded, or None when the fold
-    produced no value at all.
+# The tri-state answer as an INT: 1 (true), 0 (false), -1 (not a compile-time
+# constant). `eval_const_bool`'s `bool | None` cannot carry three states once
+# this file is compiled by the self-hosted compiler: its value model spells
+# None as the zero word, which is also False, so "not foldable" read as
+# "false". Every caller that branches on the answer -- a module-level `if
+# __name__ == '__main__':` the global scan resolves, a `comptime if` -- then
+# took the else-branch of a condition nobody could decide, and the stage2
+# binary dropped the whole `if __name__` body from the module's globals.
+CONST_TRUE = 1
+CONST_FALSE = 0
+CONST_UNKNOWN = -1
+
+
+def folded_truth_state(value) -> int:
+    """CONST_TRUE / CONST_FALSE for a value `eval_const` folded, or
+    CONST_UNKNOWN when the fold produced no value at all.
 
     Truthiness is the source language's own (Python's) rule, so every folded
     value answers it: `""`, `[]`, `{}` and `()` are false, their non-empty
@@ -1200,11 +1213,20 @@ def folded_truth(value):
     `not` fold answered "not a number, so unfoldable" (which the same caller
     then read as CONST_FALSE). That is how `if "x":` and `if not "":`
     compiled to their else arms while the numbers-only cases looked right.
+
+    The answer is an INT rather than `bool | None` for the reason the CONST_*
+    block above gives: "the fold answered falsy" and "the fold answered
+    nothing" are the two states a caller must not confuse, so they cannot be
+    spelled 0 and the self-hosted value model's 0. A caller that reads a
+    declined fold as CONST_FALSE turns every operator this folder does not
+    implement into a silently wrong branch -- `if [1] + [2]:` printed its else
+    arm because only the fold's None-ness was asked, and a container `+` is
+    one arm this folder does not have.
     """
     if isinstance(value, (bool, int, float, str, bytes, list, tuple, dict,
                           set, frozenset)):
-        return bool(value)
-    return None
+        return CONST_TRUE if value else CONST_FALSE
+    return CONST_UNKNOWN
 
 
 def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None):
@@ -1480,9 +1502,11 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
         # False and `not ""` is True. Answering None here made
         # `eval_const_bool_state` read the shape as CONST_FALSE and delete
         # the then-arm of a module-level `if not "":`.
-        t = folded_truth(eval_const(node.operand, bindings, platform,
-                                    conforms_to_pred))
-        return None if t is None else not t
+        _state = folded_truth_state(eval_const(node.operand, bindings, platform,
+                                               conforms_to_pred))
+        if _state == CONST_UNKNOWN:
+            return None
+        return _state == CONST_FALSE
     if isinstance(node, BinaryOp):
         op = node.op
         # DType equality is identity of the dtype, not identity of the marker's
@@ -1732,34 +1756,23 @@ def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
 def eval_const_bool(node, bindings: dict, call_hook=None, platform: str = None, conforms_to_pred=None):
     """Evaluate `node` as a compile-time bool, or None.
 
-    A folded value answers PYTHON truthiness (`folded_truth`), not just
+    A folded value answers PYTHON truthiness (`folded_truth_state`), not just
     bool/int: a folded float (`bool(0.5)` is True) and a folded container
     (`if "x":`, `if [1]:`, `if {1: 2}:` are all True in CPython, and their
     empty forms False). A shape that folds to a value and is then not
-    answered here is reported FALSE by `eval_const_bool_state` below, which
-    folded `if 0.0001:` and `if "x":` to the else arm at module level,
-    deleting the then-arm before emission.
+    answered here used to be reported FALSE by `eval_const_bool_state` below,
+    which folded `if 0.0001:` and `if "x":` to the else arm at module level,
+    deleting the then-arm before emission. A fold that DECLINES answers None
+    (CONST_UNKNOWN to `eval_const_bool_state`), never False.
     """
-    t = folded_truth(eval_const(node, bindings, platform, conforms_to_pred))
-    if t is not None:
-        return t
+    _state = folded_truth_state(eval_const(node, bindings, platform,
+                                           conforms_to_pred))
+    if _state != CONST_UNKNOWN:
+        return _state == CONST_TRUE
     # Fallback: eval_const_int also folds what eval_const does not (calls,
     # via the hook).
     result = eval_const_int(node, bindings, call_hook, conforms_to_pred)
     return bool(result) if isinstance(result, (bool, int)) else None
-
-
-# The tri-state answer as an INT: 1 (true), 0 (false), -1 (not a compile-time
-# constant). `eval_const_bool`'s `bool | None` cannot carry three states once
-# this file is compiled by the self-hosted compiler: its value model spells
-# None as the zero word, which is also False, so "not foldable" read as
-# "false". Every caller that branches on the answer -- a module-level `if
-# __name__ == '__main__':` the global scan resolves, a `comptime if` -- then
-# took the else-branch of a condition nobody could decide, and the stage2
-# binary dropped the whole `if __name__` body from the module's globals.
-CONST_TRUE = 1
-CONST_FALSE = 0
-CONST_UNKNOWN = -1
 
 
 def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None) -> bool:
@@ -1952,14 +1965,34 @@ def eval_const_bool_state(node, bindings: dict, call_hook=None,
 
     Foldability comes first and from the expression's shape
     (`_const_foldable`); only a foldable condition is evaluated. A foldable
-    shape whose fold still fails (`1 // 0`) answers false rather than
-    unknown -- the one place the two spellings differ, and a condition that
-    divides by zero at compile time has no meaningful branch either way."""
+    shape whose fold still declines answers UNKNOWN, and the backend then
+    emits BOTH arms as a runtime branch -- the same observable behaviour, no
+    silent miscompile. Deriving FALSE from a declined fold (the pre-2026-11
+    spelling) turned every operator this folder does not implement into a
+    silently wrong branch: `[1] + [2]` is foldable by SHAPE (a BinaryOp over
+    two foldable literals), the folder has no list `+` arm, its None was read
+    as CONST_FALSE, and a module-level `if [1] + [2]:` deleted its then-arm
+    before emission while CPython printed it.
+
+    The one shape whose answer is not simply "the arm CPython printed" is a
+    fold that RAISES at compile time, `1 // 0`: CPython raises
+    ZeroDivisionError, the previous spelling answered FALSE and silently took
+    the else arm, and UNKNOWN now defers the division to RUN time, where that
+    same error is raised. The fold's own refusal to evaluate it is unchanged
+    (`fold_arith` returns None for a zero divisor, so the BUILD still
+    succeeds and only the program's run fails)."""
     if not _const_foldable(node, bindings, call_hook, conforms_to_pred):
         return CONST_UNKNOWN
-    if eval_const_bool(node, bindings, call_hook, platform, conforms_to_pred):
-        return CONST_TRUE
-    return CONST_FALSE
+    _state = folded_truth_state(eval_const(node, bindings, platform,
+                                           conforms_to_pred))
+    if _state != CONST_UNKNOWN:
+        return _state
+    # The same fallback `eval_const_bool` has: `eval_const_int` folds what
+    # `eval_const` does not (calls, via the backend's hook).
+    result = eval_const_int(node, bindings, call_hook, conforms_to_pred)
+    if isinstance(result, (bool, int)):
+        return CONST_TRUE if result else CONST_FALSE
+    return CONST_UNKNOWN
 
 
 # ── The STATEMENT-level comptime rules ────────────────────────────────────
