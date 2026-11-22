@@ -7414,6 +7414,18 @@ def _cpp_hoist_walrus_decls(gen, expr, declared: dict, indent: str) -> list[str]
     return lines
 
 
+def _cpp_call_line(indent: str, fname: str, args: list) -> str:
+    """`fname(a, b);` at `indent`, printed from the stage-2b `call` and `expr` shapes."""
+    from mojo.ir.instr import Ex, Instr, ex_text
+    e = Ex('call')
+    e.a = ex_text(fname)
+    e.tight = True
+    e.args = [ex_text(a) for a in args]
+    i = Instr('expr')
+    i.rhs = e
+    return indent + i.show()
+
+
 def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     """`ExprStmt` in `_cpp_stmt`: a bare expression, including a discarded docstring.
 
@@ -7578,9 +7590,9 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         parsed = _print_end_flush(getattr(s.value, 'kwargs', None))
         if parsed is not None:
             end_str, flush = parsed
-            out = [f'{indent}printf("{end_str}");']
+            out = [_cpp_call_line(indent, 'printf', [f'"{end_str}"'])]
             if flush:
-                out.append(f'{indent}fflush(stdout);')
+                out.append(_cpp_call_line(indent, 'fflush', ['stdout']))
             return out
     # `print(<one scalar arg>)` — a small, deliberate addition (not
     # part of the original Milestone B generator whitelist, which
@@ -7605,10 +7617,11 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # A tagged word (one yield-kind box per slot): the repr
                 # resolves the kind the box carries, so it prints the
                 # yielded value itself, not the box's address.
-                out = [f'{indent}printf("%s{end_str}", '
-                       f'mojo_repr_boxed((int64_t)({gen._cpp_expr(s.value.args[0])})));']
+                out = [_cpp_call_line(indent, 'printf', [
+                    f'"%s{end_str}"',
+                    f'mojo_repr_boxed((int64_t)({gen._cpp_expr(s.value.args[0])}))'])]
                 if flush:
-                    out.append(f'{indent}fflush(stdout);')
+                    out.append(_cpp_call_line(indent, 'fflush', ['stdout']))
                 return out
             self_fields = getattr(gen, '_cpp_gen_self_fields', None)
             arg_ctype = gimple_exprtypes._infer_simple_expr_ctype(s.value.args[0], declared, self_fields)
@@ -7620,13 +7633,13 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             fmt = {'int64_t': f'"%lld{end_str}"', 'double': f'"%g{end_str}"',
                    '_Bool': f'"%s{end_str}"', 'char *': f'"%s{end_str}"'}[arg_ctype]
             if gimple_ctypes.TypeLattice.is_word(arg_ctype):
-                out = [f"{indent}printf({fmt}, (long long){arg_expr});"]
+                out = [_cpp_call_line(indent, 'printf', [fmt, f'(long long){arg_expr}'])]
             elif gimple_ctypes.TypeLattice.is_bool(arg_ctype):
-                out = [f'{indent}printf({fmt}, ({arg_expr}) ? "True" : "False");']
+                out = [_cpp_call_line(indent, 'printf', [fmt, f'({arg_expr}) ? "True" : "False"'])]
             elif gimple_ctypes.TypeLattice.is_double(arg_ctype):
-                out = [f'{indent}printf("%s{end_str}", mojo_repr_float((double)({arg_expr})));']
+                out = [_cpp_call_line(indent, 'printf', [f'"%s{end_str}"', f'mojo_repr_float((double)({arg_expr}))'])]
             else:
-                out = [f"{indent}printf({fmt}, {arg_expr});"]
+                out = [_cpp_call_line(indent, 'printf', [fmt, arg_expr])]
             if flush:
                 out.append(f'{indent}fflush(stdout);')
             return out

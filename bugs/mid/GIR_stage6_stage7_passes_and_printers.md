@@ -336,3 +336,10 @@ light-worker round may not run it); the annotations above are the only way this 
   C++ companion for `tools/cpp_corpus` (the second is the one that can see the lowering; the first
   cannot).
 - The doc is deleted in that commit (with `python3 tools/dangling_doc_refs.py --ratchet`).
+
+**Step 1 of the plan, done (2026-11-22):** `_cps_expr_stmt`'s `printf` and `fflush` lines (the single-scalar
+and tagged-word print forms) are built by `_cpp_call_line` (a `call` shape with `tight=True`, printed as an
+`expr`). Verified: arms test 30/0; `c_oracle` identical on all 285 C and 13 coroutine programs; closure
+stubs unchanged (3 == 3). The multi-argument print lines and the remaining `_cps_expr_stmt` forms (28 sites
+before this step, about 20 left) are still text.
+
