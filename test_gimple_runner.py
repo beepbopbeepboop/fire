@@ -16049,6 +16049,7 @@ def main():
                   test_none_argument_is_none_in_the_callee,
                   test_none_prints_as_none,
                   test_none_vs_zero_distinguished,
+                  test_optional_int_param_none_check_keeps_its_none_arm,
                   test_dict_get_unknown_domain_into_a_list_local,
                   test_textwrap_dedent_matches_cpython,
                   test_mixed_return_none_string_and_set_arms,
@@ -16726,6 +16727,41 @@ def main():
     print(0 in [None, 1])
 main()
 """)
+
+
+def test_optional_int_param_none_check_keeps_its_none_arm():
+    """`x is None` / `is not None` on a parameter DECLARED `Optional[Int]` asks
+    about the value, not about the resolved C type.
+
+    `_resolve_type` erases `Optional[Int]` to `int64_t`, and the provably-int
+    fold added for `n = 0; n is None` read that ctype as proof the parameter
+    could never be None: `look()` compiled to `return 7` (the wrong arm), and
+    in a large enough function the same fold emitted a bare integer_cst into a
+    `_Bool` temp that `-fgimple` rejects, which is how five stdlib modules
+    (collections/list, collections/deque, collections/interval, os/os,
+    os/process) fell back to source and turned the `stdlib-dylib` job red
+    (2026-11-21). The `Int`-annotated parameter below keeps the
+    fold: its `x is None` is the constant False on both sides of the fix, so
+    this case also pins that the fold was narrowed, not removed.
+    """
+    test_gimple_stdout("gimple_optional_int_param_none_check_keeps_its_none_arm", """\
+def look(stop: Optional[Int] = None) -> Int:
+    if stop is None:
+        return -1
+    return 7
+
+def present(stop: Optional[Int] = None) -> Bool:
+    return stop is not None
+
+def int_param(x: Int) -> Bool:
+    return x is None
+
+def main():
+    print(look())
+    print(look(5))
+    print(present(), present(5))
+    print(int_param(0), int_param(3))
+""", "-1\n7\nFalse True\nFalse False\n")
 
 
 def test_dict_get_unknown_domain_into_a_list_local():
