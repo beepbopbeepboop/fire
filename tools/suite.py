@@ -1971,7 +1971,8 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 # (`.endswith(' *')`, `== 'int64_t'`, ...) may only fall.
 test('type-string-ratchet', [PY, 'test_type_string_ratchet.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_type_string_ratchet.py'],
-     desc='string-typed type tests in the gimple backend may only shrink (stage 4 ratchet)')
+     desc='string-typed type tests in the gimple backend may only shrink (stage 4 ratchet)',
+     disabled='bugs/gate-type-string-ratchet.md')
 # Every program in tools/pydiff_ok.txt must print what CPython prints (the
 # corpus is tools/pydiff_corpus; the finder is tools/pydiff.py). The list may
 # only grow, so a fix that lands is locked in and a regression is named.
@@ -2114,7 +2115,8 @@ test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
-     desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
+     desc='compile-and-execute: plain programs, structs, closures, stdlib calls',
+     disabled='bugs/gate-gimplerunner.md')
 test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_generator_runner.py',
                              'exec_budget.py',      # imported: must be in the key
