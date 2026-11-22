@@ -170,6 +170,20 @@ CASES = {
                      '    f = double_it\n'
                      'print(C.f(21))\n')},
         'main', '42\n', False),
+    # A `from M import f` of a DEF-ONLY module (no top-level statements). The
+    # importer calls `M_init()` for every local sibling it imports from, so the
+    # definer must emit that init even when it has nothing to run. Before the
+    # fix the link failed with `undefined reference to helper_init`.
+    'from_import_def_only_module': (
+        {'helper.py': HELPER_SRC,
+         'main.py': 'from helper import double_it\nprint(double_it(21))\n'},
+        'main', '42\n', False),
+    # The same shape with a definer that DOES have top-level code: its init
+    # already existed; pins that the importer's call still runs that code once.
+    'from_import_module_with_toplevel': (
+        {'helper.py': 'print(5)\n' + HELPER_SRC,
+         'main.py': 'from helper import double_it\nprint(double_it(21))\n'},
+        'main', '5\n42\n', False),
     # A class of the module, bound through the alias as a VALUE. Modeling a
     # class as a value is a separate, larger feature (documented as a stub in
     # `_lower_MemberExpr`), so the assertion here is narrower: the alias read
