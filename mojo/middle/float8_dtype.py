@@ -237,7 +237,7 @@ def has_float_conversion(spelling, target_spelling) -> bool:
     return target_spelling == 'bf16'
 
 
-def _decode(bits, fmt):
+def _decode(bits: Int, fmt):
     """The real value of one bit pattern of a format, or None for a NaN."""
     ebits, mbits, bias, kind = fmt
     if kind == 'ue8m0':
