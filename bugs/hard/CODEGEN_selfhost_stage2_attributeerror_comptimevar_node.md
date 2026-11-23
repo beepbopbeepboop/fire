@@ -1,3 +1,5 @@
+SPLIT: CODEGEN_selfhost_stage2_attributeerror_comptimevar_node-part1, CODEGEN_selfhost_stage2_attributeerror_comptimevar_node-part2, CODEGEN_selfhost_stage2_attributeerror_comptimevar_node-part3, CODEGEN_selfhost_stage2_attributeerror_comptimevar_node-part4
+
 # CODEGEN: the stage2 binary raises `AttributeError: _as_comptimevar_node` on every dump
 
 Found 2026-11-21 while running `make bootstrap` on master plus the stage 5b WordFacts work.
