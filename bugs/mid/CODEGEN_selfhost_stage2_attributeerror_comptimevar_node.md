@@ -39,6 +39,28 @@ every `bootstrap-stage2-dumps` job exits 1 with:
    `bootstrap-verify` compares stage1 and stage2 byte for byte. Delete this doc in the same commit
    as the full chain going green. (Quick criterion 1 alone does not close the doc.)
 
+## Status 2026-11-22: the quick pin passes, and the reported AttributeError is
+## no longer reachable in the self-host compile
+
+Two independent checks on current master:
+
+1. The pin, exactly as written above --
+   `python3 tools/memslot.py --gb 8 --label x --
+   python3 test_codegen_module_alias_function_value.py` --
+   PASS: "a function VALUE read through a module alias is a real function value
+   in the per-file compile (18 shapes)", peak 0.2 GB, child exit 0.
+2. The self-host whole-closure compile (`mojoc`, see
+   `bugs/hard/GATE_recover_land_remainder.md`) now gets PAST
+   `mojo/middle/comptime.py` -- its failure is later, at
+   `float8_dtype.py:249` (fixed in `27809e6ef`) and then a `WordFacts`
+   reference. So `_fc._as_comptimevar_node` is no longer raised on that path.
+
+Per the doc's own rule this still does NOT close it: the full criterion is
+`make bootstrap` getting past `bootstrap-stage2-dumps` and `bootstrap-verify`
+matching stage1/stage2 byte for byte. What it does settle is that the specific
+reported symptom is gone, and the `from fire_compiler import _as_comptimevar_node`
+line is verified rather than unverified.
+
 ## Status 2026-11-21
 
 - Upstream has DISABLED `bootstrap-stage1-transitive` and `bootstrap-stage2-cc` on master (their docs
