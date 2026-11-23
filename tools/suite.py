@@ -1826,8 +1826,7 @@ test('ptrreg-boxed-str', [PY, 'test_ptr_registry.py', '--group', 'boxedstr'],
 # cell where it is silently 0 — an instrument nothing runs is a claim.
 test('refusal-taxonomy', [PY, 'test_refusal_taxonomy.py'],
      deps=['preflight'], mem='tiny',
-     desc='the sweep\'s refusal families stay a taxonomy, and stay out of "other"',
-     disabled='bugs/gate-refusal-taxonomy.md')
+     desc='the sweep\'s refusal families stay a taxonomy, and stay out of "other"')
 # ~275 s, because it builds and runs real programs on both paths. `proofs`, not
 # `check`: the everyday inner loop should not pay for it every time.
 test('comptime-parity', [PY, 'test_comptime_parity.py'],
