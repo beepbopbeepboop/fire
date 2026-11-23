@@ -12650,12 +12650,12 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
             # CPython's own iterutil.py): at run time Python raises NameError
             # when the statement is reached, not before.
             _ne = f"name '{val.name}' is not defined"
-            return [f"{indent}throw _MojoCppExc{{ (int64_t){gen._exc_type_id('NameError')}, "
-                    f'const_cast<char *>("{_ne}"), (void *)const_cast<char *>("{_ne}") }};']
+            _ne_tag = gen._exc_type_id('NameError')
+            return [_cpp_ir_line(indent, 'throw', f'_MojoCppExc{{ (int64_t){_ne_tag}, '
+                                 f'const_cast<char *>("{_ne}"), (void *)const_cast<char *>("{_ne}") }}')]
         if isinstance(val, gimple_ctypes.IdentExpr):
             msg_cpp = gen._cpp_expr(val)
-            return [f"{indent}throw _MojoCppExc{{ (int64_t)0, {msg_cpp}, "
-                    f"(void *){msg_cpp} }};"]
+            return [_cpp_ir_line(indent, 'throw', f"_MojoCppExc{{ (int64_t)0, {msg_cpp}, (void *){msg_cpp} }}")]
         # `raise cls.errors[0]` / `raise self.<field>[<idx>]` — a
         # previously-caught exception VALUE pulled back out of a list
         # (real: Lib/test/test_finalization.py's `raise cls.errors[0]`,
@@ -12676,8 +12676,7 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
             idx_cpp = gen._cpp_expr(val.index)
             msg_cpp = (f"mojo_list_get_str({_cpp_as('MojoList *', obj_cpp)}, "
                        f"(int64_t)({idx_cpp}))")
-            return [f"{indent}throw _MojoCppExc{{ (int64_t)0, {msg_cpp}, "
-                    f"(void *){msg_cpp} }};"]
+            return [_cpp_ir_line(indent, 'throw', f"_MojoCppExc{{ (int64_t)0, {msg_cpp}, (void *){msg_cpp} }}")]
         # `raise <MemberExpr>(...)` / bare `raise <MemberExpr>` — a
         # DYNAMICALLY resolved exception class (real, recurring idiom:
         # `raise self._imap.error(...)` in imaplib.py's Idler.burst,
@@ -12716,8 +12715,7 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
                     msg_cpp = gen._cpp_expr(msg_arg)
             else:
                 msg_cpp = 'const_cast<char *>("")'
-            return [f"{indent}throw _MojoCppExc{{ (int64_t)0, {msg_cpp}, "
-                    f"(void *){msg_cpp} }};"]
+            return [_cpp_ir_line(indent, 'throw', f"_MojoCppExc{{ (int64_t)0, {msg_cpp}, (void *){msg_cpp} }}")]
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             "unsupported `raise` value expression in generator body "
             "(only `raise ExcName(...)`/`raise ExcName` with a "
@@ -12746,8 +12744,7 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
         else:
             # Variable/expression message: evaluate as char* expression
             msg_cpp = gen._cpp_expr(msg_arg)
-    return [f"{indent}throw _MojoCppExc{{ (int64_t){tag}, {msg_cpp}, "
-            f"(void *){msg_cpp} }};"]
+    return [_cpp_ir_line(indent, 'throw', f"_MojoCppExc{{ (int64_t){tag}, {msg_cpp}, (void *){msg_cpp} }}")]
 
 
 def _cpp_raise_tuple_msg_expr(gen, lit) -> Ex:

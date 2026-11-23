@@ -969,3 +969,17 @@ Still text statement lines (about 50 of 58): `_cpp_for_stmt` (10), `_cpf_call_it
 
 Verified: `c_oracle check --base be2daebd6` identical on all 285 pydiff programs and all 31 coroutine programs;
 `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
+
+## Status 2026-11-23 (step 33): the raise statements are one `throw` line
+
+`_cpp_raise_stmt`'s five `throw _MojoCppExc{...};` lines (the NameError form with a `const_cast` name, the zero-tag
+form for an exception value or a dynamic class, and the tagged form) print from one `throw` statement kind
+through `_cpp_ir_line`. The tagged form and the caught-value form are reached (existing `03`, `04`, `14`, and the
+new `29`); the bare `NameError` form is NOT reached by any compiling program (a `raise NameError(...)` probe
+compiles but does not reach that line) and is verified by transcription.
+
+Still text statement lines: `_cpp_for_stmt` (10), `_cpf_call_iterable` (6), the named-target iterators (9), and
+the rest of the 58.
+
+Verified: `c_oracle check --base 06996ee9c` identical on all 285 pydiff programs and all 32 coroutine programs;
+`test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
