@@ -19,6 +19,7 @@ Ex.kind
   'cond'   a ? b : c
   'comma'  a, b                       `a, b` inside a parenthesized comma expression
   'lambda' text (return C type), body   `[&]() -> text { body }()`; body is Instr
+  'closure' name (params), text, body  `[&](params) -> text { body }`, a lambda value
   'opaque' ty                         something the reader does not model
 
 Instr.kind
@@ -94,6 +95,12 @@ class Ex:
             return self.a.show() + ' ' + self.op + ' ' + self.b.show()
         if k == 'cond':
             return self.a.show() + ' ? ' + self.b.show() + ' : ' + self.c.show()
+        if k == 'closure':
+            # `[&](params) -> T { stmt }`: a lambda VALUE, passed on rather than called in place;
+            # `name` is its parameter list text, `text` its return type ('' = none).
+            head = '[&](' + self.name + ')' + (' -> ' + self.text if self.text else '')
+            parts = [st.show() for st in self.body]
+            return head + ' { ' + ' '.join(p for p in parts if p != '') + ' }'
         if k == 'lambda':
             # `[&]() -> T { stmt stmt }()`: a call-once lambda; `text` is T's C spelling,
             # or '' for a lambda with no return type (`[&]() { ... }()`). An empty

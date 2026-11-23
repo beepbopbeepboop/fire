@@ -410,6 +410,13 @@ def main() -> int:
     text_cases.append((_p.show(), '(a + b)'))
     _u = _Ex('un'); _u.op = '!'; _u.a = _ex('x')
     text_cases.append((_u.show(), '!x'))
+    # A lambda value (the sorted() comparator) and the stable_sort call that takes it.
+    from mojo.ir.instr import Ex as _Ex2
+    _cl = _Ex2('closure'); _cl.name = 'int64_t _mg_a, int64_t _mg_b'
+    _cl.body = [_C._cpp_instr('return', _ex('_mg_a < _mg_b'))]
+    text_cases.append((_cl, '[&](int64_t _mg_a, int64_t _mg_b) { return _mg_a < _mg_b; }'))
+    text_cases.append((_C._cpp_call_ex('std::stable_sort', ['_mg_v.begin()', '_mg_v.end()', _cl]),
+        'std::stable_sort(_mg_v.begin(), _mg_v.end(), [&](int64_t _mg_a, int64_t _mg_b) { return _mg_a < _mg_b; })'))
     # Cast spellings: a name the type table canonicalises (intptr_t is int64_t there) must keep its own spelling.
     text_cases.append((_C._cpp_cast_ex('intptr_t', _ex('x')), '(intptr_t)x'))
     text_cases.append((_C._cpp_cast_ex('char *', _ex('x')), '(char *)x'))

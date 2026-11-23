@@ -582,9 +582,11 @@ def _cpp_try_kwargs_forward_call(gen, e):
                 f': (int64_t)({dval});')
         call_args.append(gap_var)
     call_args.append(dict_var)
-    lines.append(f"return {fsym}({', '.join(call_args)});")
-    body = ' '.join(lines)
-    return f"[&]() -> {ret_ctype} {{ {body} }}()"
+    _kwl = Ex('lambda')
+    _kwl.text = ret_ctype
+    _kwl.body = ([_cpp_opaque(ln) for ln in lines[:-1]]
+                 + [_cpp_instr('return', _cpp_call_ex(fsym, call_args))])
+    return _kwl
 
 
 def _cpp_try_unpack_call(gen, e):
@@ -5612,6 +5614,9 @@ def _cpx_call_ident(gen, e) -> Ex:
         gen._cpp_pending_lambda_param_ctype = None
         _cmp = (f"_mg_key(_mg_b) < _mg_key(_mg_a)" if _reverse
                 else f"_mg_key(_mg_a) < _mg_key(_mg_b)")
+        _sort_cmp = Ex('closure')
+        _sort_cmp.name = 'int64_t _mg_a, int64_t _mg_b'
+        _sort_cmp.body = [_cpp_instr('return', ex_text(_cmp))]
         _srt = Ex('lambda')
         _srt.text = 'MojoList *'
         _srt.body = [
@@ -5621,8 +5626,8 @@ def _cpx_call_ident(gen, e) -> Ex:
             _cpp_opaque("for (int64_t _mg_i = 0; _mg_i < _mg_n; _mg_i++) "
                         "_mg_v[_mg_i] = mojo_list_get_int(_mg_in, _mg_i);"),
             _cpp_instr('decl', f"{gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG} _mg_key = {_key_val}"),
-            _cpp_instr('expr', ex_text("std::stable_sort(_mg_v.begin(), _mg_v.end(), "
-                                       f"[&](int64_t _mg_a, int64_t _mg_b) {{ return {_cmp}; }})")),
+            _cpp_instr('expr', _cpp_call_ex('std::stable_sort', [
+                '_mg_v.begin()', '_mg_v.end()', _sort_cmp])),
             _cpp_instr('decl', "MojoList *_mg_out = mojo_list_new()"),
             _cpp_opaque("for (int64_t _mg_e : _mg_v) mojo_list_append_int(_mg_out, _mg_e);"),
             _cpp_instr('return', ex_text("_mg_out")),
