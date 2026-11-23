@@ -13031,13 +13031,13 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         rep_n = gen._cpp_fresh_name("_rep_n")
         rep_i = gen._cpp_fresh_name("_rep_i")
         return [
-            f"{indent}{{",
-            f"{indent}    auto {rep_val} = {val_expr};",
-            f"{indent}    int64_t {rep_n} = {times_expr};",
-            f"{indent}    for (int64_t {rep_i} = 0; {rep_i} < {rep_n}; {rep_i}++) {{",
-            f"{indent}        co_yield {rep_val};",
-            f"{indent}    }}",
-            f"{indent}}}",
+            _cpp_ir_line(indent, 'block'),
+            _cpp_assign_line(f"auto {rep_val}", val_expr, indent + '    '),
+            _cpp_assign_line(f"int64_t {rep_n}", times_expr, indent + '    '),
+            _cpp_ir_line(indent + '    ', 'for', f"int64_t {rep_i} = 0; {rep_i} < {rep_n}; {rep_i}++"),
+            _cpp_ir_line(indent + '        ', 'coyield', rep_val),
+            _cpp_ir_line(indent + '    ', 'end'),
+            _cpp_ir_line(indent, 'end'),
         ]
     # `yield from range(...)`: a native indexed counted loop, mirroring
     # `_cpp_for_stmt`'s own (non-`yield from`) `for i in range(...):`
@@ -13066,10 +13066,9 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             start_e, stop_e, step_e = rargs[0], rargs[1], rargs[2]
         ctr = gen._cpp_fresh_name("_yf_range_i")
         return [
-            f"{indent}for (int64_t {ctr} = {start_e}; "
-            f"({ctr} < {stop_e}) == ({step_e} > 0); {ctr} += {step_e}) {{",
-            f"{indent}    co_yield {ctr};",
-            f"{indent}}}",
+            _cpp_ir_line(indent, 'for', f"int64_t {ctr} = {start_e}; ({ctr} < {stop_e}) == ({step_e} > 0); {ctr} += {step_e}"),
+            _cpp_ir_line(indent + '    ', 'coyield', ctr),
+            _cpp_ir_line(indent, 'end'),
         ]
     # `yield from sorted(<inner>, key=..., reverse=...)`: `_cpp_expr`'s
     # CallExpr/'sorted' case already lowers the WHOLE `sorted(...)`
