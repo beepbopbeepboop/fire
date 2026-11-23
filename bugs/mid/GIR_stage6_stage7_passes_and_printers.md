@@ -364,3 +364,38 @@ Still text (measured 2026-11-22, after the above): `_cpf_named_target` 80 sites,
 (`for (...) {`, which need a loop-header shape), and the 11 `_cpx_*` expression arms. The plan's remaining
 steps are therefore: loop-header and `throw` shapes in `mojo/ir/instr.py`, then the container and
 named-target forms, then the expression arms.
+
+## Status 2026-11-22 (later): loops, assigns and the first big extraction
+
+Landed, each verified (arms 30/0; `c_oracle check --base HEAD` identical on 285 C and 13 C++ programs;
+`compile_stdlib.py` PASSED 592, FAILED 18 = 0 expected / 18 unexpected, the same module set):
+
+- `58ed00ebd`: `_cpf_generator_handle` (while/assign/end) and the `_cpw_async_with` and tuple-unpack
+  statements in `_cps_assign_stmt`.
+- `79d5adde9`: a `for` header shape; `_cpf_list_iter_cursor` prints through it.
+- `8f2bcf9bf`: a `block` shape; `_cpy_handle_local` prints through block/if/for/assign/expr (its one-line
+  `if (!step) break;` and multi-line `throw` stay text).
+- `dba81700d`: a `decl` shape and ONE helper `_cpp_counted_list_loop` for the three copies of the counted
+  list loop (`_cpf_word_iterable`, `_cpf_param_call`, `_cpf_call_iterable`).
+- `a35104a5b`: `tools/extract_arm.py` moved the 582-line expression-iterable arm of `_cpf_named_target`
+  into `_cpf_named_target_iter_expr` (pure move, AST-identical). 60 lines of the parent are still movable.
+
+Text sites per printer function now (`awk` over `{indent}`, 2026-11-22 after the above):
+
+    48 _cpf_named_target_iter_expr(gen,
+    39 _cpp_yield_from(gen,
+    37 _cpp_for_stmt(gen,
+    32 _cpf_named_target(gen,
+    14 _cpp_yield_tuple(gen,
+    12 _cpp_container_literal_init(gen,
+    10 _cpp_for_generator_delegate(gen,
+    9 _cps_assign_stmt(gen,
+    9 _cpp_with_stmt(gen,
+    7 _cpp_async_for_stmt(gen,
+    6 _cpp_raise_stmt(gen,
+    6 _cpf_call_iterable(gen,
+
+Next, in order: (1) the 60 movable lines of `_cpf_named_target`; (2) the `_cpf_named_target_iter_expr`
+body (the bulk of the 80 sites) by target kind; (3) `_cpp_yield_from` and `_cpp_for_stmt` (both need the
+`for`/`while` shapes already added, plus `ifbody`); (4) the 11 `_cpx_*` expression arms, which need
+expression shapes for C++ casts, receivers and runtime-stub calls, not statement shapes.
