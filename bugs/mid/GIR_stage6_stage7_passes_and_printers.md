@@ -705,3 +705,14 @@ shape can now hold; porting each is the next step, one lambda at a time, with th
 Verified: `c_oracle check --base HEAD -j 4` gives identical C on all 285 pydiff programs and identical
 C++ companions on all 13 coroutine programs; `test_gimple_cpp_core_arms.py` pins 30 arms and the
 lambda texts with 0 failures.
+
+## Status 2026-11-23 (step 19): `_cpp_emit_generator_start_expr` returns Ex; its `base_start(...)` is a call shape
+
+The generator-construction expression is built as a `call` Ex (`_cpp_call_ex(f"{base}_start", cargs)`),
+and the keyword-argument path returns its text through `_as_ex`. Its four callers: the member arm and
+the identifier arm take the `Ex` directly. The two statement printers (the `next()` handle and the
+generator-assignment start) still need C text, so they take `.show()` at the boundary; those printers
+are the next text consumers to port.
+
+Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine
+programs; `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.

@@ -2467,7 +2467,7 @@ def _cpp_generator_start_kwargs_expr(gen, call, api, sub_params, defaults):
     return f"[&]() -> MojoGenerator * {{ {body} }}()"
 
 
-def _cpp_emit_generator_start_expr(gen, call, api):
+def _cpp_emit_generator_start_expr(gen, call, api) -> Ex:
     """Emit the `{base}_start(...)` construction expression for a call to a
     resolved compiled generator inside a coroutine body, registering the
     four-symbol extern "C" API for preamble declaration (_cpp_xmod_generator_refs).
@@ -2484,7 +2484,7 @@ def _cpp_emit_generator_start_expr(gen, call, api):
     _kw_expr = _cpp_generator_start_kwargs_expr(
         gen, call, api, sub_params, _dflts)
     if _kw_expr is not None:
-        return _kw_expr
+        return _as_ex(_kw_expr)
     for _aa in list(call.args) + [_kv for _kn, _kv in (call.kwargs or [])]:
         if isinstance(_aa, (gimple_ctypes.TupleExpr,
                             gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
@@ -2524,7 +2524,7 @@ def _cpp_emit_generator_start_expr(gen, call, api):
     if refs is not None:
         refs.setdefault(base, {'value_ctype': api.get('value_ctype', 'int64_t'),
                                'params': list(sub_params)})
-    return f"{base}_start({', '.join(cargs)})"
+    return _cpp_call_ex(f"{base}_start", cargs)
 
 
 def _cpp_boxed_list_literal_expr(gen, lit):
@@ -4065,7 +4065,7 @@ def _cpx_call_member(gen, e) -> Ex:
     # declarations of its {base}_* drive symbols are needed here.
     _mg_api = _cpp_resolve_generator_call_api(gen, e.func)
     if _mg_api is not None:
-        return ex_text(_cpp_emit_generator_start_expr(gen, e, _mg_api))
+        return _cpp_emit_generator_start_expr(gen, e, _mg_api)
     # `.format(...)` on a string literal — mirrors the GIMPLE
     # path's _lower_string_method_call stub (returns the format
     # string itself, diagnosed via _debug_note; the interpolation
@@ -5239,7 +5239,7 @@ def _cpx_call_ident(gen, e) -> Ex:
         elif isinstance(_next_arg, gimple_ctypes.CallExpr):
             _ngc_api = _cpp_resolve_generator_call_api(gen, _next_arg.func)
             if _ngc_api is not None:
-                _next_gen_handle = _cpp_emit_generator_start_expr(gen, _next_arg, _ngc_api)
+                _next_gen_handle = _cpp_emit_generator_start_expr(gen, _next_arg, _ngc_api).show()
                 _next_gen_api = _ngc_api
         if _next_gen_api is not None:
             return _as_ex(_cpp_next_on_generator_expr(gen, _next_gen_handle, _next_gen_api))
@@ -8475,7 +8475,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 if gen._cpp_func_scope_decls is not None:
                     gen._cpp_func_scope_decls.append(f"MojoGenerator *{cpp_name};")
             gen._cpp_generator_var_api[name] = _ga_api
-            _ga_start = _cpp_emit_generator_start_expr(gen, s.value, _ga_api)
+            _ga_start = _cpp_emit_generator_start_expr(gen, s.value, _ga_api).show()
             if name in gen._cpp_mut_capture_names:
                 return [_cpp_assign_line('*' + cpp_name, _ga_start, indent)]
             return [_cpp_assign_line(cpp_name, _ga_start, indent)]
