@@ -56,9 +56,7 @@ TOOL = os.path.join(ROOT, 'tools', 'extract_arm.py')
 # The ratchet is the parent's length now: the arms below account for every
 # line that could move, so the parent may only get shorter.
 # The expression arms still building C++ text (plan step 4 in the stage 6/7 doc).
-EXPR_ARMS_STILL_TEXT = {
-    '_cpx_call_expr',
-}
+EXPR_ARMS_STILL_TEXT = set()
 PARENTS = [
     ('_cpp_expr_ex', 'Ex', 101, [
         '_cpx_ident_expr', '_cpx_member_expr', '_cpx_lambda_expr',
@@ -413,6 +411,9 @@ def main() -> int:
     _u = _Ex('un'); _u.op = '!'; _u.a = _ex('x')
     text_cases.append((_u.show(), '!x'))
     for got, want in text_cases:
+        # An arm returns its `Ex`; the C text it renders to is what these cases pin.
+        if isinstance(got, _Ex):
+            got = got.show()
         if got != want:
             failures.append(f'IR helper text: got {got!r}, want {want!r}')
 

@@ -596,3 +596,21 @@ arms with 0 failures; `compile_stdlib.py` gives `FAILED: 0 (0 expected, 0 unexpe
 Still open: the remaining `_cpx_call_member` returns (multi-line helpers, paren/cast forms,
 the helper-call returns), `_cpx_call_ident` (1,231 lines), and the parent `_cpx_call_expr`'s
 `.show()` dispatch.
+
+## Status 2026-11-23 (step 14): the call dispatch returns `Ex`; 63 returns are still text leaves
+
+`_cpx_call_expr` and `_cpx_call_ident` now have the contract `-> Ex`. Their `.show()` calls at the
+member and callexpr boundaries are gone, and the `_cpp_expr` caller no longer wraps the result in
+`ex_text`. Every return in those two functions goes through `_as_ex(...)`, which passes an `Ex`
+through and wraps text in an `ex_text` leaf. That is a transitional adapter, not a port: the 63
+wrapped returns still spell C++ text, and `_cpx_call_ident` (1,231 lines) is still a text arm
+underneath. `EXPR_ARMS_STILL_TEXT` in `test_gimple_cpp_core_arms.py` is now empty.
+
+Still open: the text returns of `_cpx_call_member` (about 30 f-string sites), the text returns
+inside `_cpx_call_ident` (its calls to `_cpp_emit_generator_start_expr`, the comprehension
+helpers and the `_cpp_as` casts), the `(char *)` cast forms (a `cast` needs a type object
+for `char *`), and the comma forms `(X(...), 0)`, which need a comma shape the IR does not have.
+
+Verified: `c_oracle check --base HEAD -j 4` gives identical C on all 285 pydiff programs and
+identical C++ companions on all 13 coroutine programs; `test_gimple_cpp_core_arms.py` pins 30
+arms with 0 failures; `compile_stdlib.py` gives `FAILED: 0 (0 expected, 0 unexpected)`, no skips.
