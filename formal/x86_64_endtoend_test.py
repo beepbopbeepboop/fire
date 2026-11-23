@@ -4201,8 +4201,9 @@ def emit_terminates(path):
         if not node.stores and node.kind not in ("leaves",):
             emit("have hmem%d : %s.mem = %s.mem := by" % (k + 1, nxt, state))
             hmem_fact = "hmem%d" % (k + 1)
-            hmem_simp = ", ".join(_MEM_LEMMAS + _WRAPPER_DEFS + _WRAPPER_PROJECTIONS)
-            emit("  rw [hs%d]; try simp [%s]" % (k + 1, hmem_simp))
+            hmem_simp = ", ".join(_MEM_LEMMAS)
+            emit("  rw [hs%d]" % (k + 1))
+            emit("  all_goals first | rfl | simp only [%s]" % hmem_simp)
         emit_value_facts(node, nxt, k + 1, fs_path + (node.form,), hval_base,
                          hmem_fact)
         # `x86_exec_go_exit_step`'s second argument is `h_not_exit : s_k.rip ≠
