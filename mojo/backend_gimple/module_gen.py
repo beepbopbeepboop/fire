@@ -10220,8 +10220,7 @@ def _gmh_is_foreign_main(stmts, s):
     return isinstance(s, FunctionDef) and s.name == 'main' and s not in stmts
 
 
-def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
-                                module_stmts):
+def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods):
     """Record, per callee, the parameters whose annotation their own body
     contradicts (`infra_infer.param_boxed_names`).
 
@@ -10237,27 +10236,18 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
     are pre-signature and either may be the first to see a function."""
     import mojo.middle.infra_infer as ginf
     self._param_box_names: dict[str, set] = {}
-    # Whole-module call-site evidence for the tagged word (a bool or None
-    # LITERAL passed for an unannotated parameter); read by
-    # `infra_infer.param_default_none_names` from both the call-site record
-    # below and the callee's own body. See `callsite_tagged_literal_params`.
-    self._callsite_tagged_params: dict = ginf.callsite_tagged_literal_params(
-        module_stmts, all_functions, all_structs_for_methods)
-    # The subset of `_param_box_names` that is the TAGGED word by default
-    # evidence (`= None`, a bool default, or a call-site literal): a call that
-    # OMITS such an argument pads the declared default, which must be boxed by
-    # its own kind (the plain word 0 is the integer 0 / False). Stored as
-    # `{parameter: default expression}`, the node `box_word_value` boxes. See
-    # `infra_infer.param_default_none_names` and `param_tagged_defaults`.
-    self._param_box_defaults: dict[str, dict] = {}
+    # The subset of `_param_box_names` whose boxed slot exists because the
+    # parameter is declared `= None`: a call that OMITS the argument pads the
+    # declared default, which must be the None box (the plain word 0 is the
+    # integer 0). See `infra_infer.param_default_none_names`.
+    self._param_box_none_defaults: dict[str, set] = {}
     for s in all_functions:
         if isinstance(s, FunctionDef):
             _fs_pb = _as_funcdef_node(s)
-            _fk_pb = _as_str(s.name)
-            self._param_box_names[_fk_pb] = ginf.param_boxed_names(
-                self, _fs_pb, _fk_pb)
-            self._param_box_defaults[_fk_pb] = ginf.param_tagged_defaults(
-                _fs_pb, ginf.param_default_none_names(self, _fs_pb, _fk_pb))
+            self._param_box_names[_as_str(s.name)] = ginf.param_boxed_names(
+                self, _fs_pb, _as_str(s.name))
+            self._param_box_none_defaults[_as_str(s.name)] = \
+                ginf.param_default_none_names(self, _fs_pb, _as_str(s.name))
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             _sd_pb = _as_structdef_node(s)
@@ -10266,8 +10256,8 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
                 _pbk = f"{_as_str(_sd_pb.name)}_{_as_str(_pm_pb.name)}"
                 self._param_box_names[_pbk] = ginf.param_boxed_names(
                     self, _pm_pb, _pbk)
-                self._param_box_defaults[_pbk] = ginf.param_tagged_defaults(
-                    _pm_pb, ginf.param_default_none_names(self, _pm_pb, _pbk))
+                self._param_box_none_defaults[_pbk] = \
+                    ginf.param_default_none_names(self, _pm_pb, _pbk)
     # The DECLARATION half of the same rule, applied to the table every
     # signature reader consults. `funcs_shared._param_ctype` overrides a
     # flagged parameter to the tagged word for its OWN readers, but the
@@ -14162,39 +14152,51 @@ def _gmp_emit_toplevel_function(self, func_parts: list[str], has_toplevel_code: 
         if self._lambda_parts:
             func_parts.extend(self._lambda_parts)
             self._lambda_parts = []
-    # A standalone NAMED library module ALWAYS exports `<module>_init()` (and
-    # its constructor), even when it has no top-level statements. An importer
+    # A standalone library module ALWAYS exports `<module>_init()` (and its
+    # constructor), even when it has no top-level statements. An importer
     # that does `from M import f` calls `M_init()` for every local sibling it
     # imports from (`_toplevel_dep_init_modules`, emit_funcs' prelude), so a
     # def-only `M` that emitted nothing left that call an undefined symbol at
     # link time. The empty body is the whole of such a module's init.
-    #
-    # Only a NAMED module has that importer. An unnamed standalone unit is a
-    # generic instantiation (monomorphize.instantiate): every `scale[2]` and
-    # `scale[3]` is its own translation unit with the empty module name, so an
-    # always-emitted `___toplevel`/`__init` collided at link time (duplicate
-    # symbol, two instantiation objects of one template). Such a unit defines
-    # the toplevel only when it has top-level code of its own.
     if not self.emit_entry_points:
         sub_fn = _module_toplevel_name(self.module_name)
-        _library_unit = bool(self.module_name)
         # Register `<mod>_toplevel` for the root's `main()` ONLY when this
-        # translation unit defines it: top-level code, or a standalone named
+        # translation unit defines it: top-level code, or a standalone
         # library compile (which emits the empty body below). A `do_imports`
         # inline build of a def-only module defines no such body, so the root's
         # `main()` calling it was an undefined symbol at link time.
-        defines_toplevel = has_toplevel_code or (not self.do_imports and _library_unit)
+        defines_toplevel = has_toplevel_code or not self.do_imports
         if defines_toplevel and sub_fn not in self._sub_toplevels:
             self._sub_toplevels.append(sub_fn)
-        if not self.do_imports and (has_toplevel_code or _library_unit):
+        if not self.do_imports:
             if not has_toplevel_code:
                 func_parts.append(f"void {sub_fn} (void)")
                 func_parts.append("{")
                 func_parts.append("}")
                 func_parts.append('')
             init_fn = _module_init_name(self.module_name)
+            # Register THIS module's string-literal pool before its own
+            # top-level runs, NOT by relying on constructor ordering: in a
+            # per-file build (no `main()`; the harness supplies its own empty
+            # one) the module's top-level executes from THIS constructor, and
+            # constructors fire in file position — this `<mod>_toplevel_ctor`
+            # is emitted (in func_parts) BEFORE the `_mojo_register_str_pool`
+            # constructor (emitted after func_parts), so a top-level statement
+            # that dispatches a boxed string (`mojo_boxed_is_str`, the
+            # word-iteration arm of `for x in p:`) ran against an EMPTY pool
+            # and raised `TypeError: ... is not iterable` though the identical
+            # single-TU inline build (a real `main()` calling `_toplevel()`
+            # after every constructor) printed the right answer. The
+            # registration is idempotent (`_pr_add` early-returns a pointer
+            # already present), so the startup constructor that still runs is
+            # a harmless no-op. The forward declaration is emitted in the
+            # early decl block (`_gmp_emit_str_pool_registration`'s twin below)
+            # so this use of the still-undefined symbol is valid C.
             func_parts.append(f"__attribute__((constructor)) static void {sub_fn}_ctor (void)")
             func_parts.append("{")
+            if (hasattr(self, '_str_pool') and self._str_pool
+                    and self.emit_str_pool):
+                func_parts.append("  _mojo_register_str_pool ();")
             func_parts.append(f"  {sub_fn} ();")
             func_parts.append("}")
             func_parts.append('')
@@ -17237,8 +17239,7 @@ def gen_module_impl(self, stmts: list):
                 # `mojo.*` import (see the import block's comment).
                 import mojo.middle.infra_infer as ginf
                 ginf.alias_multi_kind_locals(self, key, m)
-    _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
-                                stmts)
+    _gmh_record_param_box_names(self, all_functions, all_structs_for_methods)
     _gmh_reconcile_param_container_kinds(self)
     _gmh_reconcile_augmented_param_types(
         self, all_functions, all_structs_for_methods)
@@ -20039,8 +20040,7 @@ def gen_module_impl(self, stmts: list):
                 # `mojo.*` import (see the import block's comment).
                 import mojo.middle.infra_infer as ginf
                 ginf.alias_multi_kind_locals(self, key, m)
-    _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
-                                stmts)
+    _gmh_record_param_box_names(self, all_functions, all_structs_for_methods)
     _gmh_reconcile_param_container_kinds(self)
     _gmh_reconcile_augmented_param_types(
         self, all_functions, all_structs_for_methods)
@@ -23173,6 +23173,22 @@ def gen_module_impl(self, stmts: list):
         parts.append("static MojoDict * _mojo_dispatch_asdict (void *);")
     parts.append("static int _mojo_dispatch_is_dataclass (void *);")
     parts.append("static int64_t _mojo_dispatch_shallow_copy (void *);")
+    # Forward declaration for the string-pool registration the per-file
+    # toplevel constructor calls FIRST (see `_gmp_emit_toplevel_function`):
+    # the registration is DEFINED after func_parts (so the constructor, which
+    # is in func_parts, sees this declaration first) and must be declared
+    # before that use or GCC implicitly declares it `int()`. Emitted in this
+    # early decl block — NOT next to the definition — so a generated-C reader
+    # walking a prototype to the next `}` stops at a real function body here,
+    # never at the registration constructor's `}` (see
+    # `_gmp_emit_str_pool_registration`'s placement note). Only emitted for a
+    # per-file module that both calls it (non-empty pool, emits the pool) —
+    # the identical guard to the call site, so the declaration is never orphan
+    # and the output is byte-stable across the bootstrap stages.
+    if (not self.emit_entry_points and not self.do_imports
+            and hasattr(self, '_str_pool') and self._str_pool
+            and self.emit_str_pool):
+        parts.append("static void _mojo_register_str_pool (void);")
     # The ungated path needs all cluster declarations that may be called
     # directly. `_mojo_repr_set` is named directly by `repr(<set>)` call sites
     # (emit_infra/emit_resolve lower it to `_mojo_repr_set`), so without a
@@ -23521,6 +23537,25 @@ def gen_module_impl(self, stmts: list):
         raise
     if result is None:
         raise RuntimeError("module generation failed")
+    # Publish this module's committed DEFINITION-side free-function signatures
+    # to the process-wide registry a SEPARATELY compiled importer (its own
+    # GimpleGen instance, do_imports=False — the `compile_module_to_c` per-file
+    # and `fire dylib` shapes) reads through `_published_def_pts`, because
+    # this instance's `_home_def_param_types` store dies with it and the
+    # importer's own view of an unannotated parameter hashes a different
+    # overload suffix than the definition emitted (the per-file `undefined
+    # symbol _helper_f_9f63a2` against the definition's `helper_f_815e8f`;
+    # see `funcs_shared._PUBLISHED_DEF_PTS` for the registry and the
+    # qualifier-spelling drift the path keying avoids). After `result` is
+    # known good, so a refused compile publishes nothing; the try/except keeps
+    # the cache from ever failing the artifact it caches for. In a do_imports
+    # compile this republishes what the shared instance store already holds
+    # (a strict subset — see the publisher's docstring), so the inline shape
+    # answers from tier 0 as before.
+    try:
+        funcs_shared.publish_definer_committed_pts(self)
+    except Exception:
+        pass
     return result
 
 def __getattr__(name):

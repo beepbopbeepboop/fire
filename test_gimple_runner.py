@@ -5809,64 +5809,6 @@ print(isinstance(1, int))
 print(1 in [1, 2])
 """, "True\nTrue\nTrue\nTrue\n")
 
-    # A bool or None reaching an UNANNOTATED parameter keeps its kind across
-    # the call. The parameter is the `int64_t` word, so the value has to be
-    # tagged at the call site (a bool/None LITERAL passed for it, found by the
-    # module-wide scan `callsite_tagged_literal_params`) and at the default
-    # (`recursive=False` pads the bare 0). Before the fix `str()` of the
-    # parameter printed `1` / `0` / `1` / `0`, the integer each value is.
-    # The control `print(f(1))` line is the omitted-default case; the others
-    # are a passed bool and a passed None.
-    test_gimple_stdout("gimple_unannotated_param_keeps_bool_and_none", """\
-def f(p, *, recursive=False):
-    return str(recursive)
-
-def g(v):
-    return str(v)
-
-def k(v):
-    print(v)
-    return str(v)
-
-def main():
-    print(f(1, recursive=True))
-    print(f(1))
-    print(g(True))
-    print(g(None))
-    print(k(True))
-    print(k(None))
-main()
-""", "True\nFalse\nTrue\nNone\nTrue\nTrue\nNone\nNone\n")
-
-    # The same tag must not break what the body does with the value: a
-    # boxed parameter still does arithmetic, truthiness and a `None` default
-    # beside a bool. Each expected line is CPython's.
-    test_gimple_stdout("gimple_tagged_param_arithmetic_and_truth", """\
-def add(a, b=1):
-    return a + b
-
-def pick(flag, n=0):
-    if flag:
-        return n + 10
-    return n
-
-def tog(x=False):
-    return not x
-
-def pad(v, w=None):
-    return str(v) + str(w)
-
-print(add(True))
-print(add(5))
-print(pick(True))
-print(pick(0, 3))
-print(tog())
-print(tog(True))
-print(pad(True))
-print(pad(None, 2))
-print(pad(1))
-""", "2\n6\n10\n3\nTrue\nFalse\nTrueNone\nNone2\n1None\n")
-
     # ── round() ────────────────────────────────────────────────────────
     # The one-argument form had no lowering at all and returned a float, so
     # `round(2.6)` printed `3.0`; Python returns an int. Python also rounds

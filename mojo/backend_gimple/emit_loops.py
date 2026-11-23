@@ -1403,7 +1403,9 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 # GENERATOR HANDLE returned by a call through a function value
                 # (`for v in make(3)(4)`, `mojo_dyn_call` records the handle):
                 # drain it into the list its signature reads. Anything else
-                # answers NULL and keeps the unsupported-iterable abort.
+                # answers NULL and reaches `bb_nogen`: a zero word is a silent
+                # no-op there, and a live word is a string/bytes object the
+                # runtime dispatches (see the `bb_nogen` arm below).
                 bb_gen = gen._new_bb(); bb_nogen = gen._new_bb()
                 _gl = gen._call_expr('MojoList *', 'mojo_iter_gen_handle',
                                      [('int64_t', it64)])
@@ -1412,7 +1414,43 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 _gnull = gen._cmp(_gl64, '==', _gz)
                 gen._cond_goto(_gnull, bb_nogen, bb_gen)
                 gen._emit_label(bb_nogen)
-                gen._emit_unsupported_iter(it_type, node)
+                # A ZERO word (an absent/stub box — the A5 boxed-member shape,
+                # an absent `pat.fields`) iterates zero times and must stay a
+                # SILENT no-op: it never reaches the dispatch below, whose
+                # str check would raise on a NULL.
+                _bb_nonzero = gen._new_bb()
+                gen._cond_goto(_zero_c, bb_after, _bb_nonzero)
+                gen._emit_label(_bb_nonzero)
+                # A pointer-range word no registry above claims is a STRING or
+                # a registered BYTES object — the runtime half of this very
+                # dispatch (`mojo_iter_boxed_list`, the fail-closed sibling of
+                # the `mojo_iter_word` arm in `_materialize_as_list`): a
+                # string iterates its one-character strings, a registered bytes
+                # its ints 0-255, and anything else that reaches here is
+                # genuinely not iterable, so the runtime answers CPython's
+                # `TypeError: ... is not iterable` (it longjmps out, so the
+                # loop it would feed is unreachable — the branch still needs a
+                # value, which the call supplies). Before this arm the word
+                # fell into `_emit_unsupported_iter` — a stderr warning and a
+                # body that ran zero times — so `for c in p:` over a word that
+                # WAS a string silently skipped its body: the runtime half of
+                # the per-file definer's unannotated-iterated-parameter shape
+                # (the definer types such a parameter the kind-neutral word,
+                # see infra_infer's last-resort arm, and the caller — the only
+                # one who knows the kind — boxes whatever it passes).
+                _il = gen._rt_call('MojoList *', 'mojo_iter_boxed_list',
+                                   [it64])
+                # The element kind is a RUNTIME fact (one-char strings for a
+                # str, ints for a bytes), so the target is read boxed — and
+                # the kinds mark is what makes `_gen_for_list`'s shared-arm
+                # branch force the int64_t retyping (a fresh `_shadowN` C
+                # variable when the sibling arms declared `var` `char *`):
+                # without it the boxed read assigned a word into the
+                # first-declared `char *` (a hard "makes pointer from
+                # integer" under -fgimple).
+                gen._word_mark_slot_kinds(_as_str(_il))
+                gen._gen_for_list(var, _il, node.body,
+                                  share_var_with_sibling_arm=True)
                 gen._goto(bb_after)
                 # `for item in <x>.items():` — even when `x`'s type is
                 # unknown (a boxed int64_t, e.g. Counter.items() returning

@@ -1246,7 +1246,16 @@ def module_member_function_csym(gen, module_name: str, member_name: str):
         sym = base
     else:
         qualifier = sanitize_module_qualifier(gen, definer)
-        _pts = _definer_committed_pts(gen, qualifier, def_name)
+        # `definer` as a REF feeds the registry tier of
+        # `_definer_committed_pts`: when the definer was compiled in its own
+        # instance (a separate compile) its committed signature is not in
+        # THIS gen's store, and only the definer's own answer may hash the
+        # suffix (the per-file `undefined symbol _helper_f_9f63a2` against
+        # the definition's `helper_f_815e8f` — the importer's own
+        # `_home_signature_ctypes` fallback hashed its view, not the
+        # definer's).
+        _pts = _definer_committed_pts(gen, qualifier, def_name,
+                                      module_ref=definer)
         if _pts is None:
             _pts = gen._home_signature_ctypes(definer, fs)
         suffix = _as_str(gen.overload_suffix_for(_pts))
@@ -1254,12 +1263,130 @@ def module_member_function_csym(gen, module_name: str, member_name: str):
     return sym, definer, def_name, fs
 
 
-def _definer_committed_pts(gen, qualifier: str, def_name: str):
+# The DEFINER's committed free-function parameter signatures, published by
+# `publish_definer_committed_pts` at the end of every module compile and read
+# by a SEPARATELY compiled importer (its own `GimpleGen` instance,
+# `do_imports=False`, which never sees the definer's per-instance
+# `_home_def_param_types` store). Keyed by the definer's SOURCE FILE path plus
+# the function name, not by the module-qualifier spelling: the definer was
+# compiled under the name its own compile command line chose, while the
+# importer refers to it by the spelling of its own import statement, and the
+# two spellings are a different string whenever the import is relative or
+# abbreviated — the exact qualifier-drift class `_record_home_def_pts`'s
+# docstring records. The path is the one identity both sides resolve
+# independently (the publisher knows its own file; the reader resolves the
+# definer's ref through `_parsed_import`), so the key cannot drift.
+# Process-wide on purpose: the definer's instance is gone before the
+# importer's compiles (`compile_module_to_c` per file), and `fire dylib`'s
+# serial build compiles every module in one process. A dump fanout or a
+# `fire dylib -j>1` worker is a different process, starts with an empty table,
+# and falls back to exactly today's answer — never to a stale one.
+# Value: `(source_text, [param ctypes])`; the source is a staleness guard,
+# checked by the reader only when both sides know it (a publish that could
+# not recover its own source stores '', which matches everything rather than
+# matching nothing).
+_PUBLISHED_DEF_PTS: dict = {}
+
+
+def _published_def_pts_key(path: str, name: str) -> str:
+    """Registry key: the definer's file path (absolutized, so a relative
+    publish and an absolute resolve of the same file share a key) + a
+    non-NUL separator (the self-hosted backend's string concat is
+    strlen-based, so a NUL separator would collapse, as in `_pair_key`) +
+    the function name."""
+    return os.path.abspath(path) + '\x1f' + name
+
+
+def publish_definer_committed_pts(gen) -> None:
+    """Copy `gen`'s committed DEFINITION-side free-function parameter
+    signatures into the process-wide `_PUBLISHED_DEF_PTS` registry.
+
+    Called once per finished `gen_module_impl`, after emission is complete,
+    so the value published is the one the emitted symbol/prototype consumed
+    (`_commit_home_def_pts`'s commit is the last plain-assignment write to a
+    key — a later guess can only fill a key that has no committed answer,
+    and a first-wins `_record_home_def_pts` write against a committed key is
+    a no-op). The registry therefore holds the emitted signature by the time
+    the next module in the process compiles against it.
+
+    The store is keyed by `_pair_key(qualifier, name)` and the registry by
+    (path, name), so the name is recovered by REBUILDING the store key with
+    the same computation the writers used (`_func_qualifier` over this
+    module's own top-level function names, whose tier-1 check answers from
+    the module being compiled itself and never reaches the ambiguity tiers)
+    rather than by splitting the pair key — whose NUL separator the
+    self-hosted backend cannot split back out.
+
+    A failure here must never fail the compile: the registry is a
+    cross-instance cache for a LATER separate compile, not part of this
+    artifact, so the caller wraps the call and skips on exception. In a
+    `do_imports` compile (the inline shape) this publishes entries that the
+    shared instance store already holds — a strict subset of it — so a
+    same-process importer still answers from tier 0 and the inline behavior
+    is unchanged."""
+    store = getattr(gen, '_home_def_param_types', None)
+    if not store:
+        return
+    path = _as_str(getattr(gen, '_current_filename', '') or '')
+    if not path:
+        return
+    names = getattr(gen, '_local_top_level_func_names', None)
+    if not names:
+        return
+    base = os.path.abspath(path)
+    src = _as_str(getattr(gen, '_source_text', '') or '')
+    store = _as_dict(store)
+    for name in list(names):
+        try:
+            qual = _as_str(gen._func_qualifier(name))
+            entry = store.get(_pair_key(qual, name))
+        except Exception:
+            continue
+        if entry is None:
+            continue
+        _PUBLISHED_DEF_PTS[_published_def_pts_key(base, _as_str(name))] = (
+            src, list(entry))
+
+
+def _published_def_pts(gen, module_ref: str, name: str):
+    """The parameter ctypes a SEPARATELY compiled definer published for
+    `name`, or None when this process never compiled that definer's file (a
+    dump fanout's fresh process, a `fire dylib -j>1` worker) or its source
+    has changed since the publish. `module_ref` is the definer's module as
+    the IMPORTER spells it (a ref, not a qualifier): `_parsed_import`
+    resolves it to the very file the definer's own compile was run on, which
+    is the registry's key half — the qualifier spelling the importer's
+    `_func_qualifier` computes is deliberately NOT part of the lookup, so the
+    two halves of one mangled symbol cannot drift on a module-name spelling
+    disagreement."""
+    if not module_ref:
+        return None
+    try:
+        _path, _src, _stmts = _parsed_import(gen, module_ref)
+    except Exception:
+        return None
+    if not _path:
+        return None
+    entry = _PUBLISHED_DEF_PTS.get(_published_def_pts_key(_path, name))
+    if entry is None:
+        return None
+    _stored_src = entry[0]
+    if _stored_src and _src and _stored_src != _src:
+        return None
+    return list(entry[1])
+
+
+def _definer_committed_pts(gen, qualifier: str, def_name: str,
+                           module_ref: str = None):
     """The parameter ctypes the DEFINING unit committed for `def_name`: the
     whole-program `_home_def_param_types` entry `emit_funcs._commit_home_def_pts`
     writes when the definition is emitted (the tier-0 read
-    `emit_funcs._imported_def_pts` makes for a bare name), or None when that
-    definition has not been emitted in this process yet.
+    `emit_funcs._imported_def_pts` makes for a bare name), else — when the
+    definer was compiled in its OWN `GimpleGen` instance (a separate compile,
+    `do_imports=False`) whose store this instance never sees — the entry that
+    definer's compile published to the process-wide registry
+    (`_published_def_pts`, keyed by the definer's source file), or None when
+    that definition has not been compiled in this process yet.
 
     An importer must not hash its OWN resolution of the callee's parameters
     instead. An unannotated parameter is typed from usage and from the
@@ -1268,9 +1395,16 @@ def _definer_committed_pts(gen, qualifier: str, def_name: str):
     `glob.escape("a*b")` infers `pathname: char *`, while the definer, which
     sees no such call, emits `escape(int64_t pathname)`. Hashing the importer's
     view named `glob_escape_d719e0` against the definition's
-    `glob_escape_9f63a2` (the `globcompiled` gate job's link failure)."""
+    `glob_escape_9f63a2` (the `globcompiled` gate job's link failure).
+
+    `module_ref` is the definer's module as a REF (the reader's spelling),
+    used only for the registry tier: it is what `_parsed_import` opens, and
+    the `qualifier` half above stays exactly what it was for the in-instance
+    read."""
     _committed = _as_dict(getattr(gen, '_home_def_param_types', None)).get(
         _pair_key(qualifier, def_name))
+    if _committed is None and module_ref is not None:
+        _committed = _published_def_pts(gen, module_ref, def_name)
     if _committed is None:
         return None
     return list(_committed)
@@ -1329,15 +1463,16 @@ def register_module_member_value(gen, module_name: str, member_name: str):
             if _m and _m.end() < len(_sig):
                 _entry['signature'] = _ret + ' ' + def_name + _sig[_m.end():]
     # The DEFINER's parameter list, when it committed one (see
-    # `_definer_committed_pts`). The export scan types an unannotated parameter
-    # from THIS unit's call-site evidence, which the definition does not share,
-    # so the prototype must say what the definition emits: `int64_t pathname`,
-    # not the importer's `char * pathname`. Otherwise the extern and the
-    # definition disagree in one translation unit (`conflicting types for
+    # `_definer_committed_pts`, whose registry tier answers for a definer
+    # compiled in its own instance — the separate-compile shape — so the
+    # prototype says what the definition emits, `int64_t pathname`, not the
+    # importer's `char * pathname`). Otherwise the extern and the definition
+    # disagree in one translation unit (`conflicting types for
     # 'glob_escape_9f63a2'`, the `globcompiled` job). Only the parameter list
     # is rewritten, and only when it lines up one-to-one with the definition's
     # parameters: a `*args`/`**kwargs` shape keeps the scan's answer.
-    _committed = _definer_committed_pts(gen, sanitize_module_qualifier(gen, definer), def_name)
+    _committed = _definer_committed_pts(gen, sanitize_module_qualifier(gen, definer), def_name,
+                                        module_ref=definer)
     _fs_params = list(_fs.params or [])
     if (_committed is not None and len(_committed) == len(_fs_params)
             and not any(_as_str(_pn).startswith('*') for _pn, _pt in _fs_params)):

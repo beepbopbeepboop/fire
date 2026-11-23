@@ -34,6 +34,3 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 - 2026-11-22 07:50:35: conflicts with master (last commit 2026-11-22, first unlanded commit 2026-11-22; 2 commit(s) ahead of master, 16 behind it; task started 2026-11-22 07:42:51)
   Branch: work/fix-proof-fix-gate-linkmode
   Conflicting files: mojo/backend_gimple/emit_methods.py, mojo/backend_gimple/module_gen.py
-- 2026-11-22 09:05:00: conflicts with master (last commit 2026-11-22, first unlanded commit 2026-11-22; 2 commit(s) ahead of master, 21 behind it; task started 2026-11-22 08:53:57)
-  Branch: work/fix-proof-bug-land-linkmode
-  Conflicting files: mojo/middle/funcs_shared.py
