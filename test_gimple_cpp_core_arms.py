@@ -365,6 +365,23 @@ def main() -> int:
     text_cases.append((_C._cpx_member_expr(_MGen({'o': 'int64_t'}), _N.MemberExpr(obj=_N.IdentExpr(name='o'), member='f')).show(),
                        'mojo_getattr_any((void *)(intptr_t)(o), (char *)"f")'))
     text_cases.append((_C._coawait_ex('X_Awaiter{X_impl (a).h}').show(), 'co_await X_Awaiter{X_impl (a).h}'))
+    # The CallExpr-callee call arm, through a real generator object (the stub cannot
+    # resolve the inner callee). Expected strings are HEAD's _cpx_call_expr output.
+    import gimple_codegen as _GC
+    import mojo.middle.types as _T
+    _CT = _T._CPP_CALLABLE_CTYPE
+
+    def _callee_call(fac=()):
+        g = _GC.GimpleGen()
+        g._cpp_declared = {'g': _CT, 'mk': _CT}
+        g._cpp_closure_factory_names = fac
+        return g
+
+    _iv = lambda v: _N.IntLiteral(value=v)
+    _plain = _N.CallExpr(func=_N.CallExpr(func=_N.IdentExpr(name='g'), args=[], kwargs={}), args=[_iv(1), _iv(2)], kwargs={})
+    text_cases.append((_C._cpx_call_expr(_callee_call(), _plain), '(g())(1, 2)'))
+    _fac = _N.CallExpr(func=_N.CallExpr(func=_N.IdentExpr(name='mk'), args=[], kwargs={}), args=[_iv(5)], kwargs={})
+    text_cases.append((_C._cpx_call_expr(_callee_call(('mk',)), _fac), 'mojo_fnptr_call_1((void *)(mk()), 5)'))
     _xs = _N.IdentExpr(name='xs')
     _ints = lambda v: _N.IntLiteral(value=v)
     _lst = _slice({'xs': 'MojoList *'}, _xs, _ints(1), _ints(4), _ints(2))

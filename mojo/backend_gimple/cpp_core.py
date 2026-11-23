@@ -6024,7 +6024,7 @@ def _cpx_call_ident(gen, e) -> str:
         "a declared callable-value local)")
 
 
-def _cpx_call_callexpr(gen, e) -> str:
+def _cpx_call_callexpr(gen, e) -> Ex:
     """The CallExpr-callee arm of _cpx_call_expr (extracted, unchanged body).
 
     One arm of `_cpx_call_expr`, which tests the condition and calls this."""
@@ -6140,22 +6140,21 @@ def _cpx_call_callexpr(gen, e) -> str:
         # Choose dispatch based on return type
         if gimple_ctypes.TypeLattice.is_double(c_ret):
             helper = f"mojo_fnptr_call_d{len(arg_exprs)}"
-            call = f"{helper}((void *)({inner}){''.join(', ' + x for x in arg_exprs)})"
+            call = _cpp_call_ex(helper, [f"(void *)({inner})"] + arg_exprs)
             return call
         elif (isinstance(c_ret, str) and c_ret.endswith('*')
                 and c_ret not in ('MojoList *', 'MojoDict *', 'MojoSet *')):
             helper = f"mojo_fnptr_call_{len(arg_exprs)}"
-            call = f"{helper}((void *)({inner}){''.join(', ' + x for x in arg_exprs)})"
-            return f"({c_ret})({call})"
+            call = _cpp_call_ex(helper, [f"(void *)({inner})"] + arg_exprs)
+            return _cpp_call_ex(f"({c_ret})", [call])
         else:
             helper = f"mojo_fnptr_call_{len(arg_exprs)}"
-            return (f"{helper}"
-                    f"((void *)({inner}){''.join(', ' + x for x in arg_exprs)})")
+            return _cpp_call_ex(helper, [f"(void *)({inner})"] + arg_exprs)
 
     # Call of a call result: f()(args)  →  (f())(args)
     inner = gen._cpp_expr(e.func)
     args_text = ', '.join(gen._cpp_expr(a) for a in e.args)
-    return f"({inner})({args_text})"
+    return _cpp_call_ex(f"({inner})", [args_text])
 
 
 def _cpx_call_expr(gen, e) -> str:
@@ -6255,7 +6254,7 @@ def _cpx_call_expr(gen, e) -> str:
     if isinstance(e.func, gimple_ctypes.IdentExpr):
         return _cpx_call_ident(gen, e)
     if isinstance(e.func, gimple_ctypes.CallExpr):
-        return _cpx_call_callexpr(gen, e)
+        return _cpx_call_callexpr(gen, e).show()
     raise gimple_exprtypes._UnsupportedGeneratorShape(
         f"unsupported call expression in generator body")
 
@@ -6265,7 +6264,7 @@ def _cpp_call_ex(callee: str, args: list) -> Ex:
     e = Ex('call')
     e.a = ex_text(callee)
     e.tight = True
-    e.args = [ex_text(str(a)) for a in args]
+    e.args = [a if isinstance(a, Ex) else ex_text(str(a)) for a in args]
     return e
 
 
