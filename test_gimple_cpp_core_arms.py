@@ -55,8 +55,14 @@ TOOL = os.path.join(ROOT, 'tools', 'extract_arm.py')
 # (parent, return annotation, line ratchet, the arms extracted from it).
 # The ratchet is the parent's length now: the arms below account for every
 # line that could move, so the parent may only get shorter.
+# The expression arms still building C++ text (plan step 4 in the stage 6/7 doc).
+EXPR_ARMS_STILL_TEXT = {
+    '_cpx_slice_expr', '_cpx_unary_op', '_cpx_walrus', '_cpx_compare_chain',
+    '_cpx_ident_expr', '_cpx_subscript_expr', '_cpx_lambda_expr', '_cpx_binary_op',
+    '_cpx_member_expr', '_cpx_await_expr', '_cpx_call_expr',
+}
 PARENTS = [
-    ('_cpp_expr', 'str', 101, [
+    ('_cpp_expr_ex', 'Ex', 101, [
         '_cpx_ident_expr', '_cpx_member_expr', '_cpx_lambda_expr',
         '_cpx_unary_op', '_cpx_binary_op', '_cpx_compare_chain',
         '_cpx_walrus', '_cpx_call_expr', '_cpx_slice_expr',
@@ -138,7 +144,13 @@ def main() -> int:
                 failures.append(f'{name}: called {calls.get(name, 0)} times '
                                 f'from {parent}; an arm is called once')
             want = ast.unparse(fn.returns) if fn.returns else ''
-            if want not in (ret, ret + ' | None'):
+            # An expression arm not yet migrated still returns its C++ text; the
+            # dispatcher wraps it with ex_text. Each migration removes it from this list.
+            if name in EXPR_ARMS_STILL_TEXT and parent == '_cpp_expr_ex':
+                want_ok = want in ('str', 'str | None')
+            else:
+                want_ok = want in (ret, ret + ' | None')
+            if not want_ok:
                 failures.append(f'{name}: return annotation {want!r}, '
                                 f'want {ret!r} (or {ret + " | None"!r} for a '
                                 f'fall-through arm)')

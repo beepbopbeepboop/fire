@@ -43,6 +43,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.coro as coro_mod
+from mojo.ir.instr import Ex, ex_text
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -6626,37 +6627,37 @@ def _cpx_await_expr(gen, e) -> str:
         f"{type(target).__name__ if target is not None else 'bare await'})")
 
 
-def _cpp_expr(gen, e) -> str:
+def _cpp_expr_ex(gen, e):
     # An operand registered by _cpp_guard_none_operand lowers to its guarded
     # word (the identity check keeps a recycled id from matching a new node).
     _guarded = (getattr(gen, '_cpp_none_guards', None) or {}).get(id(e))
     if _guarded is not None and _guarded[0] is e:
-        return _guarded[1]
+        return ex_text(_guarded[1])
     if isinstance(e, gimple_ctypes.IntLiteral):
         value = _signed_int64(e.value)
-        return _signed_int64_c_literal(value)
+        return ex_text(_signed_int64_c_literal(value))
     if isinstance(e, gimple_ctypes.FloatLiteral):
-        return _float_c_literal(e.value)
+        return ex_text(_float_c_literal(e.value))
     if isinstance(e, gimple_ctypes.BoolLiteral):
-        return 'true' if e.value else 'false'
+        return ex_text('true' if e.value else 'false')
     if isinstance(e, gimple_ctypes.DottedLiteral):
         # A dot-relative value reference (`.always`, `.uint64`). Zero
         # placeholder, for the reason and with the same convention as
         # `_lower_DottedLiteral` in the GIMPLE path — see its docstring.
-        return '0'
+        return ex_text('0')
     if isinstance(e, gimple_ctypes.StringLiteral):
         val = e.value
         if val.startswith('`') and val.endswith('`') and len(val) > 2:
-            return val  # backtick-quoted identifier (mojo keyword escape)
-        return _cpp_string_literal_expr(gen, val, gimple_ctypes._str_literal_interp_flag(e))
+            return ex_text(val)  # backtick-quoted identifier (mojo keyword escape)
+        return ex_text(_cpp_string_literal_expr(gen, val, gimple_ctypes._str_literal_interp_flag(e)))
     if isinstance(e, gimple_ctypes.IdentExpr):
-        return _cpx_ident_expr(gen, e)
+        return ex_text(_cpx_ident_expr(gen, e))
     if isinstance(e, gimple_ctypes.MemberExpr):
-        return _cpx_member_expr(gen, e)
+        return ex_text(_cpx_member_expr(gen, e))
     if isinstance(e, gimple_ctypes.LambdaExpr):
-        return _cpx_lambda_expr(gen, e)
+        return ex_text(_cpx_lambda_expr(gen, e))
     if isinstance(e, gimple_ctypes.UnaryOp):
-        return _cpx_unary_op(gen, e)
+        return ex_text(_cpx_unary_op(gen, e))
     if isinstance(e, gimple_ctypes.TernaryExpr):
         # `None if c else []` (Lib/os.py `_fwalk`'s `entries`): a list display
         # branch is a real `MojoList *` (a bare `{}` is not an expression), and
@@ -6667,16 +6668,16 @@ def _cpp_expr(gen, e) -> str:
                 if isinstance(b, gimple_ctypes.ListExpr) and not b.elements:
                     return "(int64_t)(intptr_t)mojo_list_new()"
                 return f"(int64_t)({gen._cpp_expr(b)})"
-            return f"({gen._cpp_expr(e.condition)} ? {_tb(e.then_val)} : {_tb(e.else_val)})"
-        return (f"({_cpp_untyped_word_truth(gen, e.condition, gen._cpp_expr(e.condition))}"
-                f" ? {gen._cpp_expr(e.then_val)} : {gen._cpp_expr(e.else_val)})")
+            return ex_text(f"({gen._cpp_expr(e.condition)} ? {_tb(e.then_val)} : {_tb(e.else_val)})")
+        return (ex_text(f"({_cpp_untyped_word_truth(gen, e.condition, gen._cpp_expr(e.condition))}"
+                f" ? {gen._cpp_expr(e.then_val)} : {gen._cpp_expr(e.else_val)})"))
     if isinstance(e, gimple_ctypes.BinaryOp):
-        return _cpx_binary_op(gen, e)
+        return ex_text(_cpx_binary_op(gen, e))
     if isinstance(e, gimple_ctypes.CompareChain):
-        return _cpx_compare_chain(gen, e)
+        return ex_text(_cpx_compare_chain(gen, e))
     if isinstance(e, gimple_ctypes.DictExpr):
         pairs = [f"{{{gen._cpp_expr(k)}, {gen._cpp_expr(v)}}}" for k, v in e.pairs]
-        return '{' + ', '.join(pairs) + '}'
+        return ex_text('{' + ', '.join(pairs) + '}')
     if isinstance(e, gimple_ctypes.Comprehension):
         # `[<elem> for <target> in <iterable> if <cond> ...]` / `{<elem>
         # for <target> in <iterable> if <cond> ...}` as a value, with
@@ -6696,37 +6697,42 @@ def _cpp_expr(gen, e) -> str:
         # real occurrence).
         if e.kind in ('list', 'set') and len(e.generators) == 1:
             g0 = e.generators[0]
-            return gen._cpp_build_container_from_iterable(
-                e.kind, g0.iterable, g0.target, e.element, g0.conditions)
+            return ex_text(gen._cpp_build_container_from_iterable(
+                e.kind, g0.iterable, g0.target, e.element, g0.conditions))
         gimple_ctypes._debug_note('stubbed operation',
                                    f'generator-body {e.kind} comprehension (unsupported shape)')
-        return "mojo_list_new ()"
+        return ex_text("mojo_list_new ()")
     if isinstance(e, gimple_ctypes.SetExpr):
-        return '{' + ', '.join(gen._cpp_expr(el) for el in e.elements) + '}'
+        return ex_text('{' + ', '.join(gen._cpp_expr(el) for el in e.elements) + '}')
     if isinstance(e, gimple_ctypes.ListExpr):
-        return _cpp_list_literal_arg_expr(gen, e)
+        return ex_text(_cpp_list_literal_arg_expr(gen, e))
     if isinstance(e, gimple_ctypes.TupleExpr):
         # A tuple value in this coroutine-body model is represented as a
         # MojoList* (boxed elements), the same runtime shape every other
         # tuple/list literal use in this emitter already assumes.
-        return _cpp_list_literal_arg_expr(gen, e)
+        return ex_text(_cpp_list_literal_arg_expr(gen, e))
     if isinstance(e, gimple_ctypes.WalrusExpr):
         # `x := expr` assigns x and yields the value
         name = e.name
         val = gen._cpp_expr(e.value)
-        return f"({name} = {val})"
+        return ex_text(f"({name} = {val})")
     if isinstance(e, gimple_ctypes.BinaryOp) and e.op == ':=':
-        return _cpx_walrus(gen, e)
+        return ex_text(_cpx_walrus(gen, e))
     if isinstance(e, gimple_ctypes.CallExpr):
-        return _cpx_call_expr(gen, e)
+        return ex_text(_cpx_call_expr(gen, e))
     if isinstance(e, gimple_ctypes.SliceExpr):
-        return _cpx_slice_expr(gen, e)
+        return ex_text(_cpx_slice_expr(gen, e))
     if isinstance(e, gimple_ctypes.SubscriptExpr):
-        return _cpx_subscript_expr(gen, e)
+        return ex_text(_cpx_subscript_expr(gen, e))
     if isinstance(e, gimple_ctypes.AwaitExpr):
-        return _cpx_await_expr(gen, e)
+        return ex_text(_cpx_await_expr(gen, e))
     raise gimple_exprtypes._UnsupportedGeneratorShape(
         f"unsupported expression in generator body: {type(e).__name__}")
+
+
+def _cpp_expr(gen, e) -> str:
+    """The C++ text of expression E: `_cpp_expr_ex(gen, e).show()`."""
+    return gen._cpp_expr_ex(e).show()
 
 
 def _cpp_assign_received_yield(gen, s, declared: dict, indent: str) -> list[str]:
