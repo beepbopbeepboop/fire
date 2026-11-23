@@ -7785,8 +7785,11 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     "asyncio.sleep()'s argument must be a scalar "
                     "int64_t/double seconds expression")
             arg_expr = gen._cpp_expr(target.args[0])
-            return [f"{indent}co_await _mojoasync_SleepAwaiter{{"
-                    f"(uint64_t)((double)({arg_expr}) * 1e9)}};"]
+            _slp = Ex('coawait')
+            _slp.a = ex_text(f"_mojoasync_SleepAwaiter{{(uint64_t)((double)({arg_expr}) * 1e9)}}")
+            _slp_stmt = Instr('expr')
+            _slp_stmt.rhs = _slp
+            return [indent + _slp_stmt.show()]
         # Step D: a bare, value-DISCARDING `await <call to another
         # compiled async function>` statement — same real co_await/
         # composition machinery as the value-producing shape
@@ -10584,7 +10587,7 @@ def _cpf_word_iterable(gen, s: 'ForStmt', declared: dict, indent: str) -> list[s
             _call_txt = gen._cpp_expr(s.iterable)
     except Exception:
         _call_txt = gen._cpp_expr(s.iterable)
-    _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+    _pre = [_cpp_assign_line(f"MojoList *{_wi}", f"mojo_iter_word((int64_t)(intptr_t)({_call_txt}))", indent)]
     # If this is a call through a tabled foreign callable with known iterator
     # element type (e.g. csv.reader), bind the loop target accordingly.
     _elem_ctype = None
@@ -10741,7 +10744,7 @@ def _cpf_param_call(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]
                 _call_txt = gen._cpp_expr(s.iterable)
         except Exception:
             _call_txt = gen._cpp_expr(s.iterable)
-        _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+        _pre = [_cpp_assign_line(f"MojoList *{_wi}", f"mojo_iter_word((int64_t)(intptr_t)({_call_txt}))", indent)]
         if _elem_ctype and isinstance(s.target, str) and not for_target_is_tuple(s.target) and not s.else_body:
             return _pre + _cpp_counted_list_loop(gen, s, declared, indent, _wi, _elem_ctype)
         _inner_for = gimple_ctypes.ForStmt(
@@ -11030,7 +11033,7 @@ def _cpf_list_iter_cursor(gen, s: 'ForStmt', declared: dict, indent: str, target
     lines = []
     if target not in declared:
         declared[target] = 'int64_t'
-        lines.append(f"{indent}int64_t {target};")
+        lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {target}"))
     # The advance goes at the TOP of the body, not in the for-increment.
     # Same Python invariant as the GIMPLE lowering's
     # `_gen_for_iter_cursor`: `cur` is the index of the next
@@ -11546,7 +11549,7 @@ def _cpf_named_target_iter_expr(gen, s: 'ForStmt', declared: dict, indent: str, 
     if _iter_list_expr is not None:
         _cached = gen._cpp_fresh_name("_mg_iter")
         _ctr = gen._cpp_fresh_name("_mg_i")
-        lines = [f"{indent}MojoList *{_cached} = {_iter_list_expr};"]
+        lines = [_cpp_assign_line(f"MojoList *{_cached}", _iter_list_expr, indent)]
         # for/else: the else body runs only when the loop completes
         # WITHOUT a `break`. This lowering has to carry it itself (it
         # returns before the generic for/else block below), with the
@@ -11924,7 +11927,7 @@ def _cpf_named_target(gen, s: 'ForStmt', declared: dict, indent: str, target) ->
             declared[_wi] = 'MojoList *'
             gen._cpp_word_iter_locals.add(_wi)
             _call_txt = gen._cpp_expr(s.iterable)
-            _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+            _pre = [_cpp_assign_line(f"MojoList *{_wi}", f"mojo_iter_word((int64_t)(intptr_t)({_call_txt}))", indent)]
             _inner_for = gimple_ctypes.ForStmt(
                 target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
                 body=s.body, else_body=s.else_body)
@@ -12577,7 +12580,7 @@ def _cpp_async_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[
         _cpp_assign_line(f"{base}_handle {handle_var}", f"{base}_impl ({call_args}).h", indent),
         _cpp_ir_line(indent, 'for', ';;'),
         _cpp_assign_line(f"bool {has_var}", f"co_await {base}_AnextAwaiter{{{handle_var}}}", indent + '    '),
-        f"{indent}    if (!{has_var}) break;",
+        _cpp_if_break_line(indent + '    ', f"!{has_var}"),
         _cpp_assign_line(f"{gimple_exprtypes._c_to_cpp_scalar_type(value_ctype)} {var}",
                          f"{handle_var}.promise().current_value", indent + '    '),
     ]
@@ -12862,7 +12865,7 @@ def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "`yield`/`yield from` inside a `finally:` block is not "
                 "supported in a generator body")
-        lines.append(f"{indent}{{")
+        lines.append(_cpp_ir_line(indent, 'block'))
         # `_MojoScopeExit` (shared preamble, alongside `_MojoCppExc`/
         # `_mojogen_sub_guard`) wraps an arbitrary `std::function<void
         # ()>`, run from its destructor on every way this scope can be
@@ -12880,7 +12883,7 @@ def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
         lines.extend(finally_lines)
         lines.append(_cpp_ir_line(indent + '    ', 'scope_close'))
         body_indent = indent + '    '
-        closing.append(f"{indent}}}")
+        closing.append(_cpp_ir_line(indent, 'end'))
 
     inner_indent = body_indent + '    '
 
@@ -13026,7 +13029,7 @@ def _cpy_handle_local(gen, indent: str, call) -> list[str]:
         _cpp_ir_line(indent + '    ', 'if', _yh_first),
         _cpp_ir_line(indent + '        ', 'for', ';;'),
         _cpp_assign_line(_fw, f"co_yield {_yh_base}_value({_yh_handle})", indent + '            '),
-        f"{indent}            if (!{_yh_step(_fw)}) break;",
+        _cpp_if_break_line(indent + '            ', f"!{_yh_step(_fw)}"),
         _cpp_ir_line(indent + '        ', 'end'),
         _cpp_ir_line(indent + '    ', 'end'),
         _cpp_ir_line(indent + '    ', 'if', 'mojo_exc_pending_get()'),
