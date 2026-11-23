@@ -12962,10 +12962,10 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         if _yf_dyn is not None:
             _yfl = gen._cpp_fresh_name("_mg_yfw")
             gen._cpp_word_iter_locals.add(_yfl)
-            return [f"{indent}MojoList *{_yfl} = mojo_iter_word((int64_t)(intptr_t)({_yf_dyn}));",
-                    f"{indent}for (int64_t _i = 0; _i < mojo_list_len({_yfl}); _i++) {{",
-                    f"{indent}    co_yield /*YFWORD*/ mojo_box_word(mojo_list_get_boxed({_yfl}, _i));",
-                    f"{indent}}}"]
+            return [_cpp_assign_line(f"MojoList *{_yfl}", f"mojo_iter_word((int64_t)(intptr_t)({_yf_dyn}))", indent),
+                    _cpp_ir_line(indent, 'for', f"int64_t _i = 0; _i < mojo_list_len({_yfl}); _i++"),
+                    _cpp_ir_line(indent + '    ', 'coyield', f"/*YFWORD*/ mojo_box_word(mojo_list_get_boxed({_yfl}, _i))"),
+                    _cpp_ir_line(indent, 'end')]
 
     call = yf.value
     # `yield from <opaque word local>` — a local/param this unit holds as a
@@ -12995,10 +12995,10 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             and call.name not in getattr(gen, '_cpp_generator_var_api', {})):
         _ywl = gen._cpp_fresh_name("_mg_yfwl")
         gen._cpp_word_iter_locals.add(_ywl)
-        return [f"{indent}MojoList *{_ywl} = mojo_iter_word((int64_t)(intptr_t)({gen._cpp_expr(call)}));",
-                f"{indent}for (int64_t _i = 0; _i < mojo_list_len({_ywl}); _i++) {{",
-                f"{indent}    co_yield /*YFWORD*/ mojo_box_word(mojo_list_get_boxed({_ywl}, _i));",
-                f"{indent}}}"]
+        return [_cpp_assign_line(f"MojoList *{_ywl}", f"mojo_iter_word((int64_t)(intptr_t)({gen._cpp_expr(call)}))", indent),
+                _cpp_ir_line(indent, 'for', f"int64_t _i = 0; _i < mojo_list_len({_ywl}); _i++"),
+                _cpp_ir_line(indent + '    ', 'coyield', f"/*YFWORD*/ mojo_box_word(mojo_list_get_boxed({_ywl}, _i))"),
+                _cpp_ir_line(indent, 'end')]
     # Remember whether the `yield from` call was written with keywords before
     # the delegation branch below flattens them into positional arguments (a
     # simplification that is only valid for the ordinary compiled-generator
@@ -13018,9 +13018,9 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
     # emit `for (auto _yf_item : <collection>) { co_yield _yf_item; }`
     if isinstance(call, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
         coll = gen._cpp_expr(call)
-        return [f"{indent}for (auto _yf_item : {coll}) {{",
-                f"{indent}    co_yield _yf_item;",
-                f"{indent}}}"]
+        return [_cpp_ir_line(indent, 'for', f"auto _yf_item : {coll}"),
+                _cpp_ir_line(indent + '    ', 'coyield', "_yf_item"),
+                _cpp_ir_line(indent, 'end')]
     # `yield from itertools.repeat(value, times)` (finite 2-arg form —
     # see `_is_itertools_repeat2_call`'s docstring): `repeat` has no C
     # symbol anywhere in this codegen (it isn't a list/tuple literal
@@ -13103,10 +13103,10 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             and not gen._locally_binds_name('sorted')):
         result_var = gen._cpp_fresh_name("_yf_sorted")
         coll_expr = gen._cpp_expr(call)
-        return [f"{indent}auto {result_var} = " + _cpp_as('MojoList *', coll_expr) + ";",
-                f"{indent}for (int64_t _i = 0; _i < mojo_list_len({result_var}); _i++) {{",
-                f"{indent}    co_yield mojo_list_get_int({result_var}, _i);",
-                f"{indent}}}"]
+        return [_cpp_assign_line(f"auto {result_var}", _cpp_as('MojoList *', coll_expr), indent),
+                _cpp_ir_line(indent, 'for', f"int64_t _i = 0; _i < mojo_list_len({result_var}); _i++"),
+                _cpp_ir_line(indent + '    ', 'coyield', f"mojo_list_get_int({result_var}, _i)"),
+                _cpp_ir_line(indent, 'end')]
     # `yield from <expr>` where the value is a plain collection (any
     # non-generator-call expression — a method chain, a bare name, etc.):
     # iterate the MojoList* result with an indexed loop, co_yield-ing
