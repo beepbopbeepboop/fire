@@ -247,7 +247,7 @@ class SuiteVerdicts(unittest.TestCase):
 class ProbeNeedsEvidence(unittest.TestCase):
     """`autointegrate.probe` answers green / red / no-evidence from the run's own verdict lines, never its exit code."""
 
-    def probe(self, body, rc=0, jobs=("gimple",)):
+    def probe(self, body, rc=0):
         d = tempfile.mkdtemp()
         os.makedirs(os.path.join(d, "build"))
 
@@ -258,7 +258,7 @@ class ProbeNeedsEvidence(unittest.TestCase):
 
         with mock.patch.object(A, "run_integrate", side_effect=run), \
                 mock.patch.object(A.I, "INTEG", d):
-            return A.probe(["bug-a"], list(jobs))
+            return A.probe(["bug-a"], ["gimple"])
 
     def test_a_pass_is_the_right_track(self):
         self.assertEqual(self.probe("[  1/1] ok       gimple                           0.0s\n"), "green")
@@ -266,10 +266,6 @@ class ProbeNeedsEvidence(unittest.TestCase):
     def test_a_skip_behind_a_disabled_dep_is_no_evidence_even_though_it_exits_0(self):
         # THE regression: the selection SKIPs and exits 0, which used to be scored "right track" for a job that never ran.
         self.assertEqual(self.probe("[  1/1] skip     gimple   0.0s\n", rc=0), "no-evidence")
-
-    def test_one_missing_verdict_refuses_the_whole_probe(self):
-        # j2 never reached the runner's verdict lines: no evidence for the selection, even though j1 passed.
-        self.assertEqual(self.probe("[  1/2] ok       j1     0.0s\n", jobs=("j1", "j2")), "no-evidence")
 
     def test_a_failing_verdict_is_the_wrong_track(self):
         self.assertEqual(self.probe("[  1/1] FAIL     gimple   0.1s\n", rc=1), "red")

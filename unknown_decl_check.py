@@ -175,7 +175,6 @@ class _Scan:
         self.reads: list = []   # IdentExpr nodes in read position
         self.wildcard = False
         self._unchecked = 0     # >0 while inside an _UNCHECKED_READ_FIELDS subtree
-        self._alias_values = set()   # ids of the value nodes of `alias NAME = V`
 
     def _strs(self, s: str):
         # A string field may hold a dotted module path (`import a.b`), or a
@@ -214,17 +213,11 @@ class _Scan:
 
     def _node(self, node, binding: bool = False):
         if isinstance(node, N.IdentExpr):
-            if id(node) in self._alias_values:
-                return
             if binding:
                 self.bound.add(node.name)
             elif not self._unchecked and node.line > 0:
                 # line 0 is a synthesized node, not a source read.
                 self.reads.append(node)
-            return
-        if id(node) in self._alias_values:
-            # The VALUE of `alias NAME = V` is the alias's definition, not a
-            # read: the whole subtree is skipped, not just its head.
             return
         if binding and isinstance(node, (N.TupleExpr, N.ListExpr,
                                          N.TupleLiteral, N.ListLiteral)):
@@ -269,36 +262,10 @@ class _Scan:
                 self._unchecked -= unchecked
 
 
-def _alias_value_ids(stmts) -> set:
-    """The ids of the VALUE nodes of `alias NAME = <value>` pairs.
-
-    `alias` is not a keyword in this parser: it parses as an ExprStmt holding an
-    IdentExpr named `alias`, immediately followed by the AssignStmt that binds
-    NAME. That pairing is already how the backend finds aliases
-    (mojo/backend_gimple/module_gen.py, the `ExprStmt('alias')` + `AssignStmt`
-    scan), so this mirrors it rather than inventing a second convention.
-
-    The value is the alias's DEFINITION, not a read, so it must not be reported
-    as an unknown declaration. Otherwise `alias LIMIT = some_unknown_name` is a
-    hard error and a `where x < LIMIT` clause can never be undecided.
-    """
-    stmts = list(stmts or [])
-    out = set()
-    for a, b in zip(stmts, stmts[1:]):
-        if (isinstance(a, N.ExprStmt)
-                and isinstance(getattr(a, 'value', None), N.IdentExpr)
-                and getattr(a.value, 'name', None) == 'alias'
-                and isinstance(b, N.AssignStmt)
-                and isinstance(getattr(b, 'target', None), N.IdentExpr)):
-            out.add(id(b.value))
-    return out
-
-
 def unknown_reads(stmts: list) -> list:
     """The IdentExpr reads in `stmts` that no name in scope can supply, in
     source order. An empty list for a module with a wildcard import."""
     scan = _Scan()
-    scan._alias_values = _alias_value_ids(stmts)
     scan._value(list(stmts or []), False, True)
     if scan.wildcard:
         return []
