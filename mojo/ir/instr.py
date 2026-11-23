@@ -155,6 +155,9 @@ class Instr:
             return 'return ' + self.rhs.show() + ';'
         if k == 'while':
             return 'while (' + self.rhs.show() + ') {'
+        if k == 'block':
+            # A bare `{` opening a C block with no header of its own.
+            return '{'
         if k == 'for':
             # A C `for (<header>) {`; the header is one expression, as for `while`.
             return 'for (' + self.rhs.show() + ') {'

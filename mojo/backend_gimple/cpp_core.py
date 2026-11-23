@@ -12827,20 +12827,20 @@ def _cpy_handle_local(gen, indent: str, call) -> list[str]:
         _yh_step = lambda _fw: f"__mojo_gen_resume ((int64_t)(intptr_t){_yh_handle}, {_fw})"
     _fw = gen._cpp_fresh_name("_mg_yf_word")
     return [
-        f"{indent}{{",
-        f"{indent}    int64_t {_fw} = mojo_box_none();",
-        f"{indent}    if ({_yh_first}) {{",
-        f"{indent}        for (;;) {{",
-        f"{indent}            {_fw} = co_yield {_yh_base}_value({_yh_handle});",
+        _cpp_ir_line(indent, 'block'),
+        _cpp_assign_line(f"int64_t {_fw}", "mojo_box_none()", indent + '    '),
+        _cpp_ir_line(indent + '    ', 'if', _yh_first),
+        _cpp_ir_line(indent + '        ', 'for', ';;'),
+        _cpp_assign_line(_fw, f"co_yield {_yh_base}_value({_yh_handle})", indent + '            '),
         f"{indent}            if (!{_yh_step(_fw)}) break;",
-        f"{indent}        }}",
-        f"{indent}    }}",
-        f"{indent}    if (mojo_exc_pending_get()) {{",
-        f"{indent}        mojo_exc_pending_set(0);",
+        _cpp_ir_line(indent + '        ', 'end'),
+        _cpp_ir_line(indent + '    ', 'end'),
+        _cpp_ir_line(indent + '    ', 'if', 'mojo_exc_pending_get()'),
+        _cpp_call_line(indent + '        ', 'mojo_exc_pending_set', ['0']),
         f"{indent}        throw _MojoCppExc{{ mojo_exc_type_get(), "
         f"mojo_exc_msg_get(), mojo_exc_obj_get() }};",
-        f"{indent}    }}",
-        f"{indent}}}",
+        _cpp_ir_line(indent + '    ', 'end'),
+        _cpp_ir_line(indent, 'end'),
     ]
 
 
