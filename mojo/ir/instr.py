@@ -71,6 +71,9 @@ class Ex:
             return '*' + self.a.show()
         if k == 'un':
             return self.op + self.a.show()
+        if k == 'coawait':
+            # A C++ `co_await <expr>` (an awaited expression).
+            return 'co_await ' + self.a.show()
         if k == 'paren':
             # A parenthesized operand: `(a)`.
             return '(' + self.a.show() + ')'

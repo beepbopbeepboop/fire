@@ -57,7 +57,7 @@ TOOL = os.path.join(ROOT, 'tools', 'extract_arm.py')
 # line that could move, so the parent may only get shorter.
 # The expression arms still building C++ text (plan step 4 in the stage 6/7 doc).
 EXPR_ARMS_STILL_TEXT = {
-    '_cpx_await_expr', '_cpx_call_expr',
+    '_cpx_call_expr',
 }
 PARENTS = [
     ('_cpp_expr_ex', 'Ex', 101, [
@@ -364,6 +364,7 @@ def main() -> int:
     text_cases.append((_C._cpx_member_expr(_MGen({'o': 'int64_t'}, ptr=True), _N.MemberExpr(obj=_N.IdentExpr(name='o'), member='f')).show(), 'o->f'))
     text_cases.append((_C._cpx_member_expr(_MGen({'o': 'int64_t'}), _N.MemberExpr(obj=_N.IdentExpr(name='o'), member='f')).show(),
                        'mojo_getattr_any((void *)(intptr_t)(o), (char *)"f")'))
+    text_cases.append((_C._coawait_ex('X_Awaiter{X_impl (a).h}').show(), 'co_await X_Awaiter{X_impl (a).h}'))
     _xs = _N.IdentExpr(name='xs')
     _ints = lambda v: _N.IntLiteral(value=v)
     _lst = _slice({'xs': 'MojoList *'}, _xs, _ints(1), _ints(4), _ints(2))

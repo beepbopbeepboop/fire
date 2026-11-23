@@ -6433,7 +6433,14 @@ def _cpx_subscript_expr(gen, e) -> Ex:
     return ex_text(e_ix)
 
 
-def _cpx_await_expr(gen, e) -> str:
+def _coawait_ex(a) -> Ex:
+    """`co_await <a>` as a `coawait` Ex; `a` is C text or an Ex."""
+    e = Ex('coawait')
+    e.a = ex_text(a) if isinstance(a, str) else a
+    return e
+
+
+def _cpx_await_expr(gen, e) -> Ex:
     """`AwaitExpr` in `_cpp_expr`: `co_await` on a promise or handle.
 
     One arm of `_cpp_expr`, which tests the condition and calls this."""
@@ -6581,7 +6588,7 @@ def _cpx_await_expr(gen, e) -> str:
             # Step H: thread the call's own argument expressions through
             # to `{callee_base}_impl(...)`
             call_args = ', '.join(gen._cpp_expr(a) for a in target.args)
-            return f"co_await {callee_base}_Awaiter{{{callee_base}_impl ({call_args}).h}}"
+            return _coawait_ex(f"{callee_base}_Awaiter{{{callee_base}_impl ({call_args}).h}}")
     # Step I (create_task/Task/TaskGroup/RaisingTask project):
     # `await <call to a SIBLING comptime-bracket-parametrized nested
     # async def>` (test_asyncrt.mojo's `test_asyncrt_add[1](a)` --
@@ -6653,7 +6660,7 @@ def _cpx_await_expr(gen, e) -> str:
                     _bc9_args.append(gen._cpp_expr(gimple_ctypes.IdentExpr(name=_bc9_cap_name)))
                 _bc9_base = _bc9_api['base']
                 _bc9_joined = ', '.join(_bc9_args)
-                return (f"co_await {_bc9_base}_Awaiter"
+                return _coawait_ex(f"{_bc9_base}_Awaiter"
                         f"{{{_bc9_base}_impl ({_bc9_joined}).h}}")
     if gimple_exprtypes._is_asyncio_sleep_call(target):
         raise gimple_exprtypes._UnsupportedAsyncShape(
@@ -6671,7 +6678,7 @@ def _cpx_await_expr(gen, e) -> str:
     # for the awaiter's constructor.
     if gimple_exprtypes._is_asyncio_sock_recv_call(target):
         fd_expr = gen._cpp_expr(target.args[0])
-        return f"co_await _mojoasync_SockRecvAwaiter{{(int)({fd_expr})}}"
+        return _coawait_ex(f"_mojoasync_SockRecvAwaiter{{(int)({fd_expr})}}")
     raise gimple_exprtypes._UnsupportedAsyncShape(
         "only `await asyncio.sleep(<seconds>)` (as a bare "
         "statement), `await asyncio.sock_recv(<fd>)`, or `await "
@@ -6779,7 +6786,7 @@ def _cpp_expr_ex(gen, e):
     if isinstance(e, gimple_ctypes.SubscriptExpr):
         return _cpx_subscript_expr(gen, e)
     if isinstance(e, gimple_ctypes.AwaitExpr):
-        return ex_text(_cpx_await_expr(gen, e))
+        return _cpx_await_expr(gen, e)
     raise gimple_exprtypes._UnsupportedGeneratorShape(
         f"unsupported expression in generator body: {type(e).__name__}")
 
