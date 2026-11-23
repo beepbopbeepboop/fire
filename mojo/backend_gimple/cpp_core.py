@@ -2776,6 +2776,15 @@ def _cpp_struct_word_lambda(ops: str, body: list) -> Ex:
     return lam
 
 
+def _cpp_if_break_line(ind: str, cond) -> str:
+    """`if (cond) break;` at `ind`, as one statement of a loop body."""
+    body = Instr('break')
+    ins = Instr('ifbody')
+    ins.rhs = _as_ex(cond)
+    ins.body = body
+    return ind + ins.show()
+
+
 def _cpp_next_on_generator_expr(gen, handle_expr, api) -> Ex:
     """`next(<generator-handle>)` inside a coroutine body, lowered to the
     SAME extern "C" drive API _cpp_yield_from's delegation loop already uses:
@@ -10401,8 +10410,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
         if index_var not in declared:
             declared[index_var] = 'int64_t'
         lines.append(_cpp_assign_line(f"int64_t {index_var}", f"({index_start_expr})", indent + '    '))
-    lines.append(f"{indent}    _mojogen_sub_guard {guard}"
-        f"{{ {base}_start({args_text}), &{base}_destroy }};")
+    lines.append(_cpp_ir_line(indent + '    ', 'decl', f"_mojogen_sub_guard {guard}{{ {base}_start({args_text}), &{base}_destroy }}"))
     lines.append(_cpp_ir_line(indent + '    ', 'while', f"{base}_resume({guard}.g)"))
     body_indent = indent + '        '
     if is_tuple:
@@ -10491,8 +10499,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     # unwind.
     lines.append(_cpp_ir_line(indent + '    ', 'if', 'mojo_exc_pending_get()'))
     lines.append(_cpp_call_line(indent + '        ', 'mojo_exc_pending_set', ['0']))
-    lines.append(f"{indent}        throw _MojoCppExc{{ mojo_exc_type_get(), "
-                 f"mojo_exc_msg_get(), mojo_exc_obj_get() }};")
+    lines.append(_cpp_ir_line(indent + '        ', 'throw', "_MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), mojo_exc_obj_get() }"))
     lines.append(_cpp_ir_line(indent + '    ', 'end'))
     lines.append(_cpp_ir_line(indent, 'end'))
     return lines
@@ -13108,10 +13115,10 @@ def _cpy_unsupported_shape(gen, indent: str, call) -> list[str]:
     else:
         _yf_accessor = 'mojo_list_get_str'
     result_init = _cpp_as('MojoList *', coll_expr)
-    return [f"{indent}auto {result_var} = {result_init};",
-            f"{indent}for (int64_t _i = 0; _i < mojo_list_len({result_var}); _i++) {{",
-            f"{indent}    co_yield {_yf_accessor}({result_var}, _i);",
-            f"{indent}}}"]
+    return [_cpp_ir_line(indent, 'decl', f"auto {result_var} = {result_init}"),
+            _cpp_ir_line(indent, 'for', f"int64_t _i = 0; _i < mojo_list_len({result_var}); _i++"),
+            _cpp_ir_line(indent + '    ', 'coyield', f"{_yf_accessor}({result_var}, _i)"),
+            _cpp_ir_line(indent, 'end')]
 
 
 def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
@@ -13667,14 +13674,13 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         _fw_step = f"__mojo_gen_resume ((int64_t)(intptr_t){guard}.g, {_fw})"
     return [
         _cpp_ir_line(indent, 'block'),
-        f"{indent}    _mojogen_sub_guard {guard}"
-        f"{{ {sub_base}_start({args_text}), &{sub_base}_destroy }};",
+        _cpp_ir_line(indent + '    ', 'decl', f"_mojogen_sub_guard {guard}{{ {sub_base}_start({args_text}), &{sub_base}_destroy }}"),
         *_fw_decl,
         _cpp_assign_line(f"int64_t {_fw}", "mojo_box_none()", indent + '    '),
         _cpp_ir_line(indent + '    ', 'if', _fw_first),
         _cpp_ir_line(indent + '        ', 'for', ';;'),
         _cpp_assign_line(_fw, f"co_yield {sub_base}_value({guard}.g)", indent + '            '),
-        f"{indent}            if (!{_fw_step}) break;",
+        _cpp_if_break_line(indent + '            ', f"!{_fw_step}"),
         _cpp_ir_line(indent + '        ', 'end'),
         _cpp_ir_line(indent + '    ', 'end'),
         # Milestone D: the sub-generator's own `_resume` (same wrapper
