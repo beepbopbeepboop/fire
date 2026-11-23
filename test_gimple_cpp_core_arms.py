@@ -382,6 +382,22 @@ def main() -> int:
     text_cases.append((_C._cpx_call_expr(_callee_call(), _plain), '(g())(1, 2)'))
     _fac = _N.CallExpr(func=_N.CallExpr(func=_N.IdentExpr(name='mk'), args=[], kwargs={}), args=[_iv(5)], kwargs={})
     text_cases.append((_C._cpx_call_expr(_callee_call(('mk',)), _fac), 'mojo_fnptr_call_1((void *)(mk()), 5)'))
+    # The member-call arm through the dispatcher, with a real generator. Expected strings
+    # are HEAD's _cpx_call_expr output.
+    def _member_gen(decl):
+        g = _GC.GimpleGen()
+        g._cpp_declared = dict(decl)
+        g._cpp_closure_factory_names = ()
+        return g
+
+    _lst = _N.IdentExpr(name='lst')
+    _d = _N.IdentExpr(name='d')
+    text_cases.append((_C._cpx_call_expr(_member_gen({'lst': 'MojoList *'}), _N.CallExpr(func=_N.MemberExpr(obj=_lst, member='pop'), args=[], kwargs={})),
+                       'mojo_list_pop(lst)'))
+    text_cases.append((_C._cpx_call_expr(_member_gen({'lst': 'MojoList *'}), _N.CallExpr(func=_N.MemberExpr(obj=_lst, member='pop'), args=[_iv(1)], kwargs={})),
+                       'mojo_list_pop_at(lst, (int64_t)(1))'))
+    text_cases.append((_C._cpx_call_expr(_member_gen({'d': 'MojoDict *'}), _N.CallExpr(func=_N.MemberExpr(obj=_d, member='get'), args=[_N.StringLiteral(value='k')], kwargs={})),
+                       'mojo_dict_get_int((MojoDict *)(d), (char *)("k"))'))
     _xs = _N.IdentExpr(name='xs')
     _ints = lambda v: _N.IntLiteral(value=v)
     _lst = _slice({'xs': 'MojoList *'}, _xs, _ints(1), _ints(4), _ints(2))

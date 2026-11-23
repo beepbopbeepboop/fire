@@ -4022,7 +4022,7 @@ def _cpx_walrus(gen, e) -> Ex:
     return _assign_ex(gen._cpp_expr(e.left), val)
 
 
-def _cpx_call_member(gen, e) -> str:
+def _cpx_call_member(gen, e) -> Ex:
     """The MemberExpr-callee arm of _cpx_call_expr (extracted, unchanged body).
 
     One arm of `_cpx_call_expr`, which tests the condition and calls this."""
@@ -4041,7 +4041,7 @@ def _cpx_call_member(gen, e) -> str:
     # declarations of its {base}_* drive symbols are needed here.
     _mg_api = _cpp_resolve_generator_call_api(gen, e.func)
     if _mg_api is not None:
-        return _cpp_emit_generator_start_expr(gen, e, _mg_api)
+        return ex_text(_cpp_emit_generator_start_expr(gen, e, _mg_api))
     # `.format(...)` on a string literal — mirrors the GIMPLE
     # path's _lower_string_method_call stub (returns the format
     # string itself, diagnosed via _debug_note; the interpolation
@@ -4049,7 +4049,7 @@ def _cpx_call_member(gen, e) -> str:
     # {!r}...'.format(dir))` shape.
     if e.func.member == 'format' and isinstance(e.func.obj, gimple_ctypes.StringLiteral):
         gimple_ctypes._debug_note('stubbed operation', 'generator-body str.format()')
-        return gen._cpp_expr(e.func.obj)
+        return ex_text(gen._cpp_expr(e.func.obj))
     # Known module-attribute calls — a module global object
     # (os.path / math / sys, each an int64_t MojoDict* in this
     # body model) followed by a STATICALLY-KNOWN member function.
@@ -4067,7 +4067,7 @@ def _cpx_call_member(gen, e) -> str:
             acc = a[0]
             for nxt in a[1:]:
                 acc = f"mojo_path_join((char *)({acc}), (char *)({nxt}))"
-            return acc
+            return ex_text(acc)
         if e.func.member == 'split' and len(a) == 1:
             # os.path.split(p) → MojoList * [head, tail].
             # Word argument uses word-kinded runtime entry;
@@ -4079,8 +4079,8 @@ def _cpx_call_member(gen, e) -> str:
                 if gimple_ctypes.TypeLattice.is_word_or_bytes(decl.get(_arg_node.name)):
                     _arg_is_word = True
             if _arg_is_word:
-                return f"mojo_os_path_split_w({a[0]})"
-            return f"int64_t_path_split({a[0]})"
+                return _cpp_call_ex("mojo_os_path_split_w", [f"{a[0]}"])
+            return _cpp_call_ex("int64_t_path_split", [f"{a[0]}"])
         # os.path.isdir/exists(p) — the GIMPLE path's own
         # os.path.* dispatch (_lower_call) already has these
         # wired to real runtime helpers (`marker` is an unused
@@ -4095,11 +4095,11 @@ def _cpx_call_member(gen, e) -> str:
         # this scope". Found via Tools/build/update_file.py's
         # own `os.path.isdir(tmpfile)`.
         if e.func.member == 'islink' and len(a) == 1:
-            return f"mojo_os_path_islink_w((int64_t)(char *)({a[0]}))"
+            return _cpp_call_ex("mojo_os_path_islink_w", [f"(int64_t)(char *)({a[0]})"])
         if e.func.member == 'isdir' and len(a) == 1:
-            return f"int_isdir(0, (int64_t)(char *)({a[0]}))"
+            return _cpp_call_ex("int_isdir", ["0", f"(int64_t)(char *)({a[0]})"])
         if e.func.member == 'exists' and len(a) == 1:
-            return f"int_exists(0, (int64_t)(char *)({a[0]}))"
+            return _cpp_call_ex("int_exists", ["0", f"(int64_t)(char *)({a[0]})"])
         # isfile: real S_ISREG stat check — mirrors the GIMPLE
         # path's own os.path.isfile dispatch (int_isfile in
         # runtime/fire_runtime.c; the GIMPLE side previously
@@ -4109,7 +4109,7 @@ def _cpx_call_member(gen, e) -> str:
         # honest identity stubs, rather than inventing different
         # behavior for this narrower body model.
         if e.func.member == 'isfile' and len(a) == 1:
-            return f"int_isfile(0, (int64_t)(char *)({a[0]}))"
+            return _cpp_call_ex("int_isfile", ["0", f"(int64_t)(char *)({a[0]})"])
         # relpath is REAL in the runtime (`int_relpath`, the same helper
         # the ordinary path calls); an identity stub here returned the
         # absolute path unchanged to a generator that asked for the
@@ -4117,10 +4117,10 @@ def _cpx_call_member(gen, e) -> str:
         if e.func.member == 'relpath' and len(a) in (1, 2):
             _rp_start = (f"(char *)(intptr_t)({a[1]})" if len(a) == 2
                          else "(char *)0")
-            return (f"int_relpath((char *)(intptr_t)({a[0]}), "
-                    f"{_rp_start})")
+            return (ex_text(f"int_relpath((char *)(intptr_t)({a[0]}), "
+                    f"{_rp_start})"))
         if e.func.member == 'normpath' and len(a) >= 1:
-            return a[0]
+            return ex_text(a[0])
         # basename/dirname/splitext/expanduser/abspath — the
         # remaining real-runtime os.path helpers, mirroring the
         # GIMPLE path's own dispatch (fire_runtime.h's
@@ -4130,24 +4130,24 @@ def _cpx_call_member(gen, e) -> str:
         # C++ ("'os' was not declared in this scope; did you mean
         # 'cos'").
         if e.func.member == 'basename' and len(a) == 1:
-            return f"int64_t_basename((char *)({a[0]}))"
+            return _cpp_call_ex("int64_t_basename", [f"(char *)({a[0]})"])
         if e.func.member == 'dirname' and len(a) == 1:
-            return f"(char *)int_dirname(0, (int64_t)(char *)({a[0]}))"
+            return ex_text(f"(char *)int_dirname(0, (int64_t)(char *)({a[0]}))")
         if e.func.member == 'splitext' and len(a) == 1:
-            return f"int64_t_splitext((char *)({a[0]}))"
+            return _cpp_call_ex("int64_t_splitext", [f"(char *)({a[0]})"])
         if e.func.member == 'expanduser' and len(a) == 1:
-            return f"int64_t_expanduser((char *)({a[0]}))"
+            return _cpp_call_ex("int64_t_expanduser", [f"(char *)({a[0]})"])
         if e.func.member == 'abspath' and len(a) == 1:
-            return f"(char *)int_abspath(0, (int64_t)(char *)({a[0]}))"
+            return ex_text(f"(char *)int_abspath(0, (int64_t)(char *)({a[0]}))")
     if isinstance(e.func.obj, gimple_ctypes.IdentExpr) and e.func.obj.name == 'math':
         a = [gen._cpp_expr(x) for x in e.args]
         if e.func.member in ('isnan', 'isinf', 'floor', 'ceil', 'fabs',
                              'sqrt', 'log', 'log10', 'exp', 'sin',
                              'cos', 'tan', 'fsum', 'isfinite') and a:
-            return f"std::{e.func.member}((double)({a[0]}))"
+            return ex_text(f"std::{e.func.member}((double)({a[0]}))")
         if e.func.member == 'isclose' and len(a) >= 2:
-            return (f"std::abs((double)({a[0]}) - (double)({a[1]})) "
-                    f"< 1e-9")
+            return (ex_text(f"std::abs((double)({a[0]}) - (double)({a[1]})) "
+                    f"< 1e-9"))
     # self.method(...) / <struct-ptr local>.method(...) — this
     # codegen's structs are plain C structs with no real C++
     # member functions (only field layout is re-emitted into
@@ -4206,8 +4206,8 @@ def _cpx_call_member(gen, e) -> str:
             # runtime `mojo_is_registered_list` discrimination and
             # the AssignStmt tuple-unpack branch respectively.
             if e.args:
-                return f"mojo_list_pop_at({_cont_ref}, (int64_t)({gen._cpp_expr(e.args[0])}))"
-            return f"mojo_list_pop({_cont_ref})"
+                return _cpp_call_ex("mojo_list_pop_at", [f"{_cont_ref}", f"(int64_t)({gen._cpp_expr(e.args[0])})"])
+            return _cpp_call_ex("mojo_list_pop", [f"{_cont_ref}"])
         if (gimple_ctypes.TypeLattice.is_list(_cont_ct) and e.func.member == 'extend'
                 and len(e.args) == 1 and not e.kwargs):
             # `<list-local>.extend(<iterable>)`. A list/tuple LITERAL
@@ -4229,7 +4229,7 @@ def _cpx_call_member(gen, e) -> str:
                                 line=e.line, col=e.col),
                             args=[_x], line=e.line, col=e.col))
                         for _x in _ext_elts]
-                    return '(' + ', '.join(_ext_calls + ['0']) + ')'
+                    return ex_text('(' + ', '.join(_ext_calls + ['0']) + ')')
         if (gimple_ctypes.TypeLattice.is_list(_cont_ct) and e.func.member == 'append'
                 and len(e.args) == 1
                 and isinstance(e.args[0], (gimple_ctypes.ListExpr,
@@ -4245,7 +4245,7 @@ def _cpx_call_member(gen, e) -> str:
             _reg = getattr(gen, '_cpp_list_local_elem_types', None)
             if _reg is not None and _reg.get(_cont_name) is None:
                 _reg[_cont_name] = 'int64_t'
-            return f"(mojo_list_append_int({_cont_ref}, (int64_t)({_bl})), 0)"
+            return ex_text(f"(mojo_list_append_int({_cont_ref}, (int64_t)({_bl})), 0)")
         if (gimple_ctypes.TypeLattice.is_list(_cont_ct) and e.func.member == 'append'
                 and len(e.args) == 1):
             _avct = gimple_exprtypes._infer_simple_expr_ctype(
@@ -4260,10 +4260,10 @@ def _cpx_call_member(gen, e) -> str:
             _a = gen._cpp_expr(e.args[0])
             _eff = (_reg or {}).get(_cont_name, _avct)
             if gimple_ctypes.TypeLattice.is_cstr(_eff):
-                return f"(mojo_list_append_str({_cont_ref}, (char *)({_a})), 0)"
+                return ex_text(f"(mojo_list_append_str({_cont_ref}, (char *)({_a})), 0)")
             if gimple_ctypes.TypeLattice.is_double(_eff):
-                return f"(mojo_list_append_double({_cont_ref}, (double)({_a})), 0)"
-            return f"(mojo_list_append_int({_cont_ref}, (int64_t)({_a})), 0)"
+                return ex_text(f"(mojo_list_append_double({_cont_ref}, (double)({_a})), 0)")
+            return ex_text(f"(mojo_list_append_int({_cont_ref}, (int64_t)({_a})), 0)")
         if (_cont_ct == 'MojoSet *' and e.func.member == 'add'
                 and len(e.args) == 1):
             _avct = gimple_exprtypes._infer_simple_expr_ctype(
@@ -4272,8 +4272,8 @@ def _cpx_call_member(gen, e) -> str:
                 gen._async_api) or 'int64_t'
             _a = gen._cpp_expr(e.args[0])
             if gimple_ctypes.TypeLattice.is_cstr(_avct):
-                return f"(mojo_set_add_str({_cont_name}, (char *)({_a})), 0)"
-            return f"(mojo_set_add_int({_cont_name}, (int64_t)({_a})), 0)"
+                return ex_text(f"(mojo_set_add_str({_cont_name}, (char *)({_a})), 0)")
+            return ex_text(f"(mojo_set_add_int({_cont_name}, (int64_t)({_a})), 0)")
     # `self.<field>.append(v)`/`cls.<attr>.append(v)`/`.clear()`/
     # `.add(v)` — the MemberExpr-receiver sibling of the plain-
     # local-container case immediately above (real: Lib/test/
@@ -4306,10 +4306,10 @@ def _cpx_call_member(gen, e) -> str:
                     gen._async_api) or 'int64_t'
                 _a = gen._cpp_expr(e.args[0])
                 if gimple_ctypes.TypeLattice.is_cstr(_avct):
-                    return f"(mojo_list_append_str({_cpp_as('MojoList *', _mobj)}, (char *)({_a})), 0)"
+                    return ex_text(f"(mojo_list_append_str({_cpp_as('MojoList *', _mobj)}, (char *)({_a})), 0)")
                 if gimple_ctypes.TypeLattice.is_double(_avct):
-                    return f"(mojo_list_append_double({_cpp_as('MojoList *', _mobj)}, (double)({_a})), 0)"
-                return f"(mojo_list_append_int({_cpp_as('MojoList *', _mobj)}, (int64_t)({_a})), 0)"
+                    return ex_text(f"(mojo_list_append_double({_cpp_as('MojoList *', _mobj)}, (double)({_a})), 0)")
+                return ex_text(f"(mojo_list_append_int({_cpp_as('MojoList *', _mobj)}, (int64_t)({_a})), 0)")
             if _mcont_ct == 'MojoSet *' and e.func.member == 'add' and len(e.args) == 1:
                 _avct = gimple_exprtypes._infer_simple_expr_ctype(
                     e.args[0], gen._cpp_declared,
@@ -4317,15 +4317,15 @@ def _cpx_call_member(gen, e) -> str:
                     gen._async_api) or 'int64_t'
                 _a = gen._cpp_expr(e.args[0])
                 if gimple_ctypes.TypeLattice.is_cstr(_avct):
-                    return f"(mojo_set_add_str({_cpp_as('MojoSet *', _mobj)}, (char *)({_a})), 0)"
-                return f"(mojo_set_add_int({_cpp_as('MojoSet *', _mobj)}, (int64_t)({_a})), 0)"
+                    return ex_text(f"(mojo_set_add_str({_cpp_as('MojoSet *', _mobj)}, (char *)({_a})), 0)")
+                return ex_text(f"(mojo_set_add_int({_cpp_as('MojoSet *', _mobj)}, (int64_t)({_a})), 0)")
             if e.func.member == 'clear' and not e.args:
                 if gimple_ctypes.TypeLattice.is_list(_mcont_ct):
-                    return f"(mojo_list_clear({_cpp_as('MojoList *', _mobj)}), 0)"
+                    return ex_text(f"(mojo_list_clear({_cpp_as('MojoList *', _mobj)}), 0)")
                 if _mcont_ct == 'MojoSet *':
-                    return f"(mojo_set_clear({_cpp_as('MojoSet *', _mobj)}), 0)"
+                    return ex_text(f"(mojo_set_clear({_cpp_as('MojoSet *', _mobj)}), 0)")
                 if _mcont_ct == 'MojoDict *':
-                    return f"(mojo_dict_clear({_cpp_as('MojoDict *', _mobj)}), 0)"
+                    return ex_text(f"(mojo_dict_clear({_cpp_as('MojoDict *', _mobj)}), 0)")
     if isinstance(e.func.obj, gimple_ctypes.IdentExpr) and e.func.obj.name == 'self' \
             and _cpp_self_struct:
         args = [gen._cpp_expr(a) for a in e.args]
@@ -4336,8 +4336,8 @@ def _cpx_call_member(gen, e) -> str:
             f"{_cpp_self_struct}_{gimple_ctypes._safe_name(e.func.member)}",
             args)
         if f"{_cpp_self_struct}_{e.func.member}" in gen._static_methods:
-            return f"{_sym}({', '.join(args)})"   # a staticmethod takes no receiver
-        return f"{_sym}(self{', ' + ', '.join(args) if args else ''})"
+            return ex_text(f"{_sym}({', '.join(args)})")   # a staticmethod takes no receiver
+        return ex_text(f"{_sym}(self{', ' + ', '.join(args) if args else ''})")
     # `cls.method(...)` inside a @classmethod generator — the
     # SAME name-only resolution mechanism the ordinary
     # (non-coroutine) GIMPLE path's own CallExpr/MemberExpr
@@ -4381,7 +4381,7 @@ def _cpx_call_member(gen, e) -> str:
                 gen, _sym,
                 f"{_cpp_self_struct}_{gimple_ctypes._safe_name(_cls_method)}",
                 args)
-            return f"{_sym}(cls{', ' + ', '.join(args) if args else ''})"
+            return ex_text(f"{_sym}(cls{', ' + ', '.join(args) if args else ''})")
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"cls.{_cls_method}(...): only a call to a real "
             "compiled classmethod/static method of the "
@@ -4403,8 +4403,8 @@ def _cpx_call_member(gen, e) -> str:
                 f"{_obj_struct}_{gimple_ctypes._safe_name(e.func.member)}",
                 args)
             if f"{_obj_struct}_{e.func.member}" in gen._static_methods:
-                return f"{_sym}({', '.join(args)})"   # a staticmethod takes no receiver
-            return f"{_sym}({e.func.obj.name}{', ' + ', '.join(args) if args else ''})"
+                return ex_text(f"{_sym}({', '.join(args)})")   # a staticmethod takes no receiver
+            return ex_text(f"{_sym}({e.func.obj.name}{', ' + ', '.join(args) if args else ''})")
     # `SomeStruct.<method>(...)` — a CLASS-QUALIFIED method call,
     # where the receiver name is a known STRUCT NAME rather than a
     # value. The ordinary (non-coroutine) GIMPLE path has handled
@@ -4470,8 +4470,8 @@ def _cpx_call_member(gen, e) -> str:
             gen, _sym,
             f"{_cls_mangled}",
             args)
-        return f"{_sym}({_recv}{', ' + ', '.join(args) if args else ''})" \
-            if _recv is not None else f"{_sym}({', '.join(args)})"
+        return ex_text(f"{_sym}({_recv}{', ' + ', '.join(args) if args else ''})" \
+            if _recv is not None else f"{_sym}({', '.join(args)})")
     # A member call on a MODULE-GLOBAL object whose member isn't a
     # statically-known function (os.py's `sys.audit(...)`,
     # compileall.py's `os.fspath(...)`, mimetypes.py's
@@ -4491,7 +4491,7 @@ def _cpx_call_member(gen, e) -> str:
         gimple_ctypes._debug_note('stubbed operation',
                     f'generator-body module-member call '
                     f'{e.func.obj.name}.{e.func.member}()')
-        return '0'
+        return ex_text('0')
     # `<char*-typed obj>.replace(old, new)` — a real string
     # method call on a local/self-field this narrow body model
     # already knows is `char *` (not a struct-pointer/module
@@ -4510,8 +4510,8 @@ def _cpx_call_member(gen, e) -> str:
         _obj_expr = gen._cpp_expr(e.func.obj)
         _a0 = gen._cpp_expr(e.args[0])
         _a1 = gen._cpp_expr(e.args[1])
-        return (f"(char *)_char_replace_impl((int64_t)(char *)({_obj_expr}), "
-                f"(int64_t)(char *)({_a0}), (int64_t)(char *)({_a1}))")
+        return (ex_text(f"(char *)_char_replace_impl((int64_t)(char *)({_obj_expr}), "
+                f"(int64_t)(char *)({_a0}), (int64_t)(char *)({_a1}))"))
     # `<char*-typed obj>.strip()`/`.lstrip()`/`.rstrip()` (0 or 1
     # `chars` arg) / `.lower()`/`.upper()` (0 args) —
     # same rationale/mechanism as `.replace` just above, routed
@@ -4533,14 +4533,14 @@ def _cpx_call_member(gen, e) -> str:
         if e.func.member == 'strip' or not e.args:
             _fn = {'strip': 'string_strip', 'lstrip': 'mojo_str_lstrip',
                    'rstrip': 'mojo_str_rstrip'}[e.func.member]
-            return f"(char *){_fn}((char *)({_obj_expr}))"
+            return ex_text(f"(char *){_fn}((char *)({_obj_expr}))")
         _fn = 'mojo_str_lstrip_chars' if e.func.member == 'lstrip' else 'mojo_str_rstrip_chars'
         _a0 = gen._cpp_expr(e.args[0])
-        return f"(char *){_fn}((char *)({_obj_expr}), (char *)({_a0}))"
+        return ex_text(f"(char *){_fn}((char *)({_obj_expr}), (char *)({_a0}))")
     if gimple_ctypes.TypeLattice.is_cstr(_str_obj_ctype) and e.func.member in ('lower', 'upper') and not e.args:
         _obj_expr = gen._cpp_expr(e.func.obj)
         _fn = 'string_lower' if e.func.member == 'lower' else 'string_upper'
-        return f"(char *){_fn}((char *)({_obj_expr}))"
+        return ex_text(f"(char *){_fn}((char *)({_obj_expr}))")
     # `<char*-typed obj>.format(...)` — route through the SAME
     # `mojo_str_format_words` runtime primitive the ordinary GIMPLE
     # path's `_lower_str_call` uses. Before this the generic
@@ -4566,10 +4566,10 @@ def _cpx_call_member(gen, e) -> str:
                     "a `str.format(...)` argument in a compiled "
                     "generator body must be a statically-known "
                     "integer, bool or string")
-        return ("[&]() -> char * { MojoList *_fmt_l = mojo_list_new(); "
+        return (ex_text("[&]() -> char * { MojoList *_fmt_l = mojo_list_new(); "
                 + ''.join(_fmt_args)
                 + f"return mojo_str_format_words((char *)({_obj_expr}), "
-                  f"_fmt_l, mojo_dict_new()); }}()")
+                  f"_fmt_l, mojo_dict_new()); }}()"))
     # `<char*-typed obj>.startswith(prefix)` / `.endswith(suffix)`
     # — real `int`-returning runtime helpers (`mojo_str_
     # startswith`/`mojo_str_endswith`), same receiver-ctype gate
@@ -4588,7 +4588,7 @@ def _cpx_call_member(gen, e) -> str:
         _obj_expr = gen._cpp_expr(e.func.obj)
         _a0 = gen._cpp_expr(e.args[0])
         _fn = 'mojo_str_partition' if e.func.member == 'partition' else 'mojo_str_rpartition'
-        return f"({_fn}((char *)({_obj_expr}), (char *)({_a0})))"
+        return ex_text(f"({_fn}((char *)({_obj_expr}), (char *)({_a0})))")
     if gimple_ctypes.TypeLattice.is_cstr(_str_obj_ctype) and e.func.member in ('startswith', 'endswith') \
             and len(e.args) == 1:
         _obj_expr = gen._cpp_expr(e.func.obj)
@@ -4598,9 +4598,9 @@ def _cpx_call_member(gen, e) -> str:
         # tuple of strs) goes through the runtime's `_word` form.
         if (gimple_ctypes.TypeLattice.is_word(_cpp_receiver_ctype(gen, e.args[0]))
                 and e.func.member == 'endswith'):
-            return (f"(mojo_str_endswith_word((char *)({_obj_expr}), "
-                    f"(int64_t)({_a0})) != 0)")
-        return f"({_fn}((char *)({_obj_expr}), (char *)({_a0})) != 0)"
+            return (ex_text(f"(mojo_str_endswith_word((char *)({_obj_expr}), "
+                    f"(int64_t)({_a0})) != 0)"))
+        return ex_text(f"({_fn}((char *)({_obj_expr}), (char *)({_a0})) != 0)")
     # `<char*-typed-or-literal obj>.join(iterable)` — a real
     # `str.join(...)` call on either a declared/self-field `char *`
     # separator OR (unlike the string methods just above, which
@@ -4635,8 +4635,8 @@ def _cpx_call_member(gen, e) -> str:
             _a0 = _cpp_list_literal_arg_expr(gen, e.args[0])
         else:
             _a0 = gen._cpp_expr(e.args[0])
-        return (f"(char *)mojo_str_join((char *)({_obj_expr}), "
-                f"{_cpp_as('MojoList *', _a0)})")
+        return (ex_text(f"(char *)mojo_str_join((char *)({_obj_expr}), "
+                f"{_cpp_as('MojoList *', _a0)})"))
     # `<char*-typed obj>.split([sep])` / `.rsplit([sep])` /
     # `.splitlines()` — the split family, the same
     # receiver-ctype-gated mechanism as every string method above,
@@ -4659,12 +4659,12 @@ def _cpx_call_member(gen, e) -> str:
         _obj_expr = gen._cpp_expr(e.func.obj)
         _sep_e = gen._cpp_expr(e.args[0]) if e.args else '0'
         if e.func.member == 'splitlines':
-            return _cpp_as('MojoList *', f"mojo_str_splitlines((char *)({_obj_expr}))")
+            return ex_text(_cpp_as('MojoList *', f"mojo_str_splitlines((char *)({_obj_expr}))"))
         if e.func.member == 'split':
-            return _cpp_as('MojoList *',
-                f"mojo_str_split((char *)({_obj_expr}), (char *)({_sep_e}))")
-        return _cpp_as('MojoList *',
-            f"mojo_str_rsplit((char *)({_obj_expr}), (char *)({_sep_e}), (int64_t)(-1))")
+            return ex_text(_cpp_as('MojoList *',
+                f"mojo_str_split((char *)({_obj_expr}), (char *)({_sep_e}))"))
+        return ex_text(_cpp_as('MojoList *',
+            f"mojo_str_rsplit((char *)({_obj_expr}), (char *)({_sep_e}), (int64_t)(-1))"))
     # `<dict-typed obj>.get(key)` / `.get(key, default)` — a real
     # dict method call on a local/self-field this narrow body
     # model already knows is `MojoDict *`, which (like `.replace`
@@ -4712,14 +4712,14 @@ def _cpx_call_member(gen, e) -> str:
         _obj_expr = gen._cpp_expr(e.func.obj)
         _key_expr = gen._cpp_dict_key_expr(e.args[0], gen._cpp_expr(e.args[0]))
         if gimple_ctypes.TypeLattice.is_cstr(_dict_val_ct):
-            return f"mojo_dict_get_str({_cpp_as('MojoDict *', _obj_expr)}, {_key_expr})"
+            return _cpp_call_ex("mojo_dict_get_str", [f"{_cpp_as('MojoDict *', _obj_expr)}", f"{_key_expr}"])
         if gimple_ctypes.TypeLattice.is_double(_dict_val_ct):
-            return f"mojo_dict_get_double({_cpp_as('MojoDict *', _obj_expr)}, {_key_expr})"
+            return _cpp_call_ex("mojo_dict_get_double", [f"{_cpp_as('MojoDict *', _obj_expr)}", f"{_key_expr}"])
         if (isinstance(_dict_val_ct, str) and gimple_ctypes.TypeLattice.ends_in_star(_dict_val_ct)
                 and _dict_val_ct[:-2] in gen.struct_field_types):
-            return (f"({_dict_val_ct})mojo_dict_get_int("
-                    f"{_cpp_as('MojoDict *', _obj_expr)}, {_key_expr})")
-        return f"mojo_dict_get_int({_cpp_as('MojoDict *', _obj_expr)}, {_key_expr})"
+            return (ex_text(f"({_dict_val_ct})mojo_dict_get_int("
+                    f"{_cpp_as('MojoDict *', _obj_expr)}, {_key_expr})"))
+        return _cpp_call_ex("mojo_dict_get_int", [f"{_cpp_as('MojoDict *', _obj_expr)}", f"{_key_expr}"])
     # `<dict-typed obj>.copy()/.items()/.keys()/.values()` — the
     # zero-argument collection-accessor siblings of the `.get(...)`
     # case just above, same receiver-typing mechanism
@@ -4736,7 +4736,7 @@ def _cpx_call_member(gen, e) -> str:
         _dict_fn = {'copy': 'mojo_dict_copy', 'items': 'mojo_dict_items',
                     'keys': 'mojo_dict_keys',
                     'values': 'mojo_dict_values'}[e.func.member]
-        return f"{_dict_fn}({_cpp_as('MojoDict *', gen._cpp_expr(e.func.obj))})"
+        return ex_text(f"{_dict_fn}({_cpp_as('MojoDict *', gen._cpp_expr(e.func.obj))})")
     # `<self>.<opaque-field>.write(data)` / `.read()` / `.close()`
     # on a receiver whose resolved ctype is this model's opaque
     # int64_t box — mirror the ORDINARY GIMPLE path's own
@@ -4756,14 +4756,14 @@ def _cpx_call_member(gen, e) -> str:
     if gimple_ctypes.TypeLattice.is_int_word(_fh_rc) and e.func.member in ('write', 'read', 'close'):
         _fh_obj = gen._cpp_expr(e.func.obj)
         if e.func.member == 'write' and len(e.args) == 1:
-            return (f"int_write((int64_t)({_fh_obj}), "
-                    f"(char *)({gen._cpp_expr(e.args[0])}))")
+            return (ex_text(f"int_write((int64_t)({_fh_obj}), "
+                    f"(char *)({gen._cpp_expr(e.args[0])}))"))
         if e.func.member == 'read' and not e.args:
-            return f"int_read((int64_t)({_fh_obj}))"
+            return _cpp_call_ex("int_read", [f"(int64_t)({_fh_obj})"])
         if e.func.member == 'close' and not e.args:
             gimple_ctypes._debug_note('stubbed operation',
                         'generator-body .close() on opaque handle')
-            return '0'
+            return ex_text('0')
     # A member call on a DECLARED local whose ctype is a plain
     # scalar (`root_logger = logging.getLogger()` — the module-
     # call elision already typed `root_logger` int64_t and
@@ -4783,14 +4783,14 @@ def _cpx_call_member(gen, e) -> str:
         gimple_ctypes._debug_note('stubbed operation',
                     f'generator-body method call on opaque scalar '
                     f'local {e.func.obj.name}.{e.func.member}()')
-        return '0'
+        return ex_text('0')
     obj = gen._cpp_expr(e.func.obj)
     # `args_text`, not `args`: `args` is a LIST elsewhere in this
     # function, and the compiled compiler gives one name one declared
     # type, so formatting the joined string through `{args}` called
     # `_mojo_repr_list` on text and segfaulted.
     args_text = ', '.join(gen._cpp_expr(a) for a in e.args)
-    return f"{obj}.{e.func.member}({args_text})"
+    return ex_text(f"{obj}.{e.func.member}({args_text})")
 
 
 def _cpx_call_ident(gen, e) -> str:
@@ -6250,7 +6250,7 @@ def _cpx_call_expr(gen, e) -> str:
             "compiled generator/coroutine body")
     # Simple function call in generator body (e.g. os.path.join(a, b))
     if isinstance(e.func, gimple_ctypes.MemberExpr):
-        return _cpx_call_member(gen, e)
+        return _cpx_call_member(gen, e).show()
     if isinstance(e.func, gimple_ctypes.IdentExpr):
         return _cpx_call_ident(gen, e)
     if isinstance(e.func, gimple_ctypes.CallExpr):
