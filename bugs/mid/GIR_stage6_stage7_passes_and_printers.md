@@ -437,3 +437,42 @@ and `_cpp_yield_from`; the sub-generator guard block in `_cpp_yield_from` (`{ ..
 
 Process note: the oracle does not reach every converted path. Each new helper or shape needs a direct check in
 `test_gimple_cpp_core_arms.py` (as the helper text-operand check now does), not only a byte-identical corpus run.
+
+## Status 2026-11-22 (later batches): statement printers mostly on the IR
+
+Landed since the previous status (each: arms 30/0 plus the helper checks; `c_oracle check --base HEAD`
+identical on 285 C and 13 C++ programs; `compile_stdlib.py` PASSED 592, FAILED 18 = 0 expected / 18
+unexpected, the same module set):
+
+- `82fe1317f`: seven two-line concatenated assigns in `_cpp_for_stmt`/`_cpp_yield_from`; the sub-generator
+  guard block in `_cpp_yield_from` (block, if, for(;;), pending-exception throw, closers).
+- `f8fb9ceb7`: `_cpp_yield_tuple` (the tuple list builders and `co_yield <tuple>`).
+- `5f99a3773`: `_cpp_container_literal_init` (list, dict and set literals).
+- `5bbeac708`: `_cpp_for_generator_delegate` (block, while, index assign, closers); a `throw` shape; one
+  single-line raise.
+- `b0705633e`: `_cpp_with_stmt` (tempdir guard, alias declarations, open-file assign, close calls). Its
+  line count was held at the 256-line ratchet by shortening the new calls, not by raising the ratchet.
+- `324497245`: `_cpp_async_for_stmt`'s statement list.
+- `4522a6fac`: the repeat and range forms of `_cpp_yield_from`.
+- `72581a406`: `_cps_assign_stmt`'s simple lines (unpack decls, self-field store, setattr, subscript store, void).
+- `1734a775f`: `_cpf_simple_target_call_iterable`.
+
+Total `{indent}` text sites in `cpp_core.py` are now 82 (down from about 260 at the start of this batch
+series). Largest remaining, by the awk count over each `def`:
+
+    23 _cpf_named_target(gen,
+    10 _cpp_for_stmt(gen,
+    6 _cpf_call_iterable(gen,
+    5 _cpp_raise_stmt(gen,
+    5 _cpf_named_target_call_iter2(gen,
+    4 _cpy_unsupported_shape(gen,
+    4 _cpp_try_stmt(gen,
+    4 _cpf_named_target_call_iter(gen,
+    3 _cpp_yield_from(gen,
+    2 _cpy_handle_local(gen,
+
+Still open: the remaining 23 in `_cpf_named_target` (its own branches), `_cpp_for_stmt` (10), `_cpf_call_iterable` (6),
+`_cpp_raise_stmt`'s multi-line `_MojoCppExc{...}` throws (5), and the multi-line `mojo_vararg_fn_new` assign.
+The 11 `_cpx_*` expression arms are a separate job: they return expression text, which needs C++ expression
+shapes (casts, receivers, runtime-stub calls) in `mojo/ir/instr.py`, not more statement shapes.
+Stage 5c is unchanged: blocked on the pointer-versus-scalar call-site analysis or an owner decision.
