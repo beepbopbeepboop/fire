@@ -682,3 +682,26 @@ What remains as text returns in the call arms, and why each is a leaf rather tha
 Verified: `c_oracle check --base HEAD -j 4` gives identical C on all 285 pydiff programs and
 identical C++ companions on all 13 coroutine programs; `test_gimple_cpp_core_arms.py` pins 30 arms
 with 0 failures.
+
+## Status 2026-11-23 (step 18): the lambda shape exists; two lambda helpers are on it
+
+`Ex('lambda')` is the IR shape for a call-once C++ lambda: `text` is its return C type, `body` is a
+list of `Instr` (`decl`, `if`, `expr`, `throw`, `end`, `return`), and it renders as
+`[&]() -> T { stmt stmt }()`. `cpp_core.py` has `_cpp_instr` to build a body statement.
+
+Two helpers now build their lambda on it, each pinned byte-for-byte in
+`test_gimple_cpp_core_arms.py` to the text it printed before:
+
+- `_cpp_next_on_generator_expr` (both branches: a tracked handle, and a direct construction through a
+  `decl`), with the shared body in `_cpp_next_lambda_ex`.
+- `_cpp_rethrow_pending` (the runtime-raiser rethrow). It now returns an `Ex`; its one text consumer,
+  `_cpp_expr_ex`'s none-guard table, takes the stored `Ex` directly.
+
+Still text: the lambdas in `_cpx_call_ident` (`mojo_list_get_*`, slice, comprehension, `_W` word
+container, `malloc`, and the `mojo_getattr`/`mojo_list` bodies), `_cpp_build_container_from_iterable`'s
+lambda, and `_cpp_emit_generator_start_expr`'s start expression. Each is a statement body that the
+shape can now hold; porting each is the next step, one lambda at a time, with the same byte-for-byte pin.
+
+Verified: `c_oracle check --base HEAD -j 4` gives identical C on all 285 pydiff programs and identical
+C++ companions on all 13 coroutine programs; `test_gimple_cpp_core_arms.py` pins 30 arms and the
+lambda texts with 0 failures.

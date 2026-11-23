@@ -18,6 +18,7 @@ Ex.kind
   'bin'    op, a, b
   'cond'   a ? b : c
   'comma'  a, b                       `a, b` inside a parenthesized comma expression
+  'lambda' text (return C type), body   `[&]() -> text { body }()`; body is Instr
   'opaque' ty                         something the reader does not model
 
 Instr.kind
@@ -55,6 +56,7 @@ class Ex:
         self.b: Ex = self
         self.c: Ex = self
         self.args: list[Ex] = []
+        self.body: list = []        # 'lambda': the statements (Instr) of its body
 
     def show(self) -> str:
         k = self.kind
@@ -92,6 +94,10 @@ class Ex:
             return self.a.show() + ' ' + self.op + ' ' + self.b.show()
         if k == 'cond':
             return self.a.show() + ' ? ' + self.b.show() + ' : ' + self.c.show()
+        if k == 'lambda':
+            # `[&]() -> T { stmt stmt }()`: a call-once lambda; `text` is T's C spelling.
+            return ('[&]() -> ' + self.text + ' { '
+                    + ' '.join(st.show() for st in self.body) + ' }()')
         if k == 'none':
             return ''
         return '<opaque>'

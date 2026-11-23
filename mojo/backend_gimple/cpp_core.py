@@ -43,7 +43,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.coro as coro_mod
-from mojo.ir.instr import Ex, ex_bin, ex_text, ex_var
+from mojo.ir.instr import Ex, Instr, ex_bin, ex_text, ex_var
 from mojo.ir.types import type_named
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
@@ -2690,7 +2690,37 @@ def _cpp_list_literal_arg_expr(gen, lit):
             f"{body} return {tmp}; }}()")
 
 
-def _cpp_next_on_generator_expr(gen, handle_expr, api):
+def _cpp_instr(kind: str, rhs=None) -> Instr:
+    """One statement of a lambda body: `kind` with its expression `rhs` (an Ex or text)."""
+    ins = Instr(kind)
+    if rhs is not None:
+        ins.rhs = _as_ex(rhs)
+    return ins
+
+
+def _cpp_next_lambda_ex(vct: str, base: str, handle: str, decl, stop_tag) -> Ex:
+    """The `next()` lambda of a generator handle: resume, re-throw a pending exception or raise
+    StopIteration on exhaustion, and return the current value. `decl`, when given, is the
+    declaration that binds `handle` first (a direct construction)."""
+    body = []
+    if decl is not None:
+        body.append(_cpp_instr('decl', decl))
+    body.append(_cpp_instr('if', f"!{base}_resume({handle})"))
+    body.append(_cpp_instr('if', 'mojo_exc_pending_get()'))
+    body.append(_cpp_instr('expr', _cpp_call_ex('mojo_exc_pending_set', ['0'])))
+    body.append(_cpp_instr('throw', ex_text("_MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), "
+                                            "mojo_exc_obj_get() }")))
+    body.append(_cpp_instr('end'))
+    body.append(_cpp_instr('throw', ex_text(f"_MojoCppExc{{ (int64_t){stop_tag}, nullptr, (void *)nullptr }}")))
+    body.append(_cpp_instr('end'))
+    body.append(_cpp_instr('return', ex_text(f"{base}_value({handle})")))
+    e = Ex('lambda')
+    e.text = vct
+    e.body = body
+    return e
+
+
+def _cpp_next_on_generator_expr(gen, handle_expr, api) -> Ex:
     """`next(<generator-handle>)` inside a coroutine body, lowered to the
     SAME extern "C" drive API _cpp_yield_from's delegation loop already uses:
     `{base}_resume(handle)` advancing to the next yield; false means EITHER
@@ -2717,28 +2747,12 @@ def _cpp_next_on_generator_expr(gen, handle_expr, api):
                                'params': list(api.get('params') or [])})
     if handle_expr.isidentifier():
         # A tracked generator-handle local: resume/value read it directly.
-        h = handle_expr
-        return (
-            f"[&]() -> {vct} {{ "
-            f"if (!{base}_resume({h})) {{ "
-            f"if (mojo_exc_pending_get()) {{ mojo_exc_pending_set(0); "
-            f"throw _MojoCppExc{{ mojo_exc_type_get(), mojo_exc_msg_get(), "
-            f"mojo_exc_obj_get() }}; }} "
-            f"throw _MojoCppExc{{ (int64_t){stop_tag}, nullptr, (void *)nullptr }}; }} "
-            f"return {base}_value({h}); }}()"
-        )
+        return _cpp_next_lambda_ex(vct, base, handle_expr, None, stop_tag)
     # A direct construction (`next(sub(x))`): evaluate start ONCE into a
     # lambda-local so resume/value observe the same handle.
     local_name = gen._cpp_fresh_name("_mojogen_next_g")
-    return (
-        f"[&]() -> {vct} {{ MojoGenerator *{local_name} = {handle_expr}; "
-        f"if (!{base}_resume({local_name})) {{ "
-        f"if (mojo_exc_pending_get()) {{ mojo_exc_pending_set(0); "
-        f"throw _MojoCppExc{{ mojo_exc_type_get(), mojo_exc_msg_get(), "
-        f"mojo_exc_obj_get() }}; }} "
-        f"throw _MojoCppExc{{ (int64_t){stop_tag}, nullptr, (void *)nullptr }}; }} "
-        f"return {base}_value({local_name}); }}()"
-    )
+    return _cpp_next_lambda_ex(vct, base, local_name,
+                               f"MojoGenerator *{local_name} = {handle_expr}", stop_tag)
 
 
 def _cpp_tagged_next_api(gen, expr):
@@ -2891,16 +2905,25 @@ def _cpp_tagged_operand_word(gen, node) -> str:
     return gimple_exprtypes._cpp_word_of_kind(ctype, gen._cpp_expr(node))
 
 
-def _cpp_rethrow_pending(ctype: str, call: str) -> str:
+def _cpp_rethrow_pending(ctype: str, call: str) -> Ex:
     """`call` (a runtime call returning `ctype` that reports a Python exception
     through the pending flag, as every raiser in fire_runtime.c does) as a C++
     expression that rethrows the pending exception as a real `_MojoCppExc`, so
     an enclosing C++ try/catch in this coroutine body sees it. A coroutine body
     must not longjmp, so the flag is the only channel a runtime raiser has."""
-    return (f"[&]() -> {ctype} {{ {ctype} _pr = {call}; "
-            "if (mojo_exc_pending_get()) { mojo_exc_pending_set(0); "
-            "throw _MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), "
-            "mojo_exc_obj_get() }; } return _pr; }()")
+    body = [
+        _cpp_instr('decl', f"{ctype} _pr = {call}"),
+        _cpp_instr('if', 'mojo_exc_pending_get()'),
+        _cpp_instr('expr', _cpp_call_ex('mojo_exc_pending_set', ['0'])),
+        _cpp_instr('throw', ex_text("_MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), "
+                                    "mojo_exc_obj_get() }")),
+        _cpp_instr('end'),
+        _cpp_instr('return', ex_text('_pr')),
+    ]
+    e = Ex('lambda')
+    e.text = ctype
+    e.body = body
+    return e
 
 
 _NONE_ARITH_BINOPS = frozenset({'+', '-', '*', '/', '//', '%', '**'})
@@ -6729,7 +6752,7 @@ def _cpp_expr_ex(gen, e):
     # word (the identity check keeps a recycled id from matching a new node).
     _guarded = (getattr(gen, '_cpp_none_guards', None) or {}).get(id(e))
     if _guarded is not None and _guarded[0] is e:
-        return ex_text(_guarded[1])
+        return _guarded[1]
     if isinstance(e, gimple_ctypes.IntLiteral):
         value = _signed_int64(e.value)
         return ex_text(_signed_int64_c_literal(value))

@@ -410,6 +410,30 @@ def main() -> int:
     text_cases.append((_p.show(), '(a + b)'))
     _u = _Ex('un'); _u.op = '!'; _u.a = _ex('x')
     text_cases.append((_u.show(), '!x'))
+    # The rethrow-pending lambda of a runtime raiser: the text it printed before it was an `Ex`.
+    text_cases.append((_C._cpp_rethrow_pending('int64_t', 'mojo_none_unary_guard_pending((int64_t)(w), "-")'),
+        '[&]() -> int64_t { int64_t _pr = mojo_none_unary_guard_pending((int64_t)(w), "-"); '
+        'if (mojo_exc_pending_get()) { mojo_exc_pending_set(0); '
+        'throw _MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), mojo_exc_obj_get() }; } return _pr; }()'))
+    # The next() lambda of a generator handle: both branches, pinned to the text the
+    # lambda printed before it was an `Ex` (a tracked handle, and a direct construction).
+    class _NextGen:
+        def _exc_type_id(self, name):
+            return 7
+
+        def _cpp_fresh_name(self, prefix):
+            return prefix + '1'
+    _nx_api = {'base': 'gen_base', 'value_ctype': 'int64_t'}
+    text_cases.append((_C._cpp_next_on_generator_expr(_NextGen(), 'h', _nx_api),
+        '[&]() -> int64_t { if (!gen_base_resume(h)) { if (mojo_exc_pending_get()) { mojo_exc_pending_set(0); '
+        'throw _MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), mojo_exc_obj_get() }; } '
+        'throw _MojoCppExc{ (int64_t)7, nullptr, (void *)nullptr }; } return gen_base_value(h); }()'))
+    text_cases.append((_C._cpp_next_on_generator_expr(_NextGen(), 'make(x)', _nx_api),
+        '[&]() -> int64_t { MojoGenerator *_mojogen_next_g1 = make(x); if (!gen_base_resume(_mojogen_next_g1)) { '
+        'if (mojo_exc_pending_get()) { mojo_exc_pending_set(0); '
+        'throw _MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), mojo_exc_obj_get() }; } '
+        'throw _MojoCppExc{ (int64_t)7, nullptr, (void *)nullptr }; } '
+        'return gen_base_value(_mojogen_next_g1); }()'))
     for got, want in text_cases:
         # An arm returns its `Ex`; the C text it renders to is what these cases pin.
         if isinstance(got, _Ex):
