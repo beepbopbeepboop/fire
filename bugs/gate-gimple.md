@@ -44,10 +44,31 @@ STANDALONE REPRO (verified): the exact source
     main()
 
 builds clean (`fire.py build` exit 0), prints `4`, `5`, and then dies with
-SIGSEGV -- shell reports 139. So the list call works, the str-through-a-variable
-call segfaults in the runtime word-dispatch arm. Repro file:
-`/Users/mrs/.hermes/cache/scratch/iter_mixed.mojo`. The job is re-disabled
-(switch restored) because it still fails; delete it only when all three are fixed.
+SIGSEGV -- shell reports 139. Repro file:
+`/Users/mrs/.hermes/cache/scratch/iter_mixed.mojo`.
+
+**Root cause, pinned by lldb.** The crash frame is not the word-dispatch arm:
+
+    frame #0: libmojostdlib.arm64.dylib`mojo_list_get_boxed + 324
+       ->  ldr  x1, [x0, x6]
+    EXC_BAD_ACCESS, address=0x6564
+
+`0x6564` is the ASCII bytes of `"de"`. So the loop ran the `MojoList *` arm with
+the STRING's own bytes as the list pointer -- i.e. `xs` was typed `MojoList *`,
+exactly the guess the test's docstring says was fixed. Confirmed the trigger is
+the MIXED call sites, not the string: the same def called ONLY with the str
+variable (`/Users/mrs/.hermes/cache/scratch/iter_str_only.mojo`) builds, prints
+`d` and `e`, and exits 0. Adding `each([4, 5])` beside it turns the second call
+into a segfault.
+
+That matches the mechanism in `_gmi_apply_call_site_param_evidence`
+(`module_gen.py:246`): it overrides a use-derived container type only when the
+call sites are UNANIMOUS, and "one ambiguous or absent call site leaves the
+inference exactly as it was". With a list and a str both passed, the evidence is
+ambiguous, so `_infer_param_types`' `MojoList *` stands. The fix belongs there
+(or in the iterable-consuming inference): list+str evidence is not "no answer",
+it is proof the parameter must be the kind-neutral word, since the runtime word
+dispatch iterates both.
 
 
 - **Last known working:** `128bc1eb82` integrate fix-proof-fix-gate-type-string-ratchet
