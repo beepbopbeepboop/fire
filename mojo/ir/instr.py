@@ -155,6 +155,9 @@ class Instr:
             return 'return ' + self.rhs.show() + ';'
         if k == 'while':
             return 'while (' + self.rhs.show() + ') {'
+        if k == 'for':
+            # A C `for (<header>) {`; the header is one expression, as for `while`.
+            return 'for (' + self.rhs.show() + ') {'
         if k == 'break':
             return 'break;'
         if k == 'coyield':

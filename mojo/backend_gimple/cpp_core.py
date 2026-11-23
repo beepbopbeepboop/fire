@@ -10852,16 +10852,15 @@ def _cpf_list_iter_cursor(gen, s: 'ForStmt', declared: dict, indent: str, target
     # The for-increment is therefore empty. A `continue` in the body
     # jumps to the condition, skipping the (now empty) increment, which
     # is correct precisely because the advance already happened above.
-    lines.append(f"{indent}for (; {_li_cur} < mojo_list_len({_li_list}); ) {{")
-    lines.append(f"{indent}    {target} = "
-                 + ("mojo_list_get_boxed" if s.iterable.name in
-                    getattr(gen, '_cpp_mixed_list_params', ())
-                    else "mojo_list_get_int")
-                 + f"({_li_list}, {_li_cur});")
-    lines.append(f"{indent}    {_li_cur}++;")
+    lines.append(_cpp_ir_line(indent, 'for', f"; {_li_cur} < mojo_list_len({_li_list}); "))
+    lines.append(_cpp_assign_line(target, ("mojo_list_get_boxed" if s.iterable.name in
+                                           getattr(gen, '_cpp_mixed_list_params', ())
+                                           else "mojo_list_get_int") + f"({_li_list}, {_li_cur})",
+                                  indent + '    '))
+    lines.append(_cpp_ir_line(indent + '    ', 'expr', f"{_li_cur}++"))
     for inner in s.body:
         lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-    lines.append(f"{indent}}}")
+    lines.append(_cpp_ir_line(indent, 'end'))
     return lines
 
 
