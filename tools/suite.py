@@ -2539,12 +2539,12 @@ test('type-lattice-predicates', [PY, 'test_type_lattice_predicates.py'], cache=T
 # written in the repo root and another job in this run links against them, so
 # nothing else may start while this runs. The reservation is the class, like
 # every other job's — see `reserved_gb`.
-test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
-     memwhy='measured 4.9 GB (2026-10-07 gate): the whole-closure self-compile '
-            'plus `gcc -O2 -fgimple` over the resulting translation unit. 1.5x '
-            'is 7.35 GB, so `small` (8) is the smallest class that covers it and '
-            'the headroom is thin. Over the 4 GB line and therefore a debt, not '
-            'a fact — see ' + MEM_DEBT_DOC,
+test('mojoc', ['mojoc'], driver='make', mem='module', excl=True,
+     memwhy='measured 4.9 GB (2026-10-07 gate) but RESOURCE-CAPPED at the 8 GB '
+            '`small` ceiling on 2026-11-22 (peak 8.0 GB, 729s): the whole-closure '
+            'self-compile has grown past the class the old measurement chose. '
+            '`module` (24) is the next rung up; over the 4 GB line and therefore a '
+            'debt, not a fact -- see ' + MEM_DEBT_DOC,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
 # The A/B native campaign is past: its bug doc (`CODEGEN_ab_native_fails`) was

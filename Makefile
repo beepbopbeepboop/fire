@@ -412,7 +412,7 @@ dump-all-stage3:
 # MEMLIMIT_GB=96 raises it; MEMLIMIT_GB=0 removes the wrapper.
 mojoc: $(SELFHOST_INPUTS) $(CORO_RUNTIME_SRC)
 	@echo "=== Building mojoc from $(MOJO_MAIN) ($(MOJO_OPT)) ==="
-	@$(call memslot,mojoc,small) $(PYTHON) fire.py build fire.py $(MOJO_OPT) -o mojoc
+	@$(call memslot,mojoc,module) $(PYTHON) fire.py build fire.py $(MOJO_OPT) -o mojoc
 	@echo "✓ mojoc ready"
 
 # stage1/fire.ci is written by the runner's stage1 steps (a whole-closure

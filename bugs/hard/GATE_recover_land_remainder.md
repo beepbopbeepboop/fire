@@ -110,6 +110,41 @@ on 2026-11-02 with 23 jobs failing. Known observations from that report:
 3. Split unrelated failures into separate bug docs with their own OFF entries if
    needed, keeping every OFF entry's `doc` pointing at an existing file.
 
+### 2026-11-22: `mojoc` was RESOURCE-CAPPED, not red -- and past the class
+
+`mojoc` sits in this OFF entry, so it had not been run. Run directly with the
+class it declares:
+
+    python3 tools/suite.py mojoc --no-cache
+    -> suite: 0 passed, 0 failed, 0 skipped, 1 resource-capped
+       (728.9s wall, peak 8.0 GB)
+
+The 8.0 GB is the `small` ceiling, so that verdict measured the CLASS, not the
+job. Two places pinned it: `tools/suite.py`'s `mem='small'` and, more importantly,
+the `Makefile`'s own `$(call memslot,mojoc,small)` -- the Makefile is what the
+job actually runs, so changing only `suite.py` does nothing (measured: still
+capped at 8.0 GB, 726.7s). Both now say `module` (24), with the memwhy recording
+the measurement.
+
+Re-run with the cap raised -- it now completes and is genuinely RED:
+
+    suite: 0 passed, 1 failed, 0 skipped (550.7s wall, peak 9.5 GB)
+    Compilation failed: mojo/middle/float8_dtype.py: In function '_alloc_DocstringCodeBlock':
+      float8_dtype.py:249:17: error: invalid operands to binary >> (have 'double' and 'double')
+      float8_dtype.py:249:17: error: invalid operands to binary << (have 'double' and 'double')
+      float8_dtype.py:250:17: error: invalid operands to binary &  (have 'double' and 'double')
+
+So the self-host compile (`fire.py build fire.py`) types `_decode`'s `bits`
+parameter as `double` and then emits `>>`/`<<`/`&` on it. `bits` is bound from
+`for bits in range(1 << total)` -- an Int -- and the same parameter also feeds
+`2.0 ** (bits - bias)`, which is the likely unifier. NOT reproducible through
+`fire.py build` on a standalone snippet carrying both shapes (two minimal repros
+build clean), so it is specific to the whole-closure self-host compile; the next
+probe should compile `float8_dtype.py` as part of the closure, or bisect which
+other call site fixes the parameter's type.
+
+`mojoc` therefore stays in the OFF entry -- but for a known, narrow reason now.
+
 ## Done when
 
 `python3 tools/memslot.py --gb 8 --label gate-off-doc -- python3 -m unittest test_gates_off_entries_name_a_doc.py -v`
