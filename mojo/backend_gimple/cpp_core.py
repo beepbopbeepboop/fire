@@ -7301,7 +7301,7 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
     # marked list is refused by every mutating MojoList entry point — marking
     # first made every `yield (a, b)` raise out of its own construction. Same
     # ordering rule as _lower_tuple_literal's identical literal.
-    lines = [f"{indent}MojoList *{tvar} = mojo_list_new();"]
+    lines = [_cpp_assign_line(f"MojoList *{tvar}", "mojo_list_new()", indent)]
     # A tuple with a None or a string slot must carry every slot's kind AT RUN TIME: a consumer that reads the
     # tuple dynamically -- a loop over the result of a call through a function VALUE
     # (`for d, e in check(a)`) -- prints a None as 0 and a string as a pointer otherwise, and an
@@ -7328,36 +7328,36 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     "a capturing `lambda` inside a tuple yield is not "
                     "supported in a compiled generator body")
-            lines.append(f"{indent}mojo_list_append_int({tvar}, {_lw});")
+            lines.append(_cpp_call_line(indent, 'mojo_list_append_int', [tvar, _lw]))
             continue
         ev = gen._cpp_expr(el)
         if _dyn_slots:
             if _is_none:
-                lines.append(f"{indent}mojo_list_append_word({tvar}, mojo_box_none());")
+                lines.append(_cpp_call_line(indent, 'mojo_list_append_word', [tvar, 'mojo_box_none()']))
             elif gimple_ctypes.TypeLattice.is_double(suf):
-                lines.append(f"{indent}mojo_list_append_double_kinded({tvar}, (double)({ev}), 'i');")
+                lines.append(_cpp_call_line(indent, 'mojo_list_append_double_kinded', [tvar, f"(double)({ev})", "'i'"]))
             elif suf == 'str':
-                lines.append(f"{indent}mojo_list_append_str_kinded({tvar}, (char *)({ev}));")
+                lines.append(_cpp_call_line(indent, 'mojo_list_append_str_kinded', [tvar, f"(char *)({ev})"]))
             else:
-                lines.append(f"{indent}mojo_list_append_word({tvar}, (int64_t)(intptr_t)({ev}));")
+                lines.append(_cpp_call_line(indent, 'mojo_list_append_word', [tvar, f"(int64_t)(intptr_t)({ev})"]))
         elif gimple_ctypes.TypeLattice.is_double(suf):
-            lines.append(f"{indent}mojo_list_append_double({tvar}, (double)({ev}));")
+            lines.append(_cpp_call_line(indent, 'mojo_list_append_double', [tvar, f"(double)({ev})"]))
         elif suf == 'str':
-            lines.append(f"{indent}mojo_list_append_str({tvar}, (char *)({ev}));")
+            lines.append(_cpp_call_line(indent, 'mojo_list_append_str', [tvar, f"(char *)({ev})"]))
         else:
-            lines.append(f"{indent}mojo_list_append_int({tvar}, (int64_t)({ev}));")
+            lines.append(_cpp_call_line(indent, 'mojo_list_append_int', [tvar, f"(int64_t)({ev})"]))
     pending = getattr(gen, '_cpp_pending_tuple_slots', None)
     if pending and len(pending) > len(tup.elements):
         for i in range(len(tup.elements), len(pending)):
             suf = gimple_ctypes.TypeLattice.list_suffix(pending[i])
             if gimple_ctypes.TypeLattice.is_double(suf):
-                lines.append(f"{indent}mojo_list_append_double({tvar}, 0.0);")
+                lines.append(_cpp_call_line(indent, 'mojo_list_append_double', [tvar, '0.0']))
             elif suf == 'str':
-                lines.append(f"{indent}mojo_list_append_str({tvar}, (char *)\"\");")
+                lines.append(_cpp_call_line(indent, 'mojo_list_append_str', [tvar, '(char *)""']))
             else:
-                lines.append(f"{indent}mojo_list_append_int({tvar}, 0);")
-    lines.append(f"{indent}mojo_mark_as_tuple({tvar});")
-    lines.append(f"{indent}co_yield {tvar};")
+                lines.append(_cpp_call_line(indent, 'mojo_list_append_int', [tvar, '0']))
+    lines.append(_cpp_call_line(indent, 'mojo_mark_as_tuple', [tvar]))
+    lines.append(_cpp_ir_line(indent, 'coyield', tvar))
     return lines
 
 
