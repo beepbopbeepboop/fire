@@ -3,7 +3,7 @@
 
 Run: python3 tools/test_gate_ledger.py
 """
-import ast, os, sys, unittest
+import ast, os, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gate_ledger as G
 
@@ -198,6 +198,46 @@ class GitHistory(unittest.TestCase):
     def test_commits_between_excludes_good_and_includes_bad(self):
         good = self.commit("a.py"); c2 = self.commit("b.py"); c3 = self.commit("c.py")
         self.assertEqual(G.commits_between(good, c3, cwd=self.d), [c2, c3])
+
+
+class SuiteLogVerdicts(unittest.TestCase):
+    """One parser reads the runner's per-job verdict line.
+
+    `passed_jobs` used to match `PASS`, but the runner's tag for a pass has
+    been `ok` since `tools/suite.py`'s `_TAG` landed -- so it answered [] on
+    every real log, `reconcile`'s `passed` loop was fed nothing, and no job was
+    ever recorded as recovered.
+    """
+
+    LOG = ("[  1/3] ok       alpha            0.1s\n"
+           "[  2/3] skip     beta             0.0s  (0 running)\n"
+           "[  3/3] FAIL     gamma            0.2s\n")
+
+    def _log(self, d):
+        os.makedirs(os.path.join(d, "build"))
+        path = os.path.join(d, "build", "suite.log")
+        open(path, "w").write(self.LOG)
+        return d, path
+
+    def test_the_runner_tag_is_read(self):
+        import integrate as I
+        with tempfile.TemporaryDirectory() as d:
+            _d, path = self._log(d)
+            self.assertEqual(I.job_verdict(path, "alpha"), "green")       # ok
+            self.assertEqual(I.job_verdict(path, "beta"), "no-evidence")  # skip: not a pass
+            self.assertEqual(I.job_verdict(path, "gamma"), "red")         # FAIL
+
+    def test_passed_jobs_is_the_pass_set_only(self):
+        import verify_landed as V
+        with tempfile.TemporaryDirectory() as d:
+            _d, _path = self._log(d)
+            self.assertEqual(V.passed_jobs(d), ["alpha"])
+
+    def test_a_job_the_log_never_names_is_absent_not_passed(self):
+        import integrate as I
+        with tempfile.TemporaryDirectory() as d:
+            _d, path = self._log(d)
+            self.assertEqual(I.job_verdict(path, "never-ran"), "no-evidence")
 
 
 if __name__ == "__main__":

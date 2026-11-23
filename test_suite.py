@@ -2998,6 +2998,10 @@ def test_a_disabled_test_is_registered_but_never_runs():
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
+        'codegen-container-param-unknown-arg',
+        'gimple',
+        'gimplerunner',
+        'stdlib-dylib',
         'stdlib-syntax',
         'suite-self-test',
     ]
@@ -3212,6 +3216,10 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
+        'codegen-container-param-unknown-arg',
+        'gimple',
+        'gimplerunner',
+        'stdlib-dylib',
         'stdlib-syntax',
         'suite-self-test',
     ]

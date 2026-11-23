@@ -176,6 +176,19 @@ def write_doc(job, e, sha, log):
         else:
             txt = txt.rstrip() + "\n\n" + sect
     else:
+        if e.get("registered") is False:
+            # A fanout ITEM is not a bucket of its own: `suite.py <item>` is
+            # rejected before the runner starts, and `--only <item>` matches
+            # nothing, so the header's command has to be the parent's -- with the
+            # per-item line read out of build/suite.log. Naming an item that
+            # cannot be run is what the "Skipped" paragraph did too.
+            parent = job.split(":", 1)[0]
+            repro = ("Reproduce on master: `%s` is one item of the `%s` fanout, so "
+                     "run `python3 tools/suite.py %s` (an item is not a bucket of "
+                     "its own) and read this item's line out of `build/suite.log`."
+                     % (job, parent, parent))
+        else:
+            repro = "Reproduce on master (`python3 tools/suite.py %s`), then fix the cause." % job
         txt = ("# Gate: %s is red on master\n\n**Job:** `%s`. Filed by the full gate at `%s`.\n"
                "**Two states:** this doc exists = the job is red and this is the work. Delete it when the job is green "
                "on master.\n\n%s\n\n%s"
