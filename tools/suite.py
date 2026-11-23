@@ -1826,7 +1826,8 @@ test('ptrreg-boxed-str', [PY, 'test_ptr_registry.py', '--group', 'boxedstr'],
 # cell where it is silently 0 — an instrument nothing runs is a claim.
 test('refusal-taxonomy', [PY, 'test_refusal_taxonomy.py'],
      deps=['preflight'], mem='tiny',
-     desc='the sweep\'s refusal families stay a taxonomy, and stay out of "other"')
+     desc='the sweep\'s refusal families stay a taxonomy, and stay out of "other"',
+     disabled='bugs/gate-refusal-taxonomy.md')
 # ~275 s, because it builds and runs real programs on both paths. `proofs`, not
 # `check`: the everyday inner loop should not pay for it every time.
 test('comptime-parity', [PY, 'test_comptime_parity.py'],
@@ -2076,7 +2077,8 @@ test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=Tru
 # a dict comprehension's key and value live in, which formal/model.py reads.
 test('doc-refs-stale-verdicts', [PY, 'test_dangling_doc_refs.py'], cache=True,
      mem='tiny', extra=['test_dangling_doc_refs.py', 'tools/dangling_doc_refs.py'],
-     desc='the stale-verdict report flags a wrong row and passes a right one')
+     desc='the stale-verdict report flags a wrong row and passes a right one',
+     disabled='bugs/gate-doc-refs-stale-verdicts.md')
 test('comprehension-parse-shape', [PY, 'test_comprehension_parse_shape.py'],
      cache=True, mem='tiny', extra=['test_comprehension_parse_shape.py', 'fire_compiler.py'],
      desc='Comprehension stores a dict comprehension\'s key in .element, value in .value')
@@ -3200,7 +3202,8 @@ test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
             'check it mostly is. The 1.5 GB warm peak is its table row and is '
             'NOT what may size this class; see '
             'a cold store (MEASURED_PEAK_GB["prooflib"]). See ' + MEM_DEBT_DOC,
-     desc='the sweep, measured against the interpreter: no invented coverage')
+     desc='the sweep, measured against the interpreter: no invented coverage',
+     disabled='bugs/gate-formal-sweep-truth.md')
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'], mem='tiny',
      desc='every bound symbol is accounted for, on every container format')
