@@ -11867,13 +11867,12 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines = []
             if _idx_name not in declared:
                 declared[_idx_name] = 'int64_t'
-                lines.append(f"{indent}int64_t {_idx_name};")
+                lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {_idx_name}"))
             for _nm in _nested_inner:
                 if _nm not in declared:
                     declared[_nm] = 'int64_t'
-                    lines.append(f"{indent}int64_t {_nm};")
-            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                         f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _src)}); {_ctr}++) {{")
+                    lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {_nm}"))
+            lines.append(_cpp_ir_line(indent, 'for', f"int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_cpp_as('MojoList *', _src)}); {_ctr}++"))
             lines.append(f"{indent}    {_idx_name} = ({_ctr} + ({_idx_start_expr}));")
             lines.append(f"{indent}    MojoList * {_tup} = "
                          + _cpp_as('MojoList *', f"mojo_list_get_int({_cpp_as('MojoList *', _src)}, {_ctr})") + ";")
@@ -11881,7 +11880,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 lines.append(f"{indent}    {_nm} = mojo_list_get_int({_tup}, {_si});")
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            lines.append(f"{indent}}}")
+            lines.append(_cpp_ir_line(indent, 'end'))
             return lines
         if len(_names) == 2 and _nested_inner is None and (isinstance(s.iterable, gimple_ctypes.CallExpr)
                 and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
@@ -11927,15 +11926,14 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             for _nm in _names:
                 if _nm not in declared:
                     declared[_nm] = 'int64_t'
-                    lines.append(f"{indent}int64_t {_nm};")
-            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                         f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _src)}); {_ctr}++) {{")
-            lines.append(f"{indent}    {_names[0]} = {_idx_expr};")
+                    lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {_nm}"))
+            lines.append(_cpp_ir_line(indent, 'for', f"int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_cpp_as('MojoList *', _src)}); {_ctr}++"))
+            lines.append(_cpp_assign_line(f"{_names[0]}", f"{_idx_expr}", indent + '    '))
             lines.append(f"{indent}    {_names[1]} = "
                          f"mojo_list_get_int({_cpp_as('MojoList *', _src)}, {_ctr});")
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            lines.append(f"{indent}}}")
+            lines.append(_cpp_ir_line(indent, 'end'))
             return lines
         # `for a, b in zip(X, Y):` -- an indexed loop over the SHORTER of the two
         # lists (Lib/os.py's `_fwalk`: `zip(dirs[::-1], entries[::-1])`). Each
@@ -11963,8 +11961,8 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     _zct = ('char *' if _nm in (getattr(gen, '_cpp_str_evidence_names', None) or ())
                             else 'int64_t')
                     declared[_nm] = _zct
-                    lines.append(f"{indent}{_zct} {_nm};")
-            lines.append(f"{indent}for (int64_t {_ctr} = 0; {_len}; {_ctr}++) {{")
+                    lines.append(_cpp_ir_line(indent, 'decl', f"{_zct} {_nm}"))
+            lines.append(_cpp_ir_line(indent, 'for', f"int64_t {_ctr} = 0; {_len}; {_ctr}++"))
             for _nm, _z in zip(_names, _zl):
                 _get = ('mojo_list_get_str'
                         if (gimple_ctypes.TypeLattice.is_cstr(declared.get(_nm))
@@ -11973,10 +11971,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 _rhs = f"{_get}({_z}, {_ctr})"
                 if _get == 'mojo_list_get_str' and declared.get(_nm) not in (None, 'char *'):
                     _rhs = f"(int64_t)(intptr_t){_rhs}"
-                lines.append(f"{indent}    {_nm} = {_rhs};")
+                lines.append(_cpp_assign_line(f"{_nm}", f"{_rhs}", indent + '    '))
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            lines.append(f"{indent}}}")
+            lines.append(_cpp_ir_line(indent, 'end'))
             return lines
         # `for a, b, ... in <call to another already-compiled generator>
         # ():` — a PLAIN (non-`yield from`) consuming loop, inside a
@@ -12041,13 +12039,13 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             for _nm, _sct in zip(_names, _slot_ctypes):
                 if _nm not in declared:
                     declared[_nm] = _sct
-                    lines.append(f"{indent}{gimple_exprtypes._c_to_cpp_scalar_type(_sct)} {_nm};")
-            lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < {_n}; {_ctr}++) {{")
+                    lines.append(_cpp_ir_line(indent, 'decl', f"{gimple_exprtypes._c_to_cpp_scalar_type(_sct)} {_nm}"))
+            lines.append(_cpp_ir_line(indent, 'for', f"int64_t {_ctr} = 0; {_ctr} < {_n}; {_ctr}++"))
             for _nm, _arr in zip(_names, _arrs):
                 lines.append(f"{indent}    {_nm} = {_arr}[{_ctr}];")
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            lines.append(f"{indent}}}")
+            lines.append(_cpp_ir_line(indent, 'end'))
             return lines
         # `for k, v in <dict-typed expr>.items():` — a plain (non-generator)
         # dict iteration with a 2-name tuple target, inside a coroutine body.
@@ -12081,18 +12079,17 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             for _nm, _ct in ((_names[0], 'char *'), (_names[1], 'int64_t')):
                 if _nm not in declared:
                     declared[_nm] = _ct
-                    lines.append(f"{indent}{gimple_exprtypes._c_to_cpp_scalar_type(_ct)} {_nm};")
+                    lines.append(_cpp_ir_line(indent, 'decl', f"{gimple_exprtypes._c_to_cpp_scalar_type(_ct)} {_nm}"))
             lines.append(f"{indent}MojoList *{_items} = "
                          f"mojo_dict_items({_cpp_as('MojoDict *', _dsrc)});")
-            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                         f"{_ctr} < mojo_list_len({_items}); {_ctr}++) {{")
+            lines.append(_cpp_ir_line(indent, 'for', f"int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_items}); {_ctr}++"))
             lines.append(f"{indent}    MojoList *{_pair} = "
                          + _cpp_as('MojoList *', f"mojo_list_get_int({_items}, {_ctr})") + ";")
             lines.append(f"{indent}    {_names[0]} = mojo_list_get_str({_pair}, 0);")
             lines.append(f"{indent}    {_names[1]} = mojo_list_get_int({_pair}, 1);")
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            lines.append(f"{indent}}}")
+            lines.append(_cpp_ir_line(indent, 'end'))
             return lines
         # `for a, b, ... in <module-level container global>:` — a flat
         # (>=2-name) tuple target over a bare identifier that is NOT a
@@ -12146,7 +12143,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                     if _cpp_body_str_evidence(_nm, s.body)
                                     else 'int64_t')
                         declared[_nm] = _tct
-                        lines.append(f"{indent}{_tct} {_nm};")
+                        lines.append(_cpp_ir_line(indent, 'decl', f"{_tct} {_nm}"))
                 lines.append(f"{indent}MojoList *{_tupvar}_list = "
                              + _cpp_as('MojoList *', _giter_expr) + ";")
                 lines.append(f"{indent}for (int64_t {_ctr} = 0; "
@@ -12167,7 +12164,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                      f"mojo_list_get_int({_tupvar}, {_si});")
                 for inner in s.body:
                     lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-                lines.append(f"{indent}}}")
+                lines.append(_cpp_ir_line(indent, 'end'))
                 return lines
         target = target[1:-1]
     if isinstance(target, str):
