@@ -3126,17 +3126,21 @@ class TestTheRegisterValueReaderReadsEveryWrapper(unittest.TestCase):
                                "    return u\n", "unfold")
             self.assertIsNone(err, err)
             text = open(p).read()
-            self.assertTrue(re.search(r"have hpc1 ", text),
+            self.assertTrue(re.search(r"^theorem \w+_hpc1 ", text, re.M),
                             "the fixture no longer generates a multi-step "
-                            "block, so this row is not measuring an `hpc` line")
-            for line in text.splitlines():
-                if not re.search(r"\bhave (hpc|hS)\d+ ", line):
-                    continue
-                if re.search(r"\bhave hpc0 ", line):
-                    # `hpc0` is `(qS0 st).pc = <entry>`, qS0 is `st`, and its
-                    # proof is `simp [qS0, hpc]` on the next line; it unfolds
-                    # one def by construction and is not the history.
-                    continue
+                            "block, so this row is not measuring an `hpc` fact")
+            # `hpc{k}` is a named theorem now; its proof is the body after `:= by`.
+            # `hpc0` is `(qS0 st).pc = <entry>`, qS0 is `st`, and its proof is
+            # `simp [qS0, hpc]`, which unfolds one def by construction, so it is
+            # not in the history and carries no `simp only` line to check.
+            side_lines = [ln for ln in text.splitlines()
+                          if re.search(r"\bhave hS\d+ ", ln)]
+            for hpc in re.finditer(r"^theorem \w+_hpc(\d+) [^\n]*:= by\n"
+                                   r"((?:[ \t]+[^\n]*\n?)*)", text, re.M):
+                if hpc.group(1) != "0":
+                    side_lines.extend(ln for ln in hpc.group(2).splitlines()
+                                      if "simp only [" in ln)
+            for line in side_lines:
                 m = re.search(r"simp only \[([^\]]*)\]", line)
                 self.assertIsNotNone(
                     m, f"an `hpc`/`hS` side condition is no longer proved by "
@@ -7974,6 +7978,29 @@ class TestSvcWriteAssumedRunCertificate(unittest.TestCase):
                       text)
         self.assertNotIn("svc_write_assumed", text,
                          "a static write does not need the assumption")
+
+    def test_a_static_write_after_a_dynamic_one_names_its_own_state(self):
+        # `svc` (dynamic, admitted by the assumption, x0 rewritten after it);
+        # `movz x16, #4; svc` (static write, its own chain); `movz x0, #0;
+        # ret`.  The static write's reg-16 chain must name the GENERATED
+        # block's `qS`/`qT` defs, not the dynamic site's hypothesis name: the
+        # dynamic site bound the loop's `name`, and the later write's chain
+        # was built from it.
+        words = {self.BASE: self.SVC,
+                 self.BASE + 4: self._movz(0, 0),
+                 self.BASE + 8: self._movz(16, 4),
+                 self.BASE + 12: self.SVC,
+                 self.BASE + 16: self._movz(0, 0),
+                 self.BASE + 20: self.RET}
+        pcs = [self.BASE + 4 * i for i in range(6)]
+        part = self._cert(words, pcs, svc_assumed={self.BASE: self.HYP})
+        self.assertIsNotNone(part, "a dynamic then static write run was refused")
+        text = part[0]
+        self.assertIn("h16_3 : arm64_reg 16 (f_b0_qS3 st) = (UInt64.ofNat 4)",
+                      text, "the static write's reg-16 chain is named after "
+                      "the dynamic site's hypothesis, not the block")
+        self.assertNotIn("svc_write_assumed_b0", text,
+                         "a definition was named after the hypothesis")
 
     def test_a_static_exit_is_still_refused(self):
         # `movz x16, #1; svc; ...`: an exit has no fall-through to certify.
