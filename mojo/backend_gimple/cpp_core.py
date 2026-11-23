@@ -43,7 +43,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.coro as coro_mod
-from mojo.ir.instr import Ex, ex_bin, ex_text
+from mojo.ir.instr import Ex, ex_bin, ex_text, ex_var
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -3181,7 +3181,16 @@ def _cpx_ident_expr(gen, e) -> Ex:
     return ex_text(e.name)
 
 
-def _cpx_member_expr(gen, e) -> str:
+def _field_ex(a: Ex, name: str, arrow: bool) -> Ex:
+    """`a->name` (arrow) or `a.name` as a `field` Ex."""
+    e = Ex('field')
+    e.a = a
+    e.name = name
+    e.arrow = arrow
+    return e
+
+
+def _cpx_member_expr(gen, e) -> Ex:
     """`MemberExpr` in `_cpp_expr`: attribute and field access on the compiled C++ types.
 
     One arm of `_cpp_expr`, which tests the condition and calls this."""
@@ -3237,20 +3246,20 @@ def _cpx_member_expr(gen, e) -> str:
             # (a genuine method-as-value like pickletools.py's
             # `getpos = data.tell` must stay callable).
             if e.member in gen._struct_property_names.get(struct_name, ()):
-                return f"{_sym}(self)"
-            return (f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
-                    f"([&]() -> int64_t {{ return {_sym}(self); }}))")
+                return _cpp_call_ex(_sym, ['self'])
+            return (ex_text(f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
+                    f"([&]() -> int64_t {{ return {_sym}(self); }}))"))
         _self_fields = gen.struct_field_types.get(struct_name, {})
         if e.member in _self_fields:
             ft = _self_fields[e.member]
             if gimple_ctypes.TypeLattice.is_py_scalar(ft):
-                return f"self->{gimple_ctypes._safe_field(e.member)}"
+                return _field_ex(ex_var('self'), gimple_ctypes._safe_field(e.member), True)
             # Unknown-shaped field: emit as self->member (C++ struct pointer access)
-            return f"self->{gimple_ctypes._safe_field(e.member)}"
+            return _field_ex(ex_var('self'), gimple_ctypes._safe_field(e.member), True)
         # Anything else (neither a field nor a real method — a
         # genuine not-yet-synthesized dynamic attribute) falls
         # through unchanged to the original best-effort raw access.
-        return f"self->{gimple_ctypes._safe_field(e.member)}"
+        return _field_ex(ex_var('self'), gimple_ctypes._safe_field(e.member), True)
     # `cls.<attr>` — the class-level (not instance) analogue of
     # `self.<field>` just above, for a @classmethod generator (see
     # the classmethod-generator eligibility check, ~line 30536,
@@ -3276,14 +3285,14 @@ def _cpx_member_expr(gen, e) -> str:
         _cls_gname = gen._class_attrs.get(struct_name, {}).get(e.member)
         if _cls_gname is not None:
             gen._cpp_class_attr_refs.add(_cls_gname)
-            return _cls_gname
+            return ex_text(_cls_gname)
         if (e.member not in gen._struct_method_names.get(struct_name, ())
                 and e.member not in gen.struct_field_types.get(struct_name, {})):
             # An attribute the class body never declares (installed with `setattr(cls, ..)` /
             # `Cls.x = v` / a metaclass): the run-time class table holds it, found through
             # the bases. A word of unknown kind.
             _ctag = gimple_exprtypes._struct_type_id(struct_name)
-            return f'mojo_class_getattr({_ctag}LL, "{e.member}")'
+            return ex_text(f'mojo_class_getattr({_ctag}LL, "{e.member}")')
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"cls.{e.member}: only a class-level attribute assigned "
             "in the enclosing class's own body is supported for "
@@ -3326,7 +3335,7 @@ def _cpx_member_expr(gen, e) -> str:
             # `_cpp_param_struct_names` set that collection already
             # reads from, rather than inventing a second one.
             gen._cpp_param_struct_names.add(outer_ft[:-2])
-            return f"(({outer_ft})(self->{gimple_ctypes._safe_field(e.obj.member)}))->{gimple_ctypes._safe_field(e.member)}"
+            return ex_text(f"(({outer_ft})(self->{gimple_ctypes._safe_field(e.obj.member)}))->{gimple_ctypes._safe_field(e.member)}")
         if gimple_ctypes.TypeLattice.is_c_scalar(outer_ft):
             # An attribute read on an OPAQUE scalar-typed self-field
             # (`self.parser.sep`, where `parser = os.path` — a
@@ -3342,7 +3351,7 @@ def _cpx_member_expr(gen, e) -> str:
             gimple_ctypes._debug_note('stubbed operation',
                         f'generator-body attribute read on opaque '
                         f'self-field {e.obj.member}.{e.member}')
-            return '0'
+            return ex_text('0')
     # Non-self member access: entry.name, os.path, etc. A struct-
     # POINTER-typed local/parameter (see bugs/hard/CODEGEN_
     # generator_struct_typed_param_refused.md — e.g. dis.py's
@@ -3385,7 +3394,7 @@ def _cpx_member_expr(gen, e) -> str:
         # agrees with the emitted field by construction.
         _mglob = _cpp_module_global_field(gen, e.obj.name, e.member)
         if _mglob is not None:
-            return _mglob[1]
+            return ex_text(_mglob[1])
         # Anything else off a module name really is the opaque
         # module-OBJECT case the stub below describes (a submodule
         # attribute, a C function re-export, a name that no compiled
@@ -3394,7 +3403,7 @@ def _cpx_member_expr(gen, e) -> str:
         gimple_ctypes._debug_note('stubbed operation',
                     f'generator-body module-member value read '
                     f'{e.obj.name}.{e.member}')
-        return '0'
+        return ex_text('0')
     # `ClassName.<attr>` read of a module-level class off its own NAME (an enum
     # member `KIND.FUNCTION`, a class constant): the non-`cls` twin of the
     # `cls.<attr>` case above. A name that is not a declared local, and names a
@@ -3410,9 +3419,9 @@ def _cpx_member_expr(gen, e) -> str:
         _cn_gname = gen._class_attrs.get(e.obj.name, {}).get(e.member)
         if _cn_gname is not None:
             gen._cpp_class_attr_refs.add(_cn_gname)
-            return _cn_gname
+            return ex_text(_cn_gname)
         _cn_tag = gimple_exprtypes._struct_type_id(e.obj.name)
-        return f'mojo_class_getattr({_cn_tag}LL, "{e.member}")'
+        return ex_text(f'mojo_class_getattr({_cn_tag}LL, "{e.member}")')
     obj_expr = gen._cpp_expr(e.obj) if not isinstance(e.obj, gimple_ctypes.IdentExpr) else e.obj.name
     if isinstance(e.obj, gimple_ctypes.IdentExpr):
         _ptr_struct = gen._cpp_struct_ptr_local(e.obj.name)
@@ -3432,10 +3441,10 @@ def _cpx_member_expr(gen, e) -> str:
                 # a bare property read auto-invokes (its value IS
                 # the getter's result), it never yields a callable.
                 if e.member in gen._struct_property_names.get(_ptr_struct, ()):
-                    return f"{_sym}({obj_expr})"
-                return (f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
-                        f"([&]() -> int64_t {{ return {_sym}({obj_expr}); }}))")
-            return f"{obj_expr}->{gimple_ctypes._safe_field(e.member)}"
+                    return _cpp_call_ex(_sym, [obj_expr])
+                return (ex_text(f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
+                        f"([&]() -> int64_t {{ return {_sym}({obj_expr}); }}))"))
+            return _field_ex(ex_text(obj_expr), gimple_ctypes._safe_field(e.member), True)
     # A member READ rooted at a DECLARED local typed as a plain
     # scalar — including multi-level chains like
     # `cm.unraisable.exc_value` (test_ctypes/test_random_things.py),
@@ -3460,14 +3469,14 @@ def _cpx_member_expr(gen, e) -> str:
         # time - every module registers its struct reflection with `mojo_getattr_any`.
         _inner = (e.obj.name if isinstance(e.obj, gimple_ctypes.IdentExpr)
                   else gen._cpp_expr(e.obj))
-        return (f'mojo_getattr_any((void *)(intptr_t)({_inner}), '
-                f'(char *)"{gimple_ctypes._safe_field(e.member)}")')
+        return (ex_text(f'mojo_getattr_any((void *)(intptr_t)({_inner}), '
+                f'(char *)"{gimple_ctypes._safe_field(e.member)}")'))
     # A struct constructor call lowers to a `Struct *` (see
     # _cpp_is_struct_ctor_call), so a field read off it is `->`, the same
     # as a read off a struct-pointer local.
     if _cpp_is_struct_ctor_call(gen, e.obj):
-        return f"{obj_expr}->{gimple_ctypes._safe_field(e.member)}"
-    return f"{obj_expr}.{gimple_ctypes._safe_field(e.member)}"
+        return _field_ex(ex_text(obj_expr), gimple_ctypes._safe_field(e.member), True)
+    return _field_ex(ex_text(obj_expr), gimple_ctypes._safe_field(e.member), False)
 
 
 def _cpx_lambda_expr(gen, e) -> Ex:
@@ -6698,7 +6707,7 @@ def _cpp_expr_ex(gen, e):
     if isinstance(e, gimple_ctypes.IdentExpr):
         return _cpx_ident_expr(gen, e)
     if isinstance(e, gimple_ctypes.MemberExpr):
-        return ex_text(_cpx_member_expr(gen, e))
+        return _cpx_member_expr(gen, e)
     if isinstance(e, gimple_ctypes.LambdaExpr):
         return _cpx_lambda_expr(gen, e)
     if isinstance(e, gimple_ctypes.UnaryOp):
