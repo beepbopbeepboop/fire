@@ -565,3 +565,16 @@ comparison against HEAD for the branches it reaches, the arm test, `c_oracle che
 
 **Known from this round.** The `(c_ret)(call)` and double-return branches of the callee arm are not reached by
 any input built here; they share the call builder with the reached branch, so they are verified by reading.
+
+**Classification of `_cpx_call_member` (64 returns), measured with an AST pass over the arm (2026-11-22):**
+17 call f-strings (`NAME(args)` with one level of call, e.g. `mojo_list_pop_at(...)`, `int_exists(0, ...)`),
+25 paren/cast f-strings (`(mojo_list_append_int(...), 0)`, `(char *)NAME(...)`, `(NAME(...) != 0)`),
+9 other f-strings (`{_sym}(self, ...)`, `{obj}.{member}(...)`, the `std::` calls), 2 binops (a list
+expression and a lambda, text leaves), 1 conditional expression, 3 constants, 1 subscript, and 4 returns that
+call a text-returning helper (`_cpp_as`, `_cpp_emit_generator_start_expr`), which are text leaves until the
+helper returns Ex. A naive "already Ex" match on helper names is wrong for these four; check the helper's return
+type before counting it as Ex.
+
+Porting order for the next round: the 17 call f-strings first (`call` shape, with the argument text as
+leaves where the argument is itself a helper call), then the 25 paren/cast forms (`paren(call)` or
+`paren(bin)`), then the 9 others, with the 4 helper-call returns last, after the helpers are checked.
