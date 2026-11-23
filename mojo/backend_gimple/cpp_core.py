@@ -2751,6 +2751,24 @@ def _cpp_opaque(text: str) -> Instr:
     return ins
 
 
+def _cpp_int64_thunk(callee: str, args: list) -> Ex:
+    """`[&]() -> int64_t { return callee(args); }`: a lambda VALUE that forwards a call (it is cast to a
+    callable type, not invoked in place, so it is a closure and has no trailing `()`)."""
+    lam = Ex('closure')
+    lam.text = 'int64_t'
+    lam.body = [_cpp_instr('return', _cpp_call_ex(callee, args))]
+    return lam
+
+
+def _cpp_struct_word_lambda(ops: str, body: list) -> Ex:
+    """`[&]() { struct _W { int64_t w; <ops> }; <body> }()`: a word-holding struct with its conversions,
+    then the statements that build the value it returns (`body`)."""
+    lam = Ex('lambda')
+    lam.body = ([_cpp_opaque("struct _W { int64_t w; operator int64_t() const { return w; } " + ops + " };")]
+                + body)
+    return lam
+
+
 def _cpp_next_on_generator_expr(gen, handle_expr, api) -> Ex:
     """`next(<generator-handle>)` inside a coroutine body, lowered to the
     SAME extern "C" drive API _cpp_yield_from's delegation loop already uses:
@@ -3306,8 +3324,8 @@ def _cpx_member_expr(gen, e) -> Ex:
             # `getpos = data.tell` must stay callable).
             if e.member in gen._struct_property_names.get(struct_name, ()):
                 return _cpp_call_ex(_sym, ['self'])
-            return (ex_text(f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
-                    f"([&]() -> int64_t {{ return {_sym}(self); }}))"))
+            return _paren_ex(_cpp_cast_ex(gimple_ctypes._CPP_CALLABLE_CTYPE,
+                                          _paren_ex(_cpp_int64_thunk(_sym, ['self']))))
         _self_fields = gen.struct_field_types.get(struct_name, {})
         if e.member in _self_fields:
             ft = _self_fields[e.member]
@@ -3501,8 +3519,8 @@ def _cpx_member_expr(gen, e) -> Ex:
                 # the getter's result), it never yields a callable.
                 if e.member in gen._struct_property_names.get(_ptr_struct, ()):
                     return _cpp_call_ex(_sym, [obj_expr])
-                return (ex_text(f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
-                        f"([&]() -> int64_t {{ return {_sym}({obj_expr}); }}))"))
+                return _paren_ex(_cpp_cast_ex(gimple_ctypes._CPP_CALLABLE_CTYPE,
+                                              _paren_ex(_cpp_int64_thunk(_sym, [obj_expr]))))
             return _field_ex(ex_text(obj_expr), gimple_ctypes._safe_field(e.member), True)
     # A member READ rooted at a DECLARED local typed as a plain
     # scalar — including multi-level chains like
@@ -3857,15 +3875,18 @@ def _cpx_binary_op(gen, e) -> Ex:
                 _pick = f"mojo_truthy_word(_mojo_ao_l) ? _mojo_ao_l : (int64_t)(intptr_t)mojo_box_from_str((char *)({_rw_str}))"
             else:
                 _pick = f"mojo_truthy_word(_mojo_ao_l) ? (int64_t)(intptr_t)mojo_box_from_str((char *)({_rw_str})) : _mojo_ao_l"
-            return (ex_text(f"[&]() {{ struct _W {{ int64_t w; "
-                    f"operator int64_t() const {{ return w; }} "
-                    f"operator char *() const {{ return (char *)mojo_box_word(w); }} }}; "
-                    f"int64_t _mojo_ao_l = {_lw}; "
-                    f"return _W{{{_pick}}}; }}()"))
+            return _cpp_struct_word_lambda(
+                "operator char *() const { return (char *)mojo_box_word(w); }",
+                [_cpp_instr('decl', f"int64_t _mojo_ao_l = {_lw}"),
+                 _cpp_instr('return', ex_text(f"_W{{{_pick}}}"))])
         _rw = _cpp_tagged_operand_word(gen, e.right)
         _pick = (f"mojo_truthy_word(_mojo_ao_l) ? _mojo_ao_l : ({_rw})" if e.op == 'or'
                  else f"mojo_truthy_word(_mojo_ao_l) ? ({_rw}) : _mojo_ao_l")
-        return ex_text(f"[&]() -> int64_t {{ int64_t _mojo_ao_l = {_lw}; return {_pick}; }}()")
+        _aol = Ex('lambda')
+        _aol.text = 'int64_t'
+        _aol.body = [_cpp_instr('decl', f"int64_t _mojo_ao_l = {_lw}"),
+                     _cpp_instr('return', ex_text(_pick))]
+        return _aol
     if e.op == 'or' and not isinstance(e.right, gimple_ctypes.BoolLiteral):
         # Python's `a or b` yields an OPERAND, not a bool: `suffix or ''`
         # is `suffix` when it is truthy and the string otherwise. Lowered
@@ -3877,12 +3898,11 @@ def _cpx_binary_op(gen, e) -> Ex:
                   else (_cpp_receiver_ctype(gen, e.right)
                         or _cpp_expr_static_ctype(gen, e.right)))
         if gimple_ctypes.TypeLattice.is_cstr(_or_rt) and gimple_ctypes.TypeLattice.is_word_or_cstr(_or_lt):
-            return (ex_text(f"[&]() {{ struct _W {{ int64_t w; "
-                    f"operator int64_t() const {{ return w; }} "
-                    f"operator char *() const {{ return (char *)w; }} }}; "
-                    f"int64_t _l = (int64_t)(intptr_t)({gen._cpp_expr(e.left)}); "
-                    f"return _W{{mojo_truthy_word(_l) ? _l : "
-                    f"(int64_t)(intptr_t)(char *)({gen._cpp_expr(e.right)})}}; }}()"))
+            return _cpp_struct_word_lambda(
+                "operator char *() const { return (char *)w; }",
+                [_cpp_instr('decl', f"int64_t _l = (int64_t)(intptr_t)({gen._cpp_expr(e.left)})"),
+                 _cpp_instr('return', ex_text(f"_W{{mojo_truthy_word(_l) ? _l : "
+                                              f"(int64_t)(intptr_t)(char *)({gen._cpp_expr(e.right)})}}"))])
     if e.op == '%':
         _pf = _cpp_percent_format(gen, e)
         if _pf is not None:
@@ -3916,8 +3936,10 @@ def _cpx_binary_op(gen, e) -> Ex:
             if _fws:
                 _eq = ' || '.join(f"(_v == {_w})" for _w in _fws)
                 _neg = '!' if e.op == 'not in' else ''
-                return (ex_text(f"[&]() {{ int64_t _v = (int64_t)(intptr_t)({gen._cpp_expr(e.left)}); "
-                        f"return {_neg}({_eq}); }}()"))
+                _inl = Ex('lambda')
+                _inl.body = [_cpp_instr('decl', f"int64_t _v = (int64_t)(intptr_t)({gen._cpp_expr(e.left)})"),
+                             _cpp_instr('return', ex_text(f"{_neg}({_eq})"))]
+                return _inl
         a = gen._cpp_expr(e.left)
         b = gen._cpp_expr(e.right)
         return ex_text(gen._cpp_in_link(a, e.left, b, e.right, negate=(e.op == 'not in')))

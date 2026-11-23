@@ -826,3 +826,23 @@ remain in `cpp_core.py` are in expression printers outside the call arms (`_cpx_
 
 Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine programs;
 `test_gimple_cpp_core_arms.py` 30 arms, 0 failures, with the closure and the stable_sort text pinned.
+
+## Status 2026-11-23 (step 25): six expression-printer lambdas are on the lambda shape
+
+`_cpx_member_expr` (two callable-member thunks: a `std::function` cast of a `[&]() -> int64_t { return f(...); }`
+closure, now `_cpp_int64_thunk`), and `_cpx_binary_op` (the `and`/`or` word-holding struct (`_cpp_struct_word_lambda`),
+the `and`/`or` word left operand, the string `or` with a word left operand, and the `in` over a set of words).
+
+`_cpp_int64_thunk` is a `closure`, not a `lambda`: it is cast to a callable type and not invoked in place, so it has
+no trailing `()`. The arm test caught this (it had been a `lambda`) and pins it now.
+
+Coverage: the C oracle is identical, but the corpus does NOT reach these six sites (the oracle stayed identical even
+when the thunk briefly rendered a wrong trailing `()`). Their helpers are pinned byte for byte; the six sites are
+verified by transcription against their old f-strings, not by the corpus. A targeted corpus program for each
+(callable member, `and`/`or` on a word, `in` over a set of words) would make that check real.
+
+Remaining text lambdas: `_cpx_lambda_expr` (3), `_cps_assign_stmt`, `_cpf_simple_target_call_iterable`,
+`_cpp_try_stmt` (2), `_cpp_raise_tuple_msg_expr`, `_cpp_assign_cast_type`.
+
+Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine programs;
+`test_gimple_cpp_core_arms.py` 30 arms, 0 failures, with the thunk, struct-word and closure texts pinned.

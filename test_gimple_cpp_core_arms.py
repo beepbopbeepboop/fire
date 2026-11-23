@@ -417,6 +417,12 @@ def main() -> int:
     text_cases.append((_cl, '[&](int64_t _mg_a, int64_t _mg_b) { return _mg_a < _mg_b; }'))
     text_cases.append((_C._cpp_call_ex('std::stable_sort', ['_mg_v.begin()', '_mg_v.end()', _cl]),
         'std::stable_sort(_mg_v.begin(), _mg_v.end(), [&](int64_t _mg_a, int64_t _mg_b) { return _mg_a < _mg_b; })'))
+    # The int64 thunk and the word-holding struct lambda used by the expression printers.
+    text_cases.append((_C._cpp_int64_thunk('f', ['self']), '[&]() -> int64_t { return f(self); }'))
+    text_cases.append((_C._cpp_struct_word_lambda('operator char *() const { return (char *)w; }',
+        [_C._cpp_instr('decl', 'int64_t _l = 1'), _C._cpp_instr('return', _ex('_W{_l}'))]),
+        '[&]() { struct _W { int64_t w; operator int64_t() const { return w; } '
+        'operator char *() const { return (char *)w; } }; int64_t _l = 1; return _W{_l}; }()'))
     # Cast spellings: a name the type table canonicalises (intptr_t is int64_t there) must keep its own spelling.
     text_cases.append((_C._cpp_cast_ex('intptr_t', _ex('x')), '(intptr_t)x'))
     text_cases.append((_C._cpp_cast_ex('char *', _ex('x')), '(char *)x'))
