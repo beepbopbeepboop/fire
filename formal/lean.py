@@ -1877,9 +1877,11 @@ def _proof_search_digest(proof_path: str) -> bytes:
     return b"\0".join(parts) + b"\0"
 
 
-def proof_verdict_key(proof_path: str, lib_dir: str, lean: str) -> str:
+def proof_verdict_key(proof_path: str, lib_dir: str, lean: str,
+                       mem_mb: int | None = None) -> str:
     import cas
-    parts = [_VERDICT_VERSION, lean_version(lean).encode()]
+    mb = LEAN_MEMORY_MB if mem_mb is None else int(mem_mb)
+    parts = [_VERDICT_VERSION, lean_version(lean).encode(), str(mb).encode()]
     for stem in LIBRARY_MODULES:
         parts.append(stem.encode())
         olean = os.path.join(lib_dir, stem + ".olean")
@@ -1904,7 +1906,8 @@ Census = collections.namedtuple(
 
 
 def proof_census(proof_path: str, repo_root: str | None = None,
-                 timeout: float | None = None, cpu_s: float | None = None) -> Census:
+                 timeout: float | None = None, cpu_s: float | None = None,
+                 mem_mb: int | None = None) -> Census:
     """`(ok, detail, cached, n_sorries, lib_sorries, lib_detail, lines)`.
 
     `check_proof_cached` is this with the census rendered; it exists separately
@@ -1941,7 +1944,7 @@ def proof_census(proof_path: str, repo_root: str | None = None,
     except Exception as e:
         return census(False, f"proof library build failed: {e}", False, 0, {})
     try:
-        key = proof_verdict_key(proof_path, lib_dir, lean)
+        key = proof_verdict_key(proof_path, lib_dir, lean, mem_mb)
     except OSError as e:
         return census(False, f"proof file unreadable: {e}", False, 0, {})
     # Measured AFTER the library is current and BEFORE the verdict is read, so
@@ -1958,7 +1961,7 @@ def proof_census(proof_path: str, repo_root: str | None = None,
         lib = _lib_from_record(lib, lib_sorries, lib_detail)
         return census(ok, detail, True, n_sorries, lib)
     ok, detail, n_sorries, exceeded = _run_lean(proof_path, lib_dir, lean,
-                                                wall_s, cpu_s)
+                                                wall_s, cpu_s, mem_mb)
     lib_sorries, lib_detail = _lib_totals(lib)
     if not exceeded:
         _publish_verdict(key, ok, n_sorries, lib_sorries, lib_detail, detail)
@@ -2184,7 +2187,8 @@ def _emit_census(lines: list) -> None:
 
 
 def check_proof_cached(proof_path: str, repo_root: str | None = None,
-                       timeout: float | None = None) -> tuple:
+                       timeout: float | None = None,
+                       mem_mb: int | None = None) -> tuple:
     """check_proof, memoised on the exact inputs. Third element is True on a
     cache hit (nothing was run); fourth is the number of declarations that
     admitted a `sorry` (see `_run_lean`). Both verdicts are cached: a
@@ -2207,19 +2211,22 @@ def check_proof_cached(proof_path: str, repo_root: str | None = None,
     `PASS`, and the instrument that was supposed to prevent that was itself
     unread. See `Census` and `_emit_census`.
     """
-    c = proof_census(proof_path, repo_root, timeout)
+    c = proof_census(proof_path, repo_root, timeout, mem_mb=mem_mb)
     _emit_census(c.lines)
     return c.ok, c.detail, c.cached, c.n_sorries
 
 
 def check_proof(proof_path: str, repo_root: str | None = None,
-                timeout: float | None = None) -> tuple[bool, str]:
-    ok, detail, _, _ = check_proof_cached(proof_path, repo_root, timeout)
+                timeout: float | None = None,
+                mem_mb: int | None = None) -> tuple[bool, str]:
+    ok, detail, _, _ = check_proof_cached(proof_path, repo_root, timeout,
+                                          mem_mb=mem_mb)
     return ok, detail
 
 
 def _run_lean(proof_path: str, lib_dir: str, lean: str, wall_s: float,
-              cpu_s: float | None = None) -> tuple:
+              cpu_s: float | None = None,
+              mem_mb: int | None = None) -> tuple:
     """`(ok, detail, n_sorries, exceeded)`.
 
     The fourth element is the bound this run broke, or `None`. It is a separate
@@ -2286,7 +2293,7 @@ def _run_lean(proof_path: str, lib_dir: str, lean: str, wall_s: float,
     env["LEAN_PATH"] = os.pathsep.join(
         (os.path.dirname(os.path.abspath(proof_path)), os.path.abspath(lib_dir)))
     result = run_lean(lean, [os.path.basename(proof_path)], env=env,
-                      wall_s=wall_s, cpu_s=cpu_s,
+                      wall_s=wall_s, cpu_s=cpu_s, mem_mb=mem_mb,
                       cwd=os.path.dirname(os.path.abspath(proof_path)))
     if result.exceeded:
         return False, result.exceeded, None, result.exceeded
