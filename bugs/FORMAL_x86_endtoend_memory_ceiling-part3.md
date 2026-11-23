@@ -25,7 +25,7 @@ Add class `TestMemoryCeilingTableMatchesRecord` to `test_formal_lean_proof_memor
 
 Run it alone; it touches no Lean.
 
-If a measured peak exceeds 8192 MB, this part is NOT done: it must still land the entries it can, and file `bugs/FORMAL_x86_endtoend_memory_ceiling_over_8gb.md` naming the stem, its measured peak, and the exact next step (the `hval` chain cost reduction in the original bug's step 2). That bug doc is the owner of the remaining work.
+If a measured peak exceeds 8192 MB, this part is NOT done: it must still land the entries it can, and file a new bug doc under `bugs/` titled for the over-8 GB case (the memory-ceiling proof that still exceeds an 8192 MB `-M`), naming the stem, its measured peak, and the exact next step (the `hval` chain cost reduction in the original bug's step 2). That new doc is the owner of the remaining work.
 
 ## Notes
 
