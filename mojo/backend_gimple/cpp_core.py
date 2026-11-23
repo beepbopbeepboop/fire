@@ -7721,7 +7721,7 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG) and dct not in _variadic_callable_stmt:
             cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
             args_list = [gen._cpp_expr(a) for a in s.value.args]
-            return [f"{indent}{cpp_fname}({', '.join(args_list)});"]
+            return [_cpp_call_line(indent, cpp_fname, args_list)]
         is_callable = False
         if gimple_ctypes.TypeLattice.is_word(dct):
             is_callable = True
@@ -7776,11 +7776,9 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     arg_exprs.append(ae)  # int/int64_t passed as-is
             if gimple_ctypes.TypeLattice.is_double(c_ret):
                 helper = f"mojo_fnptr_call_d{len(arg_exprs)}"
-                call_args = ', '.join([f"(void *){fname}"] + arg_exprs)
-                return [f"{indent}{helper}({call_args});"]
+                return [_cpp_call_line(indent, helper, [f"(void *){fname}"] + arg_exprs)]
             helper = f"mojo_fnptr_call_{len(arg_exprs)}"
-            call_args = ', '.join([f"(void *){fname}"] + arg_exprs)
-            return [f"{indent}{helper}({call_args});"]
+            return [_cpp_call_line(indent, helper, [f"(void *){fname}"] + arg_exprs)]
     # A bare `abort(...)` call (real Mojo's `std.os.abort`,
     # test_tracing.mojo's own `except e: abort(String(e))` shape) --
     # `abort`'s ENTIRE observable contract is "never returns,
