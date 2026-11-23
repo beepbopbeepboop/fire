@@ -614,3 +614,26 @@ for `char *`), and the comma forms `(X(...), 0)`, which need a comma shape the I
 Verified: `c_oracle check --base HEAD -j 4` gives identical C on all 285 pydiff programs and
 identical C++ companions on all 13 coroutine programs; `test_gimple_cpp_core_arms.py` pins 30
 arms with 0 failures; `compile_stdlib.py` gives `FAILED: 0 (0 expected, 0 unexpected)`, no skips.
+
+## Status 2026-11-23 (step 15): 29 of the member arm's 30 text returns are Ex shapes
+
+`_cpx_call_member` now builds 29 of its 30 f-string returns as Ex trees, not text leaves:
+
+- 14 comma forms `(NAME(args), 0)` are `paren(comma(call, 0))`. The new `comma` operand kind
+  renders `a, b`, and `_cpp_comma_ex` builds it.
+- 7 cast-of-call forms `(char *)NAME(args)` are a `cast` to `char *` (`_cpp_cast_ex`) over a call.
+- 3 parenthesized calls and comparisons (`(NAME(args) != 0)`) are `paren` over `bin`.
+- 5 plain calls with text arguments (`int_relpath`, `std::abs(...) < 1e-9`, `int_write`,
+  `std::<member>(...)`, `<obj>.<member>(args)`) are `call` shapes.
+
+Still text: the `mojo_dict_get_int` return with a runtime cast type (`({_dict_val_ct})...`). Its
+cast type is a C spelling that `type_named` has not been checked against, so it stays a text leaf
+for now; the check is to render each `_dict_val_ct` value the arm can produce and compare.
+
+Every shape was checked to render the exact text of the f-string it replaced (seven representative
+cases, all identical). Verified: `c_oracle check --base HEAD -j 4` gives identical C on all 285
+pydiff programs and identical C++ companions on all 13 coroutine programs; `test_gimple_cpp_core_arms.py`
+pins 30 arms with 0 failures; `compile_stdlib.py` gives `FAILED: 0 (0 expected, 0 unexpected)`, no skips.
+
+Still open: the `_dict_val_ct` return above, then `_cpx_call_ident`'s 1,231 lines of text, which
+include calls to `_cpp_emit_generator_start_expr`, the comprehension builders and `_cpp_as`.

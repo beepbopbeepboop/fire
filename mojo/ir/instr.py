@@ -17,6 +17,7 @@ Ex.kind
   'call'   a (callee), args
   'bin'    op, a, b
   'cond'   a ? b : c
+  'comma'  a, b                       `a, b` inside a parenthesized comma expression
   'opaque' ty                         something the reader does not model
 
 Instr.kind
@@ -74,6 +75,8 @@ class Ex:
         if k == 'coawait':
             # A C++ `co_await <expr>` (an awaited expression).
             return 'co_await ' + self.a.show()
+        if k == 'comma':
+            return self.a.show() + ', ' + self.b.show()
         if k == 'paren':
             # A parenthesized operand: `(a)`.
             return '(' + self.a.show() + ')'

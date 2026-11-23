@@ -44,6 +44,7 @@ import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.coro as coro_mod
 from mojo.ir.instr import Ex, ex_bin, ex_text, ex_var
+from mojo.ir.types import type_named
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -4117,8 +4118,7 @@ def _cpx_call_member(gen, e) -> Ex:
         if e.func.member == 'relpath' and len(a) in (1, 2):
             _rp_start = (f"(char *)(intptr_t)({a[1]})" if len(a) == 2
                          else "(char *)0")
-            return (ex_text(f"int_relpath((char *)(intptr_t)({a[0]}), "
-                    f"{_rp_start})"))
+            return (_cpp_call_ex('int_relpath', [f"(char *)(intptr_t)({a[0]})", _rp_start]))
         if e.func.member == 'normpath' and len(a) >= 1:
             return ex_text(a[0])
         # basename/dirname/splitext/expanduser/abspath — the
@@ -4132,22 +4132,21 @@ def _cpx_call_member(gen, e) -> Ex:
         if e.func.member == 'basename' and len(a) == 1:
             return _cpp_call_ex("int64_t_basename", [f"(char *)({a[0]})"])
         if e.func.member == 'dirname' and len(a) == 1:
-            return ex_text(f"(char *)int_dirname(0, (int64_t)(char *)({a[0]}))")
+            return _cpp_cast_ex('char *', _cpp_call_ex('int_dirname', ['0', f"(int64_t)(char *)({a[0]})"]))
         if e.func.member == 'splitext' and len(a) == 1:
             return _cpp_call_ex("int64_t_splitext", [f"(char *)({a[0]})"])
         if e.func.member == 'expanduser' and len(a) == 1:
             return _cpp_call_ex("int64_t_expanduser", [f"(char *)({a[0]})"])
         if e.func.member == 'abspath' and len(a) == 1:
-            return ex_text(f"(char *)int_abspath(0, (int64_t)(char *)({a[0]}))")
+            return _cpp_cast_ex('char *', _cpp_call_ex('int_abspath', ['0', f"(int64_t)(char *)({a[0]})"]))
     if isinstance(e.func.obj, gimple_ctypes.IdentExpr) and e.func.obj.name == 'math':
         a = [gen._cpp_expr(x) for x in e.args]
         if e.func.member in ('isnan', 'isinf', 'floor', 'ceil', 'fabs',
                              'sqrt', 'log', 'log10', 'exp', 'sin',
                              'cos', 'tan', 'fsum', 'isfinite') and a:
-            return ex_text(f"std::{e.func.member}((double)({a[0]}))")
+            return _cpp_call_ex(f"std::{e.func.member}", [f"(double)({a[0]})"])
         if e.func.member == 'isclose' and len(a) >= 2:
-            return (ex_text(f"std::abs((double)({a[0]}) - (double)({a[1]})) "
-                    f"< 1e-9"))
+            return (ex_bin(_cpp_call_ex('std::abs', [f"(double)({a[0]}) - (double)({a[1]})"]), '<', ex_text('1e-9')))
     # self.method(...) / <struct-ptr local>.method(...) — this
     # codegen's structs are plain C structs with no real C++
     # member functions (only field layout is re-emitted into
@@ -4245,7 +4244,7 @@ def _cpx_call_member(gen, e) -> Ex:
             _reg = getattr(gen, '_cpp_list_local_elem_types', None)
             if _reg is not None and _reg.get(_cont_name) is None:
                 _reg[_cont_name] = 'int64_t'
-            return ex_text(f"(mojo_list_append_int({_cont_ref}, (int64_t)({_bl})), 0)")
+            return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_list_append_int', [_cont_ref, f"(int64_t)({_bl})"]), ex_text('0')))
         if (gimple_ctypes.TypeLattice.is_list(_cont_ct) and e.func.member == 'append'
                 and len(e.args) == 1):
             _avct = gimple_exprtypes._infer_simple_expr_ctype(
@@ -4260,10 +4259,10 @@ def _cpx_call_member(gen, e) -> Ex:
             _a = gen._cpp_expr(e.args[0])
             _eff = (_reg or {}).get(_cont_name, _avct)
             if gimple_ctypes.TypeLattice.is_cstr(_eff):
-                return ex_text(f"(mojo_list_append_str({_cont_ref}, (char *)({_a})), 0)")
+                return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_list_append_str', [_cont_ref, f"(char *)({_a})"]), ex_text('0')))
             if gimple_ctypes.TypeLattice.is_double(_eff):
-                return ex_text(f"(mojo_list_append_double({_cont_ref}, (double)({_a})), 0)")
-            return ex_text(f"(mojo_list_append_int({_cont_ref}, (int64_t)({_a})), 0)")
+                return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_list_append_double', [_cont_ref, f"(double)({_a})"]), ex_text('0')))
+            return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_list_append_int', [_cont_ref, f"(int64_t)({_a})"]), ex_text('0')))
         if (_cont_ct == 'MojoSet *' and e.func.member == 'add'
                 and len(e.args) == 1):
             _avct = gimple_exprtypes._infer_simple_expr_ctype(
@@ -4272,8 +4271,8 @@ def _cpx_call_member(gen, e) -> Ex:
                 gen._async_api) or 'int64_t'
             _a = gen._cpp_expr(e.args[0])
             if gimple_ctypes.TypeLattice.is_cstr(_avct):
-                return ex_text(f"(mojo_set_add_str({_cont_name}, (char *)({_a})), 0)")
-            return ex_text(f"(mojo_set_add_int({_cont_name}, (int64_t)({_a})), 0)")
+                return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_set_add_str', [_cont_name, f"(char *)({_a})"]), ex_text('0')))
+            return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_set_add_int', [_cont_name, f"(int64_t)({_a})"]), ex_text('0')))
     # `self.<field>.append(v)`/`cls.<attr>.append(v)`/`.clear()`/
     # `.add(v)` — the MemberExpr-receiver sibling of the plain-
     # local-container case immediately above (real: Lib/test/
@@ -4306,10 +4305,10 @@ def _cpx_call_member(gen, e) -> Ex:
                     gen._async_api) or 'int64_t'
                 _a = gen._cpp_expr(e.args[0])
                 if gimple_ctypes.TypeLattice.is_cstr(_avct):
-                    return ex_text(f"(mojo_list_append_str({_cpp_as('MojoList *', _mobj)}, (char *)({_a})), 0)")
+                    return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_list_append_str', [_cpp_as('MojoList *', _mobj), f"(char *)({_a})"]), ex_text('0')))
                 if gimple_ctypes.TypeLattice.is_double(_avct):
-                    return ex_text(f"(mojo_list_append_double({_cpp_as('MojoList *', _mobj)}, (double)({_a})), 0)")
-                return ex_text(f"(mojo_list_append_int({_cpp_as('MojoList *', _mobj)}, (int64_t)({_a})), 0)")
+                    return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_list_append_double', [_cpp_as('MojoList *', _mobj), f"(double)({_a})"]), ex_text('0')))
+                return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_list_append_int', [_cpp_as('MojoList *', _mobj), f"(int64_t)({_a})"]), ex_text('0')))
             if _mcont_ct == 'MojoSet *' and e.func.member == 'add' and len(e.args) == 1:
                 _avct = gimple_exprtypes._infer_simple_expr_ctype(
                     e.args[0], gen._cpp_declared,
@@ -4317,15 +4316,15 @@ def _cpx_call_member(gen, e) -> Ex:
                     gen._async_api) or 'int64_t'
                 _a = gen._cpp_expr(e.args[0])
                 if gimple_ctypes.TypeLattice.is_cstr(_avct):
-                    return ex_text(f"(mojo_set_add_str({_cpp_as('MojoSet *', _mobj)}, (char *)({_a})), 0)")
-                return ex_text(f"(mojo_set_add_int({_cpp_as('MojoSet *', _mobj)}, (int64_t)({_a})), 0)")
+                    return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_set_add_str', [_cpp_as('MojoSet *', _mobj), f"(char *)({_a})"]), ex_text('0')))
+                return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_set_add_int', [_cpp_as('MojoSet *', _mobj), f"(int64_t)({_a})"]), ex_text('0')))
             if e.func.member == 'clear' and not e.args:
                 if gimple_ctypes.TypeLattice.is_list(_mcont_ct):
-                    return ex_text(f"(mojo_list_clear({_cpp_as('MojoList *', _mobj)}), 0)")
+                    return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_list_clear', [_cpp_as('MojoList *', _mobj)]), ex_text('0')))
                 if _mcont_ct == 'MojoSet *':
-                    return ex_text(f"(mojo_set_clear({_cpp_as('MojoSet *', _mobj)}), 0)")
+                    return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_set_clear', [_cpp_as('MojoSet *', _mobj)]), ex_text('0')))
                 if _mcont_ct == 'MojoDict *':
-                    return ex_text(f"(mojo_dict_clear({_cpp_as('MojoDict *', _mobj)}), 0)")
+                    return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_dict_clear', [_cpp_as('MojoDict *', _mobj)]), ex_text('0')))
     if isinstance(e.func.obj, gimple_ctypes.IdentExpr) and e.func.obj.name == 'self' \
             and _cpp_self_struct:
         args = [gen._cpp_expr(a) for a in e.args]
@@ -4509,8 +4508,7 @@ def _cpx_call_member(gen, e) -> Ex:
         _obj_expr = gen._cpp_expr(e.func.obj)
         _a0 = gen._cpp_expr(e.args[0])
         _a1 = gen._cpp_expr(e.args[1])
-        return (ex_text(f"(char *)_char_replace_impl((int64_t)(char *)({_obj_expr}), "
-                f"(int64_t)(char *)({_a0}), (int64_t)(char *)({_a1}))"))
+        return (_cpp_cast_ex('char *', _cpp_call_ex('_char_replace_impl', [f"(int64_t)(char *)({_obj_expr})", f"(int64_t)(char *)({_a0})", f"(int64_t)(char *)({_a1})"])))
     # `<char*-typed obj>.strip()`/`.lstrip()`/`.rstrip()` (0 or 1
     # `chars` arg) / `.lower()`/`.upper()` (0 args) —
     # same rationale/mechanism as `.replace` just above, routed
@@ -4532,14 +4530,14 @@ def _cpx_call_member(gen, e) -> Ex:
         if e.func.member == 'strip' or not e.args:
             _fn = {'strip': 'string_strip', 'lstrip': 'mojo_str_lstrip',
                    'rstrip': 'mojo_str_rstrip'}[e.func.member]
-            return ex_text(f"(char *){_fn}((char *)({_obj_expr}))")
+            return _cpp_cast_ex('char *', _cpp_call_ex(_fn, [f"(char *)({_obj_expr})"]))
         _fn = 'mojo_str_lstrip_chars' if e.func.member == 'lstrip' else 'mojo_str_rstrip_chars'
         _a0 = gen._cpp_expr(e.args[0])
-        return ex_text(f"(char *){_fn}((char *)({_obj_expr}), (char *)({_a0}))")
+        return _cpp_cast_ex('char *', _cpp_call_ex(_fn, [f"(char *)({_obj_expr})", f"(char *)({_a0})"]))
     if gimple_ctypes.TypeLattice.is_cstr(_str_obj_ctype) and e.func.member in ('lower', 'upper') and not e.args:
         _obj_expr = gen._cpp_expr(e.func.obj)
         _fn = 'string_lower' if e.func.member == 'lower' else 'string_upper'
-        return ex_text(f"(char *){_fn}((char *)({_obj_expr}))")
+        return _cpp_cast_ex('char *', _cpp_call_ex(_fn, [f"(char *)({_obj_expr})"]))
     # `<char*-typed obj>.format(...)` — route through the SAME
     # `mojo_str_format_words` runtime primitive the ordinary GIMPLE
     # path's `_lower_str_call` uses. Before this the generic
@@ -4587,7 +4585,7 @@ def _cpx_call_member(gen, e) -> Ex:
         _obj_expr = gen._cpp_expr(e.func.obj)
         _a0 = gen._cpp_expr(e.args[0])
         _fn = 'mojo_str_partition' if e.func.member == 'partition' else 'mojo_str_rpartition'
-        return ex_text(f"({_fn}((char *)({_obj_expr}), (char *)({_a0})))")
+        return _paren_ex(_cpp_call_ex(_fn, [f"(char *)({_obj_expr})", f"(char *)({_a0})"]))
     if gimple_ctypes.TypeLattice.is_cstr(_str_obj_ctype) and e.func.member in ('startswith', 'endswith') \
             and len(e.args) == 1:
         _obj_expr = gen._cpp_expr(e.func.obj)
@@ -4597,9 +4595,8 @@ def _cpx_call_member(gen, e) -> Ex:
         # tuple of strs) goes through the runtime's `_word` form.
         if (gimple_ctypes.TypeLattice.is_word(_cpp_receiver_ctype(gen, e.args[0]))
                 and e.func.member == 'endswith'):
-            return (ex_text(f"(mojo_str_endswith_word((char *)({_obj_expr}), "
-                    f"(int64_t)({_a0})) != 0)"))
-        return ex_text(f"({_fn}((char *)({_obj_expr}), (char *)({_a0})) != 0)")
+            return (_paren_ex(ex_bin(_cpp_call_ex('mojo_str_endswith_word', [f"(char *)({_obj_expr})", f"(int64_t)({_a0})"]), '!=', ex_text('0'))))
+        return _paren_ex(ex_bin(_cpp_call_ex(_fn, [f"(char *)({_obj_expr})", f"(char *)({_a0})"]), '!=', ex_text('0')))
     # `<char*-typed-or-literal obj>.join(iterable)` — a real
     # `str.join(...)` call on either a declared/self-field `char *`
     # separator OR (unlike the string methods just above, which
@@ -4634,8 +4631,7 @@ def _cpx_call_member(gen, e) -> Ex:
             _a0 = _cpp_list_literal_arg_expr(gen, e.args[0])
         else:
             _a0 = gen._cpp_expr(e.args[0])
-        return (ex_text(f"(char *)mojo_str_join((char *)({_obj_expr}), "
-                f"{_cpp_as('MojoList *', _a0)})"))
+        return (_cpp_cast_ex('char *', _cpp_call_ex('mojo_str_join', [f"(char *)({_obj_expr})", f"{_cpp_as('MojoList *', _a0)}"])))
     # `<char*-typed obj>.split([sep])` / `.rsplit([sep])` /
     # `.splitlines()` — the split family, the same
     # receiver-ctype-gated mechanism as every string method above,
@@ -4755,8 +4751,7 @@ def _cpx_call_member(gen, e) -> Ex:
     if gimple_ctypes.TypeLattice.is_int_word(_fh_rc) and e.func.member in ('write', 'read', 'close'):
         _fh_obj = gen._cpp_expr(e.func.obj)
         if e.func.member == 'write' and len(e.args) == 1:
-            return (ex_text(f"int_write((int64_t)({_fh_obj}), "
-                    f"(char *)({gen._cpp_expr(e.args[0])}))"))
+            return (_cpp_call_ex('int_write', [f"(int64_t)({_fh_obj})", f"(char *)({gen._cpp_expr(e.args[0])})"]))
         if e.func.member == 'read' and not e.args:
             return _cpp_call_ex("int_read", [f"(int64_t)({_fh_obj})"])
         if e.func.member == 'close' and not e.args:
@@ -4789,7 +4784,7 @@ def _cpx_call_member(gen, e) -> Ex:
     # type, so formatting the joined string through `{args}` called
     # `_mojo_repr_list` on text and segfaulted.
     args_text = ', '.join(gen._cpp_expr(a) for a in e.args)
-    return ex_text(f"{obj}.{e.func.member}({args_text})")
+    return _cpp_call_ex(f"{obj}.{e.func.member}", [args_text])
 
 
 def _cpx_call_ident(gen, e) -> Ex:
@@ -6272,6 +6267,22 @@ def _cpp_call_ex(callee: str, args: list) -> Ex:
     e.a = ex_text(callee)
     e.tight = True
     e.args = [a if isinstance(a, Ex) else ex_text(str(a)) for a in args]
+    return e
+
+
+def _cpp_comma_ex(first, second) -> Ex:
+    """`first, second` as a `comma` Ex; the caller parenthesizes it. Text operands become `ex_text` leaves."""
+    e = Ex('comma')
+    e.a = _as_ex(first)
+    e.b = _as_ex(second)
+    return e
+
+
+def _cpp_cast_ex(ctype: str, inner) -> Ex:
+    """`(ctype) inner` as a `cast` Ex; `ctype` is the C spelling, `inner` an Ex or text."""
+    e = Ex('cast')
+    e.ty = type_named(ctype)
+    e.a = _as_ex(inner)
     return e
 
 
