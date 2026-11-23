@@ -17,7 +17,7 @@ import swarm as S
 
 REAL_POOL = {"slots": [
     {"name": "qwen", "model": "m/qwen", "count": 1, "class": "easy"},
-    {"name": "mid-free", "model": "m/mid-free", "count": 1, "class": "mid"},
+    {"name": "iceman", "model": "m/iceman", "count": 1, "class": "mid"},
     {"name": "opus", "model": "m/opus", "count": 0, "class": "hard"},
 ]}
 
@@ -31,7 +31,7 @@ class Unserved(unittest.TestCase):
         self.assertEqual(S.unserved_classes(pool), {})
 
     def test_a_slot_with_also_still_serves_its_extra_classes(self):
-        pool = {"slots": [{"name": "mid-free", "model": "m/mid-free", "count": 1, "class": "mid", "also": ["easy"]},
+        pool = {"slots": [{"name": "iceman", "model": "m/i", "count": 1, "class": "mid", "also": ["easy"]},
                           {"name": "opus", "model": "m/o", "count": 0, "class": "hard"}]}
         self.assertEqual(S.unserved_classes(pool), {"hard": ["opus"]})
 

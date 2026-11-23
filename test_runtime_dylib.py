@@ -578,7 +578,7 @@ def test_dyld_refuses_the_other_architectures_dylib():
 # ── 6. the header carries no declaration it cannot keep ────────────────────
 
 # Declared for GENERATED code to call and defined by whoever LINKS the image —
-# for these, by the self-hosted compiler's own compiled fire_compiler.py.
+# for these, by the self-hosted compiler's own transpiled fire_compiler.py.
 # See the note in fire_runtime.h. A declaration with no definition is a link
 # failure for everyone else, so the exception is named rather than assumed.
 _LINKER_SUPPLIED = frozenset({'py_tokenize'})

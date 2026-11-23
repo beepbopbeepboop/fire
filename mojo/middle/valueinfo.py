@@ -57,11 +57,6 @@ FLAG_BOXED_CONTAINER = 4  # a call result holding a container of unknown kind
 # `carry` deliberately does not move it -- see the module docstring and
 # `carry`'s own.
 FLAG_BIND_BOX = 8
-# A word read from a MIXED struct field (stage 5c, `emit_infra.mixed_field_names`):
-# the slot holds a scalar beside `None`, and `None` is the shared box. Orthogonal
-# to the kind (the read is a Box); `carry` does not move it, so only the field
-# read itself answers an identity test by the box's kind.
-FLAG_MIXED_FIELD = 16
 
 
 class ValueInfo:
@@ -299,11 +294,6 @@ class WordFacts:
         _rec = self._info(name, False)
         return _rec is not None and (_rec.flags & FLAG_BIND_BOX) != 0
 
-    def is_mixed_field(self, name: str) -> bool:
-        _rec = self._info(name, False)
-        return (_rec is not None and _rec.kind == KIND_BOX
-                and (_rec.flags & FLAG_MIXED_FIELD) != 0)
-
     def bind_tagged(self, name: str) -> bool:
         """The tagged-word bind: this word is a TAGGED box AND it is one a
         name keeps (not a copy), which is what `_keep_tagged_box` and the
@@ -330,11 +320,6 @@ class WordFacts:
         _rec = self._info(name, True)
         _rec.kind = KIND_BOX
         _rec.flags = _rec.flags | FLAG_BIND_BOX
-
-    def mark_mixed_field(self, name: str) -> None:
-        _rec = self._info(name, True)
-        _rec.kind = KIND_BOX
-        _rec.flags = _rec.flags | FLAG_MIXED_FIELD
 
     def mark_tagged(self, name: str) -> None:
         _rec = self._info(name, True)

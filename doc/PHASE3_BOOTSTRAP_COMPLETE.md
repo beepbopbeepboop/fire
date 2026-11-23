@@ -8,10 +8,10 @@
 > that failure mode is worse than an obviously stale one, because it stops
 > being obvious.
 >
-> What it describes: `make compile` running `apex py2mojo` to write a Mojo
+> What it describes: `make transpile` running `apex py2mojo` to write a Mojo
 > compiler into `mojo/*.mojo`, compiled from there by a `build/mojo` binary
 > into `stage1/mojo` and `stage2/mojo`. None of that exists: there is no
-> `compile:` rule in the Makefile, no `mojo/mojo_main.mojo`, no
+> `transpile:` rule in the Makefile, no `mojo/mojo_main.mojo`, no
 > `mojo_compiler.mojo`, and `build/mojo` is written by `build_mojo_cli.py`,
 > which nothing runs (see the note in `doc/IMPL.md`).
 >
@@ -29,13 +29,13 @@
 Mojo Source → Tokenizer → Parser → Codegen → C Code
 ```
 
-This is achieved via a Python AST interpreter that will be compiled to Mojo for self-hosting.
+This is achieved via a Python AST interpreter that will be transpiled to Mojo for self-hosting.
 
 ## What Was Accomplished This Session
 
 ### 1. Phase 3 Codegen - Unblocked ✓
 
-**Problem**: Compiled codegen.mojo files had syntax errors (Mojo-only syntax like `var`, `let`, `struct`, `fn` that don't convert to Python).
+**Problem**: Transpiled codegen.mojo files had syntax errors (Mojo-only syntax like `var`, `let`, `struct`, `fn` that don't convert to Python).
 
 **Solution**: Created Python stub implementations instead of trying to convert Mojo files:
 - `mojo/generated_dispatch.py` - type rank tables, operator maps, AST dispatch tables (2.4K)
@@ -56,7 +56,7 @@ Modified `test_phase3_codegen_simple.py` to:
 
 ### 3. Created Mojo Interpreter ✓
 
-Compiled `myinterpreter.py` to `mojo/myinterpreter.mojo`:
+Transpiled `myinterpreter.py` to `mojo/myinterpreter.mojo`:
 - 465-line AST interpreter that executes parsed Mojo code
 - 5 support classes (Scope, MojoFunction, MojoClass, exception handlers)
 - 47 methods (statement and expression handlers)
@@ -108,7 +108,7 @@ c_code = compile_to_gimple(ast)
 
 ### Stage 2: Mojo (Proof of Self-Hosting)
 
-The Mojo interpreter (compiled from Python) will do the same thing but in Mojo:
+The Mojo interpreter (transpiled from Python) will do the same thing but in Mojo:
 
 ```mojo
 # Load interpreter
@@ -245,7 +245,7 @@ diff stage2.c stage3.c
 The foundation for Mojo self-hosting is now complete. The interpreter-based approach provides:
 - ✓ Provable correctness (validated via tests)
 - ✓ Minimal dependencies (just AST + dispatch)
-- ✓ Clear path to self-hosting (interpreter → compile → native)
+- ✓ Clear path to self-hosting (interpreter → transpile → native)
 - ✓ Deterministic output (identical across runs)
 
 The bootstrap system is ready for the final integration phase.

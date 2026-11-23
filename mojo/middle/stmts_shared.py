@@ -73,7 +73,7 @@ def _annotation_container_elem_type(gen, ann, ctype: str) -> str | None:
     inline copies had also drifted — the no-initializer one tested
     `ctype == 'MojoList *'` and so answered for a list but not a set.
     """
-    if not (gimple_ctypes.TypeLattice.is_set(ctype) or gimple_ctypes.TypeLattice.is_list(ctype)):
+    if ctype not in ('MojoList *', 'MojoSet *'):
         return None
     # A typed `str` view before any string operation: `ann` arrives
     # unannotated (a str, None or an AST node), and on a bare word the
@@ -296,8 +296,7 @@ def _assign_target(gen, tgt, et, ev):
             # module GLOBALS: `_write_dest` routes the store to the globals
             # struct, and a `_toplevel` local of the same name would only
             # shadow nothing. The value is coerced to the field's own C type.
-            # The owner-first destination type (one rule for every store; see gimple_codegen).
-            _gdt = gen._global_dst_ctype(tgt.name)
+            _gdt = gen._global_c_decl_types.get(tgt.name) or gen._global_var_types[tgt.name]
             gen._safe_coerce_emit(et, _gdt, ev, gen._write_dest(tgt.name))
             return
         if tgt.name not in gen.var_types:
@@ -381,7 +380,7 @@ def _assign_target(gen, tgt, et, ev):
         # self.tell`). A later `f()` must dispatch dynamically: a bound
         # method needs `self` re-supplied, a plain fnptr must not. Record
         # the name so _lower_call routes it through mojo_maybe_bound_call_N.
-        if gimple_ctypes.TypeLattice.is_bound_method(et) and not gimple_ctypes.TypeLattice.is_bound_method(gen.var_types.get(tgt.name)):
+        if et == 'MojoBoundMethod *' and gen.var_types.get(tgt.name) != 'MojoBoundMethod *':
             gen._bm_tainted_locals.add(tgt.name)
             _brt = gen._bound_method_ret_types.get(ev)
             if _brt:

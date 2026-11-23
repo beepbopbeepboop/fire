@@ -21,7 +21,7 @@ refactor_manifest.json (e.g. _C_RESERVED_FUNCS).
 """
 from __future__ import annotations
 from fire_compiler import AssignStmt, BinaryOp, CallExpr, CompareChain, DictExpr, ExprStmt, ForStmt, FunctionDef, IdentExpr, IfStmt, ListExpr, MemberExpr, ReturnStmt, SetExpr, SliceExpr, StringLiteral, StructDef, SubscriptExpr, TernaryExpr, TryStmt, TupleExpr, UnaryOp, VarDecl, WhileStmt, WithStmt
-from mojo.middle.types import TypeLattice, _C_RESERVED_FUNCS
+from mojo.middle.types import _C_RESERVED_FUNCS
 
 def _find_idents(node) -> set:
     """Recursively find all identifiers in an AST node."""
@@ -1040,7 +1040,7 @@ class TypePromotionSolver:
     def _propagate_return_types(self, signatures: dict):
         """Propagate return types from callees to callers."""
         for func_name, ret_type in self.func_return_types.items():
-            if not TypeLattice.is_void(ret_type):
+            if ret_type != 'void':
                 key = f'__return__{func_name}'
                 self.promoted_types[key] = ret_type
 

@@ -56,22 +56,12 @@ from __future__ import annotations
 
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
-from fire_compiler import _as_str, _as_dict
+from fire_compiler import _as_str
 
 
 def cursor_for(gen, cname):
-    """The cursor record for a C name, or None when it is not a cursor local.
-
-    The record is handed back through `_as_dict`: a `dict.get(k)` with no default
-    on an untyped value domain is the BOXED read in the compiled compiler, and
-    `remaining`/`read_at` subscript the record as a dict. Handed on boxed, the
-    box's magic word was read as the dict header (`mojo_dict_subscript_boxed`
-    crashed on 0x4d4a424f58311b01 compiling `len(it)`)."""
-    _all = _as_dict(getattr(gen, '_list_iter_cursor', None) or {})
-    _rec = _all.get(cname)
-    if _rec is None:
-        return None
-    return _as_dict(_rec)
+    """The cursor record for a C name, or None when it is not a cursor local."""
+    return getattr(gen, '_list_iter_cursor', {}).get(cname)
 
 
 def slot_ctype(elem):
@@ -125,7 +115,7 @@ def read_at(gen, rec, idx):
         _src = _as_str(rec['src'])
         _idx = _as_str(idx)
         elem = rec.get('elem') or gimple_ctypes._elem_type(_data[1])
-        if gimple_ctypes.TypeLattice.is_void(elem):
+        if elem == 'void':
             elem = 'char'
         gen._ptr_helpers_needed.add(elem)
         et_ptr = elem + ' *'
@@ -159,7 +149,7 @@ def read_at(gen, rec, idx):
     # return below). Every container the branch was written for (MojoList *,
     # MojoDict *, MojoSet *, MojoBytes *, MojoStr *, struct pointers) has
     # `suf == 'int'`, so this changes nothing for them.
-    if elem and gimple_ctypes.TypeLattice.ends_in_star(elem) and gimple_ctypes.TypeLattice.is_c_int(suf):
+    if elem and gimple_ctypes.TypeLattice.ends_in_star(elem) and suf == 'int':
         raw = gen._rt_call('int64_t', f"mojo_list_get_{suf}", [_src2, _idx2])
         return elem, gen._cast(elem, raw)
     return vct, gen._rt_call(vct, f"mojo_list_get_{suf}", [_src2, _idx2])

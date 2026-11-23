@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Attempts to compile all (or a specific) Mojo stdlib module(s) through gimple_codegen.
+Attempts to transpile all (or a specific) Mojo stdlib module(s) through gimple_codegen.
 
 Usage:
   python compile_stdlib.py                 # attempt entire stdlib
@@ -113,7 +113,7 @@ EXPECTED_FAILURES = {
     # it FAILED with that reason. The refusal was a false positive and is
     # fixed (2026-11-14; only simple stepping operands count as a progressing
     # bracket argument), so the entry went with it: the module is clean and
-    # `compile_file` sees no degradation.
+    # `transpile_file` sees no degradation.
 
     # UPDATE (this session, continued): `create_task`/`create_raising_task`
     # await-composition (`await create_task(<call>) + await create_task(
@@ -791,7 +791,7 @@ def _gcc_syntax_cached(c_src: str) -> tuple:
     return (r.returncode, r.stderr)
 
 
-def compile_file(mojo_file):
+def transpile_file(mojo_file):
     """Compile a .mojo file through cached codegen + cached GCC syntax check.
 
     Returns (success, msg, cg_was_hit, gcc_was_hit, refusals).
@@ -882,7 +882,7 @@ def compile_file(mojo_file):
         return False, f"{type(e).__name__}: {str(e)[:100]}", False, False, []
 
 def main():
-    parser = argparse.ArgumentParser(description="Attempt to compile Mojo stdlib")
+    parser = argparse.ArgumentParser(description="Attempt to transpile Mojo stdlib")
     parser.add_argument('--module', default=None, help='Restrict to a specific module under std/ (e.g., time)')
     parser.add_argument('--roots', default=None,
                         help='Comma-separated subtrees to scan (default: %s)' % ','.join(DEFAULT_ROOTS))
@@ -941,13 +941,13 @@ def main():
                   + "\n      If any of that is real Mojo source, move the name "
                     "from ROOT_EXCLUDE to DEFAULT_ROOTS.\n")
 
-    # Compile each file. Each file is fully independent (own codegen
+    # Transpile each file. Each file is fully independent (own codegen
     # instance + its own gcc subprocess), so this parallelizes cleanly across
     # processes — no shared state between files.
     passed = []
     failed = []
     done = 0
-    # CAS hit counts aggregated from the per-file results (see compile_file's
+    # CAS hit counts aggregated from the per-file results (see transpile_file's
     # docstring on why worker-process cas.stats don't propagate on their own).
     cg_hits = 0
     gcc_hits = 0
@@ -959,16 +959,16 @@ def main():
     refusals_by_module = []
 
     def _results():
-        """Yield (rel_path, compile_file result) — parallel or serial."""
+        """Yield (rel_path, transpile_file result) — parallel or serial."""
         if args.jobs > 1:
             with ProcessPoolExecutor(max_workers=args.jobs) as pool:
-                futures = {pool.submit(compile_file, abs_path): rel_path
+                futures = {pool.submit(transpile_file, abs_path): rel_path
                            for rel_path, abs_path in mojo_files}
                 for fut in as_completed(futures):
                     yield futures[fut], fut.result()
         else:
             for rel_path, abs_path in mojo_files:
-                yield rel_path, compile_file(abs_path)
+                yield rel_path, transpile_file(abs_path)
 
     for rel_path, (success, error, cg_hit, gcc_hit, refusals) in _results():
         cg_hits += cg_hit

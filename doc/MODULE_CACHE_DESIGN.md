@@ -12,7 +12,7 @@ We are moving the compiler from hand-written `runtime/*.c` stubs to compiling
 against the **real upstream Mojo stdlib**. The MLIR floor is in place
 (`mlir.py`, `external_call`, memory + struct GEP, the `Span` model) — the real
 `FileDescriptor.write_bytes` already lowers natively. The remaining blocker is
-the **import/module boundary**: today `do_imports` compiles-and-inlines the
+the **import/module boundary**: today `do_imports` transpiles-and-inlines the
 *entire transitive closure* — **6.9 MB of C for a one-line `print`** — with no
 caching and no linkable artifact. That does not scale to the stdlib, let alone a
 monorepo.
@@ -178,7 +178,7 @@ as a single point of failure. So we keep the single owner *only* for compaction.
 ## Staged implementation (each stage independently verifiable)
 
 1. **ABI freeze + extern-decl import boundary.** Formalize the C ABI for
-   boundary-crossing types (`ABI.md`); switch imports from inline-compile to
+   boundary-crossing types (`ABI.md`); switch imports from inline-transpile to
    extern decls; keep transitive-closure compile as the *artifact builder*.
 2. **Stdlib dylib build + link** → `build/libmojostdlib.dylib`; client links it.
 3. **Content-addressed cache** (dup-tolerant, then single-flight) → `cas.py`/`cas.c`.

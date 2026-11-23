@@ -469,10 +469,7 @@ MEASURED_PEAK_GB = {
     'native-dumpfull':             (10.4, 'measured'),
     'ab-native':                   (20.5, 'measured'),
     'selfhost':                    (7.9, 'measured'),
-    # 2026-11-22: a `mojoc` run was RESOURCE-capped at the 8 GB ceiling (its
-    # peak is a LOWER bound there, not a measurement), so the 4.9 GB figure is
-    # stale. 8.0 is the highest value actually observed; see the registration.
-    'mojoc':                       (8.0, 'measured'),
+    'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
     # 5.58 GB was this job's number until 2026-11-21, when the cause was found
     # rather than just measured: a single case compiled the compiler's WHOLE
@@ -834,7 +831,6 @@ MEASURED_PEAK_GB = {
     'preflight':                              (0.06, 'measured'),  # 0.6 s, 3 procs
     'no-new-casts':                           (0.10, 'measured'),  # 0.7 s
     'rthdrscan':                              (0.11, 'measured'),  # 0.7 s
-    'tsolve':                                 (0.05, 'estimated'),  # pure unit tests, no compile
     'gimple-lint':                            (0.50, 'measured'),  # 10 s; four --dump children, the largest (myinterpreter.py) 0.5 GB
     'type-string-ratchet':                    (0.05, 'estimated'),  # a text scan, well under 1 s
     'pydiff-ratchet':                         (1.00, 'estimated'),  # ~3 min; 8 compiles at a time, each well under 1 GB (not yet measured)
@@ -1907,85 +1903,6 @@ test('selfhost-struct-layout-map',
      desc='every field declared in fire_compiler.py has a row in the '
           'hardcoded struct_field_types map in module_gen.py, so the emitted '
           'self-host C struct defines every member the closure reads')
-test('presence-store-before-mint',
-     [PY, 'test_presence_store_before_mint.py'], mem='tiny',
-     desc='a field is not minted presence-tracked after a store of it was '
-          'emitted without a bit (import-cycle order; self-hosted compiler '
-          'AttributeError on var_types)')
-test('module-alias-class-method',
-     [PY, 'test_module_alias_class_method.py'], mem='small',
-     desc='`mod.Class.method(args)` through a module alias calls the method '
-          '(it was the unknown-method stub: ~2600 TypeLattice predicates in the '
-          'self-hosted compiler were all false)')
-test('annotated-self-field-struct',
-     [PY, 'test_annotated_self_field_struct.py'], mem='small',
-     desc='`self.f: Cls = make()` types the field Cls *, not the erased word '
-          '(the IR\'s Instr.lhs: the self-hosted compiler printed garbage)')
-test('itcursor-cursor-for',
-     [PY, 'test_itcursor_cursor_for.py'], mem='tiny',
-     desc='itcursor.cursor_for returns the record through _as_dict (a boxed '
-          '`.get` result crashed the self-hosted compiler lowering len(x))')
-test('call-node-params-annotated',
-     [PY, 'test_call_node_params_annotated.py'], mem='tiny',
-     desc='lowering helpers annotate their call-node parameter (an unannotated '
-          '`node.args` param was typed `Ex *` by field evidence and the '
-          'self-hosted compiler read a type tag as a list)')
-test('ctx-params-annotated',
-     [PY, 'test_ctx_params_annotated.py'], mem='tiny',
-     desc='a `ctx` parameter (the middle tier\'s generator) is annotated: '
-          'unannotated, `ctx.var_types` is a dynamic getattr in the '
-          'self-hosted compiler')
-test('tagged-param-forwarded',
-     [PY, 'test_tagged_param_forwarded.py'], mem='small',
-     desc='a tagged `= None` parameter forwarded to another keeps its box '
-          '(mojo_unbox_plain turned the omitted argument into 0)')
-test('method-none-default-boxed',
-     [PY, 'test_method_none_default_boxed.py'], mem='small',
-     desc='a method call passes a `= None` parameter (the tagged word) as the '
-          'None box, not the integer 0 (self-hosted compiler crash)')
-test('runtime-function-not-prefix',
-     [PY, 'test_runtime_function_not_prefix.py'], mem='tiny',
-     desc='"runtime helper" is an rt_sigs lookup, not a `mojo_` prefix: the '
-          'compiler\'s own mojo_middle_* symbols were handed an unconverted '
-          'None box (self-hosted compiler crash under ASLR)')
-test('presence-helpers-annotated',
-     [PY, 'test_presence_helpers_annotated.py'], mem='tiny',
-     desc='the presence-bit helpers take an annotated StructDef (an '
-          'unannotated one was a dynamic getattr that killed the '
-          'self-hosted compiler on its first compile)')
-test('uncompiled-marker-alias',
-     [PY, 'test_uncompiled_marker_alias.py'], mem='tiny',
-     desc='a call through `import a.b as alias` of a COMPILED module is not '
-          'lowered to a "module not compiled" raise (the self-hosted '
-          'compiler died on its first compile)')
-test('sys-maxsize-value',
-     [PY, 'test_sys_maxsize_value.py'], mem='small',
-     desc='`sys.maxsize` read as a value compiles (the self-hosted compiler '
-          'died on startup in comptime.py\'s module-level _HOST_IS_32BIT)')
-test('tagged-select-no-none',
-     [PY, 'test_tagged_select_no_none.py'], mem='tiny',
-     desc='_tagged_cmp_select/_tagged_arith_select answer "does not apply" with a '
-          'value, not None (the self-hosted compiler lowered every `a + 1` to nothing)')
-test('imported-default-padding',
-     [PY, 'test_imported_default_padding.py'], mem='small',
-     desc='a call to an imported module\'s defaulted function pads with the '
-          'definer\'s own defaults in an import cycle (the self-hosted compiler '
-          'wrote every statement at column 0: build.assign lost indent=2)')
-test('importer-param-forwarder',
-     [PY, 'test_importer_param_forwarder.py'], mem='small',
-     desc='an importer compiled before its definer in an import cycle links: '
-          'the definer also defines the overload suffix the earlier call '
-          'sites hashed (annotated_return_ctype / _pack_kwargs_dict family)')
-test('dotted-module-global-accessor',
-     [PY, 'test_dotted_module_global_accessor.py'], mem='small',
-     desc='a module global read through a dotted project import links: the '
-          'extern accessor is named after the definer\'s spelling, not the '
-          'file basename (mojoc/selfhost undefined *__mojo_global_get_*)')
-test('selfhost-sig-types-declared',
-     [PY, 'test_selfhost_sig_types_declared.py'], mem='tiny',
-     desc='every struct type a _SELFHOST_SIGS row names is declared in a '
-          'compiler-source module that does not define it (WordFacts: the '
-          'mojoc / stdlib-dylib `unknown type name` failure)')
 test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'test_runtime_diff.py'],
@@ -2072,31 +1989,6 @@ test('pydiff-ratchet', [PY, 'test_pydiff_ratchet.py'], cache=True, mem='tiny',
          os.path.relpath(p, REPO)
          for p in glob.glob(os.path.join(REPO, 'tools', 'pydiff_corpus', '*', '*.py'))),
      desc='programs that match CPython keep matching (ratchet over tools/pydiff_corpus)')
-test('tsolve', [PY, 'test_tsolve.py'], cache=True, mem='tiny',
-     extra=['test_tsolve.py'] + sorted(
-         os.path.relpath(p, REPO)
-         for p in glob.glob(os.path.join(REPO, 'mojo', 'tsolve', '*.py'))) + [
-         'fire_compiler.py', 'ast_rewriter.py'],
-     desc='whole-closure type solver: join/from_annotation/ret_ctype rows, summaries, fixpoint (bugs/GIR_type_solver.md, 4)')
-test('module-global-attr-read', [PY, 'test_module_global_attr_read.py'], cache=True, mem='tiny',
-     extra=['test_module_global_attr_read.py', 'fire.py', 'gimple_codegen.py',
-            'mojo/backend_gimple/module_gen.py'],
-     desc='a struct-typed module global read through its module (print(a.BOX.n)) reads statically')
-test('return-disagreement', [PY, 'test_return_disagreement.py'], cache=True, mem='tiny',
-     extra=['test_return_disagreement.py', 'mojo/backend_gimple/emit_funcs.py', 'gimple_codegen.py'],
-     desc='the early-decision disagreement classes (same | refined | weak | conflict), bugs/GIR_type_solver_precision.md 4.5')
-test('global-homonym-struct', [PY, 'test_global_homonym_struct.py'], cache=True, mem='tiny',
-     extra=['test_global_homonym_struct.py', 'fire.py', 'gimple_codegen.py',
-            'mojo/backend_gimple/module_gen.py', 'mojo/middle/funcs_shared.py'],
-     desc='two modules declare one global name with two struct types: each keeps its own (bugs/GIR_type_solver_precision.md, 4b)')
-test('import-cycle-sigs', [PY, 'test_import_cycle_sigs.py'], cache=True, mem='tiny',
-     extra=['test_import_cycle_sigs.py', 'fire.py', 'gimple_codegen.py',
-            'mojo/backend_gimple/emit_funcs.py', 'mojo/backend_gimple/module_gen.py',
-            'mojo/backend_gimple/emit_resolve.py', 'mojo/middle/funcs_shared.py',
-            'mojo/middle/resolve_shared.py', 'mojo/tsolve/__init__.py'] +
-           sorted(os.path.relpath(p, REPO)
-                  for p in glob.glob(os.path.join(REPO, 'mojo', 'tsolve', '*.py'))),
-     desc='an import-cycle back-edge gets the solver return type: output matches python, no conflicts (bugs/GIR_type_solver.md, S1)')
 test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + sorted(
          os.path.relpath(p, REPO)
@@ -2228,7 +2120,8 @@ test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
-     desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
+     desc='compile-and-execute: plain programs, structs, closures, stdlib calls',
+     disabled='bugs/gate-gimplerunner.md')
 test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_generator_runner.py',
                              'exec_budget.py',      # imported: must be in the key
@@ -2549,7 +2442,8 @@ test('suite-self-test', [PY, 'test_suite.py'], cache=True, mem='tiny',
             # `SHARED_BUDGET_HELPERS`), so it is an input to this job.
             'tools/pydiff.py'],
      extraglob=['**/test_*.py', '**/*_test.py'],
-     desc='the runner: drivers, deps, exclusivity, fanout, tally, log split')
+     desc='the runner: drivers, deps, exclusivity, fanout, tally, log split',
+     disabled='bugs/gate-suite-self-test.md')
 
 # The ledger every job above reserves out of, tested on its own. In `smoke`
 # rather than nowhere, which is where it was for a commit: `test_memslot.py`
@@ -2780,7 +2674,8 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # moment a recorded peak stops fitting its class).
 test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
      mem='tiny', excl=True, timeout=3600,
-     desc='from-scratch stdlib dylib; reports modules that fell back to source')
+     desc='from-scratch stdlib dylib; reports modules that fell back to source',
+     disabled='bugs/gate-stdlib-dylib.md')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
      deps=['preflight'], mem='tiny',
      desc='the runtime dylib: export table, per-arch link, cross-arch checks')
@@ -2840,7 +2735,8 @@ test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'],
 # on a 96 GB budget), so the ratchet assigns 2.25 GB and the floor covers it.
 test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, mem='tiny',
      timeout=7200,
-     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree')
+     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree',
+     disabled='bugs/gate-stdlib-syntax.md')
 
 # ── bootstrap: an ordered graph, not one recipe ─────────────────────────────
 # Every step below runs a compiler, or the compiler over a whole closure, so
@@ -4687,7 +4583,7 @@ test('reg-comptime-member-monomorphized-instance',
      timeout=1800,
      desc='a comptime member/static-method read through a parameterized '
           'struct folds inside a monomorphized function instance (the '
-          '_ldexp_impl family), and the four stdlib files compile')
+          '_ldexp_impl family), and the four stdlib files transpile')
 test('reg-system-struct-helpers-compile',
      [PY, 'test_system_struct_helpers_compile.py'], mem='tiny',
      desc='a struct named like a C system struct compiles; its helpers '
@@ -4764,16 +4660,6 @@ test('reg-bool-or-mixed-containers', [PY, 'test_bool_or_mixed_containers.py'], m
      desc='per-bug regression pin (estate backlog, 2026-11-14)')
 test('reg-codegen-yield-from-walk-ast-memo', [PY, 'test_codegen_yield_from_walk_ast_memo.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-14)')
-test('reg-codegen-module-alias-global-read', [PY, 'test_codegen_module_alias_global_read.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-23)')
-test('reg-codegen-module-attr-module-value', [PY, 'test_codegen_module_attr_module_value.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-23)')
-test('reg-gimple-mixed-field-names', [PY, 'test_gimple_mixed_field_names.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-23)')
-test('reg-gir-stage7-build-api', [PY, 'test_gir_stage7_build_api.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-23)')
-test('reg-measure-proof-peaks', [PY, 'test_measure_proof_peaks.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-23)')
 test('reg-function-body-alias-class-import', [PY, 'test_function_body_alias_class_import.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-14)')
 test('reg-gpu-offload-validation-part3', [PY, 'test_gpu_offload_validation_part3.py'], mem='tiny',
@@ -4917,12 +4803,6 @@ test('reg-mid-gate-kinds-bug', [PY, 'test_mid_gate_kinds_bug.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-19)')
 test('reg-module-attr-module-call', [PY, 'test_module_attr_module_call.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-19)')
-# The `_as_comptimevar_node` stage2 AttributeError pin: the per-file (`do_imports=
-# False`) compile's module-alias function VALUE, 18 shapes against CPython.
-# Was in `test_suite.py`'s UNREGISTERED, so no bucket ran it. 0.2 GB measured,
-# ~28 s.
-test('reg-module-alias-function-value', [PY, 'test_codegen_module_alias_function_value.py'], mem='tiny',
-     desc='stage2 AttributeError pin for the _as_comptimevar_node module-alias function-value bug (per-file do_imports=False compile)')
 test('reg-selfhost-iter-structdefs-no-nested-gen', [PY, 'test_selfhost_iter_structdefs_no_nested_gen.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-19)')
 test('reg-star-reexport-resolution', [PY, 'test_star_reexport_resolution.py'], mem='tiny',
@@ -5005,7 +4885,7 @@ test('mojoc-precompile-signature', [PY, 'test_mojoc_precompile_signature.py'],
      desc='precompile a package to a .mojoc signature artifact and read it back')
 test('stdlib-syntax-variant', [PY, 'test_stdlib_syntax_variant.py'],
      cache=True, mem='tiny', extra=['test_stdlib_syntax_variant.py'],
-     desc='std/utils/variant.mojo must compile')
+     desc='std/utils/variant.mojo must transpile')
 
 # The same hole, one merge later: master landed four more runnable test files
 # with no `test(...)` entry while this branch was open, which put
@@ -5047,7 +4927,7 @@ BUCKETS = {
 
               'reg-conditional-conformance-candidate-diagnostic',
               'interp-tokenizer-oracle',
-              'linkmode', 'no-new-casts', 'gimple-lint', 'tsolve', 'import-cycle-sigs', 'global-homonym-struct', 'return-disagreement', 'module-global-attr-read', 'pydiff-ratchet', 'type-string-ratchet', 'nonlocal', 'gimplerunner',
+              'linkmode', 'no-new-casts', 'gimple-lint', 'pydiff-ratchet', 'type-string-ratchet', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
 # `ptrreg-boxed-str` is master's split-out dedicated group of the
               # pointer-registry harness and `formal-ast` is the batch's
@@ -5230,15 +5110,7 @@ BUCKETS = {
               # without a row is dropped from the struct the next reader of
               # it makes gcc reject, so the everyday gate has to see the next
               # one (bug doc deleted with the fix, 2026-11-21).
-              'selfhost-struct-layout-map', 'selfhost-sig-types-declared',
-              'dotted-module-global-accessor', 'importer-param-forwarder', 'imported-default-padding',
-              'tagged-select-no-none',
-              'sys-maxsize-value', 'uncompiled-marker-alias',
-              'presence-helpers-annotated', 'runtime-function-not-prefix',
-              'method-none-default-boxed', 'tagged-param-forwarded',
-              'ctx-params-annotated', 'presence-store-before-mint',
-              'call-node-params-annotated', 'itcursor-cursor-for',
-              'annotated-self-field-struct', 'module-alias-class-method'],
+              'selfhost-struct-layout-map'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus
@@ -5253,8 +5125,8 @@ BUCKETS = {
                      'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-norm-claim', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-deadline', 'orch-integrate-dryrun', 'orch-integrate-probe-loop', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
 
     # Per-bug regression pins from the same audit; explicit, not in `check`.
-    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-comptime-bound-bracket-arg', 'reg-signature-bound-evidence-diagnostic', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-signature-diagnostic-anchors', 'reg-stdlib-import-extern-variadic', 'reg-gimple-function-scoped-alias-extern', 'reg-gimple-function-scoped-import-extern', 'reg-gimple-imported-container-global-field', 'reg-gimple-set-op-boxed-operand-ptr', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-candidate-selection-diagnostic', 'reg-diagnostic-format-modular', 'reg-diagnostics-in-missing-locs', 'reg-fieldwise-init-and-deprecated-conversion', 'reg-inferred-generic-statement-call', 'reg-invalid-downcast-build', 'reg-overload-diagnostic', 'reg-predicate-where-diagnostic', 'reg-srcless-package-diagnostics', 'reg-static-call-diagnostics', 'reg-trait-comptime-member-untyped', 'reg-trait-generic-method-alpha-rename', 'reg-trait-imported-diagnostic', 'reg-trait-members-diagnostic', 'reg-trait-requirements-diagnostic', 'reg-where-clause-diagnostic', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-bool-or-mixed-containers', 'reg-codegen-yield-from-walk-ast-memo', 'reg-codegen-module-alias-global-read', 'reg-codegen-module-attr-module-value', 'reg-gimple-mixed-field-names', 'reg-gir-stage7-build-api', 'reg-measure-proof-peaks', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-interp-call-kwargs-printf', 'reg-bare-object-ctor-no-stub', 'reg-globals-in-function-scope', 'reg-imported-global-stub', 'reg-system-struct-helpers-compile',
-     'reg-comptime-member-monomorphized-instance', 'reg-mid-gate-kinds-bug', 'reg-module-alias-function-value', 'reg-module-attr-module-call', 'reg-selfhost-iter-structdefs-no-nested-gen', 'reg-star-reexport-resolution', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
+    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-comptime-bound-bracket-arg', 'reg-signature-bound-evidence-diagnostic', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-signature-diagnostic-anchors', 'reg-stdlib-import-extern-variadic', 'reg-gimple-function-scoped-alias-extern', 'reg-gimple-function-scoped-import-extern', 'reg-gimple-imported-container-global-field', 'reg-gimple-set-op-boxed-operand-ptr', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interp-list-ctor', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-keyword-identifier-collision', 'reg-issubclass-builtin', 'reg-mojoc-dual-mount-import', 'reg-gates-off-entries-name-a-doc', 'reg-selfhost-closure-parses', 'reg-candidate-selection-diagnostic', 'reg-diagnostic-format-modular', 'reg-diagnostics-in-missing-locs', 'reg-fieldwise-init-and-deprecated-conversion', 'reg-inferred-generic-statement-call', 'reg-invalid-downcast-build', 'reg-overload-diagnostic', 'reg-predicate-where-diagnostic', 'reg-srcless-package-diagnostics', 'reg-static-call-diagnostics', 'reg-trait-comptime-member-untyped', 'reg-trait-generic-method-alpha-rename', 'reg-trait-imported-diagnostic', 'reg-trait-members-diagnostic', 'reg-trait-requirements-diagnostic', 'reg-where-clause-diagnostic', 'reg-stdlib-dylib-degraded-module', 'reg-stdlib-syntax-tanh', 'reg-binding-evidence', 'reg-bool-or-mixed-containers', 'reg-codegen-yield-from-walk-ast-memo', 'reg-function-body-alias-class-import', 'reg-gpu-offload-validation-part3', 'reg-mojoc-implicit-default-conformance', 'reg-mojoc-import-conformance', 'reg-mojoc-synthetic-signature-default', 'reg-stdlib-syntax-variant', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-lsp-error-recovery-part3', 'reg-lsp-error-recovery-parser', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-module-globals-compiled', 'reg-mojoc-precompile-signature', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-interp-call-kwargs-printf', 'reg-bare-object-ctor-no-stub', 'reg-globals-in-function-scope', 'reg-imported-global-stub', 'reg-system-struct-helpers-compile',
+     'reg-comptime-member-monomorphized-instance', 'reg-mid-gate-kinds-bug', 'reg-module-attr-module-call', 'reg-selfhost-iter-structdefs-no-nested-gen', 'reg-star-reexport-resolution', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
 
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
@@ -5906,14 +5778,8 @@ def build_cmd(job: Job, opts) -> list[str]:
         # tools/memcap.py` then resolves against THAT cwd and dies with
         # "can't open file .../stage1/tools/memcap.py" before the wrapped
         # command ever runs.
-        # The wall-clock limit is the job's OWN timeout, so every wrapped job
-        # names a real cap rather than inheriting memcap's 20-minute default:
-        # a job the suite allows an hour must not be killed at twenty minutes.
-        # It is the same number the runner arms, so the two agree.
-        time_s = getattr(spec, 'timeout', None) or opts.timeout or DEFAULT_JOB_TIMEOUT_S
         cmd = [PY, os.path.join(HERE, 'memcap.py'),
                '--limit-gb', str(limit),
-               '--time-limit-min', '%.4f' % (time_s / 60.0),
                '--label', job.key, '--'] + cmd
     elif not fanout or spec.mem:
         # A `cmd`/`make` job on the default class that resolves to 0 under

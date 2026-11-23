@@ -260,14 +260,14 @@ def _literal_type(node) -> str:
         if isinstance(node, cls):
             return name
     if isinstance(node, IdentExpr):
-        if gimple_ctypes.TypeLattice.is_none_type(node.name):
+        if node.name == 'None':
             return 'NoneType'
         if node.name in ('True', 'False'):
             return 'Bool'
     return ''
 
 
-def _literal_args(node: CallExpr) -> list:
+def _literal_args(node) -> list:
     """Mojo type arguments for `node`'s arguments when EVERY one of them is a
     literal this pass knows; otherwise None (the caller then refuses)."""
     if not node.args:

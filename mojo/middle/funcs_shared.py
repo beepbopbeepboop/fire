@@ -32,8 +32,6 @@ import mojo.middle.coro as _coro
 # in full, and why a function-local `import X` survives where `from X import
 # NAME` cannot, is in `mojo/middle/methods_shared.py`'s header comment.
 import mojo.middle.types as gimple_ctypes
-from mojo.middle.module_parse import parse_module_file, parse_module_source
-from mojo.tsolve.summarize import ModuleFile
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 # NOT `from mojo.middle.module_shared import module_qualifier` here:
@@ -128,7 +126,8 @@ def _resolve_reexported_closure_func(gen, module: str, name: str, _depth: int = 
             if _mp:
                 with open(_mp) as _mf:
                     _msrc = _mf.read()
-                _stmts = parse_module_source(_msrc, _mp)
+                _stmts = gimple_ctypes.ast_rewriter.rewrite(
+                    gimple_ctypes.Parser(gimple_ctypes.py_tokenize(_msrc)).parse_module())
                 gen._imported_src_cache[module] = (_mp, _msrc, _stmts)
         except Exception:
             _stmts = None
@@ -347,7 +346,7 @@ def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
     """
     _bound = (getattr(gen, '_inferred_var_types', None) or {}).get(
         func_name, {}).get(pname)
-    if (gimple_ctypes.TypeLattice.is_set(_bound) or gimple_ctypes.TypeLattice.is_dict(_bound) or gimple_ctypes.TypeLattice.is_list(_bound)) and _bound != ctype:
+    if _bound in ('MojoDict *', 'MojoList *', 'MojoSet *') and _bound != ctype:
         return _bound
     # ...and the third estimator: what every call site of this function
     # actually PASSES. `_infer_param_types` sees the body and nothing else, and
@@ -372,14 +371,14 @@ def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
     _xcf = _pct.get(func_name)
     if _xcf is not None:
         _xc = _xcf.get(pname)
-    if (gimple_ctypes.TypeLattice.is_set(_xc) or gimple_ctypes.TypeLattice.is_dict(_xc) or gimple_ctypes.TypeLattice.is_list(_xc)) and _xc != ctype:
+    if _xc in ('MojoDict *', 'MojoList *', 'MojoSet *') and _xc != ctype:
         # Apply unanimous container evidence when usage left the slot at the
         # int64_t default, but preserve scalar (char* / double) or struct
         # conclusions.
-        if (gimple_ctypes.TypeLattice.is_int_word(ctype) or gimple_ctypes.TypeLattice.is_no_type(ctype)):
+        if gimple_ctypes.TypeLattice.is_int_word_or_unsolved(ctype):
             return _xc
         return _xc
-    if not (gimple_ctypes.TypeLattice.is_set(ctype) or gimple_ctypes.TypeLattice.is_dict(ctype) or gimple_ctypes.TypeLattice.is_list(ctype)):
+    if ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
         return ctype
     return ctype
 
@@ -426,14 +425,7 @@ def param_aug_rebinding_ctype(gen, func, pname: str, base_ctype: str):
         gen._param_aug_rebind_cache = cache
     key = (id(func), _as_str(pname), _as_str(base_ctype))
     if key in cache:
-        # `_as_str` + `len`, not `cache[key] if cache[key] else None`: the compiled
-        # compiler reads the slot as a bare word and tests `!= 0`, so the cached `''` (the
-        # "no widening" answer) was a non-null pointer and came back as the type `''`
-        # for every unannotated parameter from the second query on.
-        _hit = _as_str(cache[key])
-        if len(_hit) > 0:
-            return _hit
-        return None
+        return cache[key] if cache[key] else None
     # The walk is per FUNCTION, not per parameter: a signature pass resolves
     # every parameter of every function, and re-walking a large body once
     # per parameter would make this quadratic. `by_name` records every
@@ -637,7 +629,7 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
     # stdlib-dylib red). One statement of the rule, three readers.
     if is_bare_string_param_annotation(ptype):
         ctype = param_annotation_ctype(ptype)
-    if gimple_ctypes.TypeLattice.is_void(ctype):
+    if ctype == 'void':
         # _mojo_type('None') correctly maps NoneType -> void for RETURN
         # types, but a named PARAMETER can never be typed void in a
         # multi-argument C signature (only the sole, unnamed `(void)` no-
@@ -904,8 +896,18 @@ def _resolved_export_entry(gen, module: str, name: str, info):
         return info
     _ret = _as_str(info.get('c_return_type') or 'int64_t')
     if _fn.return_type:
-        # The definer's own answer (see annotated_return_ctype).
-        _ret = annotated_return_ctype(gen, _fn)
+        _ret = gen._resolve_type(_fn.return_type)
+        if (isinstance(_ret, str) and _ret.startswith('MojoTuple_')
+                and not _body_builds_struct_tuple(
+                        getattr(_fn, 'body', None))):
+            # The same body-sensitive decision the defining unit's own
+            # resolution makes (see module_gen's all-functions loop): a
+            # `-> Tuple[...]` return built as a RUNTIME (list-backed) tuple
+            # literal is a `MojoList *`, not the synthesized by-value struct
+            # — the re-emitted extern must agree with the instance TU's
+            # prototype (measured 2026-10-21 part 4 integration on
+            # `split`'s `-> Tuple[String, String]`).
+            _ret = 'MojoList *'
     _pts = gen._signature_ctypes(_fn.params, _fn)
     _cparams = []
     for _i, _cpt in enumerate(_pts):
@@ -1021,18 +1023,6 @@ def register_imported_symbol(gen, name: str, info: dict,
     # re-dispatched bare call found nothing and emitted a weak 0-returning
     # stub), and master, which had no such registration, was green.
     _c_ret = _info.get('c_return_type')
-    # A `global_var` export is a module-level VARIABLE (`_SIGNED: dict = {..}`
-    # in generated_dispatch.py), not a function. Its `c_return_type` is the
-    # global's C type, and recording it here as a FUNCTION return type made
-    # `calls_shared._callable_value_symbol` answer "a function value" for every
-    # alias of it: `class TypeLattice: _FLOAT = _GD_FLOAT` emitted a
-    # file-scope `static void * _funcptr__FLOAT = (void *)_FLOAT;` in the
-    # whole-closure translation unit, where `_FLOAT` is not declared
-    # ("'_FLOAT' undeclared here", the three group D gcc errors). The global
-    # itself is typed through `imported_symbols` / `_global_var_types`, which
-    # this guard leaves alone.
-    if _info.get('kind') == 'global_var':
-        _c_ret = None
     if _c_ret and not _info.get('c_return_type_is_default'):
         if isinstance(_c_ret, str) and _c_ret.startswith('MojoTuple_'):
             # Part 4 (measured 2026-10-21 integration, `split`'s
@@ -1172,19 +1162,6 @@ def register_module_member_function(gen, module_name: str, member_name: str,
     return sub_ref, _raw
 
 
-def annotated_return_ctype(gen, fn_node) -> str:
-    """The C return type of an ANNOTATED function, as its definer publishes it
-    (bugs/GIR_type_solver_precision.md, 4.4): the annotation resolved by the backend, except a
-    `MojoTuple_*` whose body builds a RUNTIME (list-backed) tuple literal is `MojoList *` (the
-    by-value struct is only for a body that builds the struct). An importer's early decision and
-    the definer's own record both call this, so the two cannot disagree by construction."""
-    ret = gen._resolve_type(fn_node.return_type)
-    if (isinstance(ret, str) and ret.startswith('MojoTuple_')
-            and not _body_builds_struct_tuple(getattr(fn_node, 'body', None))):
-        return 'MojoList *'
-    return ret
-
-
 def sanitize_module_qualifier(gen, q) -> str:
     """The C qualifier a module's free functions carry in THIS compile: the
     `module_qualifier` string rule, with the per-compile
@@ -1283,10 +1260,6 @@ def module_member_function_csym(gen, module_name: str, member_name: str):
             _pts = gen._home_signature_ctypes(definer, fs)
         suffix = _as_str(gen.overload_suffix_for(_pts))
         sym = (qualifier + '_' + base if qualifier else base) + suffix
-    gen._csym_bare[_as_str(sym)] = _as_str(def_name)
-    _fd = param_default_pairs(getattr(fs, 'param_defaults', None) or {})
-    if len(_fd) > 0:
-        gen._csym_defaults[_as_str(sym)] = _fd
     return sym, definer, def_name, fs
 
 
@@ -1478,7 +1451,8 @@ def register_module_member_value(gen, module_name: str, member_name: str):
     # own `int64_t` is only a default for an unannotated `def`; left in place
     # it declares `int64_t sym (void)` against a definition that returns
     # `MojoList *` (measured: `import fgn_b; fgn_b.make()` conflicting types).
-    _measured_ret = gen._home_def_return_type_of(sanitize_module_qualifier(gen, definer), def_name)
+    _measured_ret = _as_dict(getattr(gen, '_home_def_return_types', None)).get(
+        _pair_key(sanitize_module_qualifier(gen, definer), def_name))
     if _measured_ret:
         _ret = _as_str(_measured_ret)
         _entry['c_return_type'] = _ret
@@ -1784,90 +1758,6 @@ def _module_attr_module(gen, module: str, attr: str):
                 if _module_ref_is_source(gen, _ref, _path):
                     return _ref
     return None
-
-def resolve_module_attr_ref(gen, base_ref: str, attr: str):
-    """The module ref that `base_ref` binds `attr` to, registered in this
-    generation unit as a module namespace, or None.
-
-    `base_ref` is a MODULE ref (not the local alias a source statement
-    used), so `base_ref.attr` is a read of that module's namespace. The
-    answer comes from the defining module's own import statements
-    (`_module_attr_module`, which parses its source once and caches it) —
-    never from a name guess, because the same attribute name can be an
-    ordinary function or constant.
-
-    Registration is what makes the re-dispatched `<target>.<member>` read
-    lower as a module-qualified access instead of an attribute read on an
-    opaque int64_t marker: both `_selfhost_sibling_member_kind` and the
-    generic module-qualified branch gate on `_module_alias_names`, and both
-    read the alias's `imported_symbols` entry for the target module. An
-    entry with `return_type: 'unknown'` is the exact module-marker shape
-    `_gen_stmt_ImportStmt` writes, and the imported-symbol stub pass skips
-    that shape.
-    """
-    try:
-        ref = gen._module_attr_module(base_ref, attr)
-    except Exception:
-        ref = None
-    if not ref:
-        return None
-    if ref not in gen._module_alias_names:
-        gen._module_alias_names.add(ref)
-    if ref not in gen.imported_symbols:
-        gen.imported_symbols[ref] = {
-            'module': ref, 'return_type': 'unknown',
-        }
-    return ref
-
-
-def module_receiver_ref(gen, recv):
-    """The MODULE ref the member read `recv` denotes, or None.
-
-    `recv` is the RECEIVER of an outer member access: `h.sub` in
-    `h.sub.double_it`. It answers only when `h` is a module alias this
-    compile registered, and then either `h.sub` is a submodule file
-    (`import pkg.impl` makes `pkg.impl` a module object) or `h`'s own module
-    binds `sub` to a module (`import helper as h`, where `helper.py` does
-    `import impl as sub`). Every other receiver — a class instance's field,
-    a plain local — answers None and keeps its existing lowering.
-
-    The one answer both spellings consult: the CALL re-dispatch
-    (`emit_methods._lmc_two_hop_module_call`) and the VALUE read
-    (`emit_exprs._lower_MemberExpr`) reach the same module for the same
-    receiver, so `h.sub.f(21)` and `f = h.sub.f` cannot disagree about which
-    module `f` belongs to.
-    """
-    if not isinstance(recv, gimple_ctypes.MemberExpr):
-        return None
-    if not isinstance(recv.obj, gimple_ctypes.IdentExpr):
-        return None
-    _base = _as_str(recv.obj.name)
-    _member = _as_str(recv.member)
-    if _base not in getattr(gen, '_module_alias_names', ()):
-        return None
-    # `import pkg.impl` binds `pkg`, and `pkg.impl` is then a submodule
-    # file: the dotted name is the module itself.
-    _dotted = _base + '.' + _member
-    if gen._submodule_source_path(_dotted):
-        # The plain-`import` pre-pass records only the BOUND name (`pkg`),
-        # and the full dotted target is registered later, after the toplevel
-        # body is lowered — so register it here, as the module-globals pass
-        # will (same dict, same shape, first writer wins).
-        if _dotted not in gen._module_alias_names:
-            if _dotted not in gen.imported_symbols:
-                gen.imported_symbols[_dotted] = {
-                    'module': _dotted, 'return_type': 'unknown',
-                }
-            gen._module_alias_names.add(_dotted)
-        return _dotted
-    # Otherwise the receiver's base is a module whose own namespace binds
-    # `member` to a module (`import helper as h` + `helper: import impl as
-    # sub`). Resolve through the base's REAL module, not its local alias.
-    _info = (getattr(gen, 'imported_symbols', None) or {}).get(_base)
-    _base_ref = ((_info.get('module') if isinstance(_info, dict) else None)
-                 or _base)
-    return resolve_module_attr_ref(gen, _base_ref, _member)
-
 
 def _module_ref_is_source(gen, ref: str, base_path: str) -> bool:
     """Does `ref` name a real module FILE reachable from the module whose
@@ -2518,13 +2408,13 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
     # identifier. _func_qualifier (the free-function analog of this
     # method) already sanitizes for exactly this reason (BUG-2026-049);
     # this struct-method sibling was missed at the time, so a struct
-    # DEFINED in a dotted-package module (e.g. `compiler.ast_rewrite`)
-    # got an unsanitized qualifier like "compiler.ast_rewrite" here,
+    # DEFINED in a dotted-package module (e.g. `transpiler.ast_rewrite`)
+    # got an unsanitized qualifier like "transpiler.ast_rewrite" here,
     # producing an invalid C function name
-    # (`compiler.ast_rewrite_Rewriter__rewrite_param_list_ids`) that
+    # (`transpiler.ast_rewrite_Rewriter__rewrite_param_list_ids`) that
     # GCC's parser chokes on at the literal '.' — and, once desynced,
     # goes on to misparse unrelated later lines in the same function
-    # (BUG-2026-052: the "'compiler' undeclared" errors reported deep
+    # (BUG-2026-052: the "'transpiler' undeclared" errors reported deep
     # inside a docstring are that parser desync, not a real reference to
     # an undefined symbol). See _func_qualifier's own comment for the
     # same fix applied to the free-function case.
@@ -3082,7 +2972,8 @@ def _selfhost_parsed_source(_f: str) -> list:
         try:
             with open(_f) as _fh:
                 _src = _fh.read()
-            _entry = parse_module_source(_src, _f)
+            _entry = ast_rewriter.rewrite(
+                Parser(py_tokenize(_src)).with_filename(_f).parse_module())
         except Exception:
             _entry = _PARSE_FAILED
         _SELFHOST_PARSE_CACHE[_ck] = _entry
@@ -3104,25 +2995,3 @@ def _selfhost_files_key(_files: list) -> str:
 # Result cache for the passes above, keyed `<pass>#<files fingerprint>`.
 _SELFHOST_EXTRA_FIELD_CACHE: dict = {}
 
-
-class ClosureLoader:
-    """The `load(ref, importer_path)` the whole-closure type solver uses
-    (bugs/GIR_type_solver.md, 2.3).
-
-    It returns the file `_compile_imported_module` compiles for `ref`: the first
-    existing candidate of `_module_candidate_paths_from`, the same lookup the compile
-    uses, parsed by the same helper. A precompiled `.mojoc` artifact, or no candidate
-    at all, is an external module: None. The solver and the compile therefore see
-    one tree per module."""
-
-    def __init__(self, gen):
-        self.gen: object = gen
-
-    def resolve(self, ref: str, importer_path: str):
-        """A ModuleFile for `ref` as the compile would load it, or None (external)."""
-        for path in self.gen._module_candidate_paths_from(ref, importer_path):
-            if os.path.exists(path):
-                if path.endswith('.mojoc'):
-                    return None
-                return ModuleFile(os.path.abspath(path), parse_module_file(path))
-        return None

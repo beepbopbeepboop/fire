@@ -2289,13 +2289,6 @@ STALE_PER_CHILD_BUDGETS = {
     'formal/x86_64_endtoend_test.py': 1,
     'formal/x86_64_model_test.py': 1,
     'scripts/bootstrap_full_test.py': 1,
-    # 2026-11-23: four `subprocess.run(..., timeout=N)` literals in regression
-    # pins added since the census was last synced. Each is a real child budget
-    # (a dump or a compile+run of one fixture); the count is the ast walk's.
-    'test_helper_dump_regression.py': 1,        # subprocess.run, timeout=60
-    'test_measure_proof_peaks.py': 1,           # subprocess.run, timeout=60
-    'test_t_func_dump_regression.py': 1,        # subprocess.run, timeout=60
-    'test_where_alias_diagnostic.py': 1,        # subprocess.run, timeout=120
     # `test_formal_admitted.py`'s row (5, 2026-10-26's c20bdf09e "5 remain as
     # data-table examples") is dropped 2026-10-27: the conversion landed, and
     # the walk now finds 0 real literals — the "data-table examples" are
@@ -3005,6 +2998,12 @@ def test_a_disabled_test_is_registered_but_never_runs():
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
+        'codegen-container-param-unknown-arg',
+        'gimple',
+        'gimplerunner',
+        'stdlib-dylib',
+        'stdlib-syntax',
+        'suite-self-test',
     ]
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
@@ -3217,6 +3216,12 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
+        'codegen-container-param-unknown-arg',
+        'gimple',
+        'gimplerunner',
+        'stdlib-dylib',
+        'stdlib-syntax',
+        'suite-self-test',
     ]
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
@@ -4502,15 +4507,13 @@ _OPEN_STDLIB_DYLIB_PROBE_REASON = (
 
 UNREGISTERED = {
     'test_codegen_erased_container_values.py': _OPEN_PROBE_HARNESS_REASON,
-    # The same per-file compile's UNANNOTATED scalar-global export (2026-11-23:
-    # a bare `from helper import CONST` read 0 for `CONST = 41`). Added with
-    # its fix and run directly (`python3 tools/memslot.py --gb 8 --label
-    # imported-global-unannotated -- python3
-    # test_codegen_imported_global_unannotated_scalar.py`, 0.2 GB); the
-    # landing was told not to register in tools/suite.py, and it is a
-    # build-and-RUN case that wants a bucket when one is next touched.
-    'test_codegen_imported_global_unannotated_scalar.py':
-        _STANDALONE_TEST_REASON,
+    # The `_as_comptimevar_node` stage2 `AttributeError` pin (2026-11-21): the
+    # per-file (`do_imports=False`) compile's module-alias function VALUE.
+    # Added with its fix and run directly (`python3
+    # test_codegen_module_alias_function_value.py`); the landing was told not
+    # to register in tools/suite.py, and this is a build-and-RUN case that
+    # wants a bucket beside `linkmode` when one is next touched.
+    'test_codegen_module_alias_function_value.py': _STANDALONE_TEST_REASON,
     # The cases-generator analyzer landing (2026-11-17) left these regression
     # pins next to their fixes without registering them. Each runs directly;
     # the `*_build.py` siblings compile one small source with `fire.py build`
@@ -4652,7 +4655,7 @@ UNREGISTERED = {
         'self-host sibling branch. Run directly inside a checkout; not registered.',
     'test_stdlib_syntax_owned_pointer_asyncrt.py':
         'Standalone pin: owned_pointer.mojo and _asyncrt.mojo must keep '
-        'compiling. Run directly; not registered.',
+        'transpiling. Run directly; not registered.',
     'test_unknown_decl_check.py':
         'Unit tests for the unknown-decl check/compiler-provided builtins '
         'helper module. Run directly; not registered.',

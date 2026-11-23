@@ -23,7 +23,7 @@ Two guards:
     word; after the fix it is `int32_t`. The small module compiles "cleanly"
     both ways, so the guard asserts the DECLARED TYPE, not a compile error.
   * the four stdlib files failed with a hard gcc error before the fix, so
-    their pinning compile is the direct guard for the symptom.
+    their pinning transpile is the direct guard for the symptom.
 """
 
 import glob
@@ -36,7 +36,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from compile_stdlib import get_stdlib_path, compile_file
+from compile_stdlib import get_stdlib_path, transpile_file
 from build_stdlib_dylib import compile_module_to_c_cached
 
 
@@ -140,25 +140,25 @@ class TestComptimeMemberMonomorphizedInstance(unittest.TestCase):
                          'the false arm of bias() leaked into the Float32 '
                          'instance:\n' + text)
 
-    def test_stdlib_math_compiles(self):
+    def test_stdlib_math_transpiles(self):
         path = get_stdlib_path() / "std" / "math" / "math.mojo"
-        ok, msg, _cg, _gcc, _ref = compile_file(str(path))
-        self.assertTrue(ok, f"std/math/math.mojo failed to compile: {msg}")
+        ok, msg, _cg, _gcc, _ref = transpile_file(str(path))
+        self.assertTrue(ok, f"std/math/math.mojo failed to transpile: {msg}")
 
-    def test_stdlib_test_exp_compiles(self):
+    def test_stdlib_test_exp_transpiles(self):
         path = get_stdlib_path() / "test" / "math" / "test_exp.mojo"
-        ok, msg, _cg, _gcc, _ref = compile_file(str(path))
-        self.assertTrue(ok, f"test/math/test_exp.mojo failed to compile: {msg}")
+        ok, msg, _cg, _gcc, _ref = transpile_file(str(path))
+        self.assertTrue(ok, f"test/math/test_exp.mojo failed to transpile: {msg}")
 
-    def test_stdlib_test_ldexp_compiles(self):
+    def test_stdlib_test_ldexp_transpiles(self):
         path = get_stdlib_path() / "test" / "math" / "test_ldexp.mojo"
-        ok, msg, _cg, _gcc, _ref = compile_file(str(path))
-        self.assertTrue(ok, f"test/math/test_ldexp.mojo failed to compile: {msg}")
+        ok, msg, _cg, _gcc, _ref = transpile_file(str(path))
+        self.assertTrue(ok, f"test/math/test_ldexp.mojo failed to transpile: {msg}")
 
-    def test_stdlib_test_math_compiles(self):
+    def test_stdlib_test_math_transpiles(self):
         path = get_stdlib_path() / "test" / "math" / "test_math.mojo"
-        ok, msg, _cg, _gcc, _ref = compile_file(str(path))
-        self.assertTrue(ok, f"test/math/test_math.mojo failed to compile: {msg}")
+        ok, msg, _cg, _gcc, _ref = transpile_file(str(path))
+        self.assertTrue(ok, f"test/math/test_math.mojo failed to transpile: {msg}")
 
 
 if __name__ == "__main__":

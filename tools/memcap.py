@@ -20,17 +20,8 @@ where rlimit does not.
 
     tools/memcap.py --limit-gb 55 -- ./mojoc fire.py --dump-full
 
-There is also a WALL-CLOCK limit, and it always applies. It defaults to 20
-minutes, and a job that legitimately runs longer must name its own
-`--time-limit-min` rather than get an unbounded run. There is no way to switch
-it off: a run that outlives its limit is killed with its whole tree, the same
-as a breach of the memory ceiling.
-
-    tools/memcap.py --limit-gb 55 --time-limit-min 90 -- ./mojoc fire.py --dump-full
-
 Exit codes:
     0/1/...   the command's own exit status, passed through unchanged
-    124       the wall-clock limit was exceeded and the process tree was killed
     125       the ceiling was exceeded and the process tree was killed
     2         usage error
 
@@ -60,10 +51,6 @@ import procrun                                                   # noqa: E402
 from procrun import GB                                           # noqa: E402
 
 POLL_SECONDS = 0.5
-# The wall-clock limit a run gets when its caller names none. Twenty minutes is
-# long enough for the everyday jobs and short enough that a wedge is caught
-# while someone is still watching; anything longer has to say so itself.
-DEFAULT_TIME_LIMIT_MIN = 20.0
 # macOS `ps` costs ~50-100ms, and a 3-minute run is ~360 samples. Sampling
 # more finely than this buys nothing: memory does not move fast enough between
 # samples for the 3.5x margin to matter.
@@ -105,10 +92,6 @@ def main(argv):
     ap.add_argument("--limit-gb", type=float, default=55.0,
                     help="total memory-footprint ceiling for the process tree, in GB "
                          "(default 55.0, the measured healthy peak)")
-    ap.add_argument("--time-limit-min", type=float, default=DEFAULT_TIME_LIMIT_MIN,
-                    help="wall-clock limit for the command, in minutes (default %g). "
-                         "A run that needs longer must pass its own number; it cannot "
-                         "be made unlimited." % DEFAULT_TIME_LIMIT_MIN)
     ap.add_argument("--label", default=None,
                     help="what to call the command in progress output")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
@@ -117,18 +100,11 @@ def main(argv):
     cmd = args.cmd[1:] if args.cmd[:1] == ["--"] else args.cmd
     if not cmd:
         ap.error("no command given (try: memcap.py --limit-gb 55 -- ./cmd)")
-    # A time limit must be a real, finite number. `<= 0` and NaN would both
-    # either kill the job at once or never fire, and neither is a cap.
-    if not (args.time_limit_min > 0) or args.time_limit_min == float("inf"):
-        ap.error("--time-limit-min must be a positive, finite number of minutes "
-                 "(got %r)" % args.time_limit_min)
 
     limit = int(args.limit_gb * GB)
-    time_limit_s = args.time_limit_min * 60.0
     label = args.label or cmd[0]
-    print("memcap: %s -- ceiling %.1f GB across the process tree, time limit %.1f min"
-          % (label, args.limit_gb, args.time_limit_min), flush=True)
-    started = time.monotonic()
+    print("memcap: %s -- ceiling %.1f GB across the process tree"
+          % (label, args.limit_gb), flush=True)
 
     # `start_new_session` so the whole subtree is in one process group we can
     # signal as a unit. procrun.kill_tree's walk is the precise path; the
@@ -167,21 +143,6 @@ def main(argv):
                       "(ceiling %.1f GB), child exit %d"
                       % (peak / GB, peak_n, args.limit_gb, rc), flush=True)
                 return rc
-            ran_s = time.monotonic() - started
-            if ran_s > time_limit_s:
-                print("\nmemcap: TIMEOUT  ran %.1f min > %.1f min time limit -- killing %s"
-                      % (ran_s / 60.0, args.time_limit_min, label), flush=True)
-                print("memcap: peak observed before the kill: %.1f GB"
-                      % (peak / GB), flush=True)
-                procrun.kill_tree(proc.pid)
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
-                print("memcap: this is a TIME failure, not a verdict on the thing "
-                      "under test -- the process was killed at its wall-clock "
-                      "limit before it finished.", flush=True)
-                return 124
             time.sleep(POLL_SECONDS)
     except KeyboardInterrupt as exc:
         # The tree goes down and the outcome is REPORTED, in that order: the

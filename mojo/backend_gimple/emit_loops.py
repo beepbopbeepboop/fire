@@ -1100,20 +1100,20 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     try:
         if gimple_ctypes.TypeLattice.is_list(it_type):
             gen._gen_for_list(var, it_val, node.body, shadow_name=shadow_name)
-        elif gimple_ctypes.TypeLattice.is_str(it_type):
+        elif it_type == 'MojoStr *':
             gen._gen_for_str(var, it_val, node.body, shadow_name=shadow_name)
         elif gimple_ctypes.TypeLattice.is_cstr(it_type):
             gen._gen_for_cstr(var, it_val, node.body)
-        elif gimple_ctypes.TypeLattice.is_bytes(it_type):
+        elif it_type == 'MojoBytes *':
             gen._gen_for_bytes(var, it_val, node.body)
-        elif gimple_ctypes.TypeLattice.is_memoryview(it_type):
+        elif it_type == 'MojoMemoryView *':
             gen._gen_for_memoryview(var, it_val, node.body)
-        elif gimple_ctypes.TypeLattice.is_dict(it_type):
+        elif it_type == 'MojoDict *':
             gen._gen_for_dict(var, it_val, node.body, shadow_name=shadow_name,
                               int_keys=bool(_int_mode))
-        elif gimple_ctypes.TypeLattice.is_set(it_type):
+        elif it_type == 'MojoSet *':
             gen._gen_for_set(var, it_val, node.body, shadow_name=shadow_name)
-        elif gimple_ctypes.TypeLattice.is_generator(it_type):
+        elif it_type == 'MojoGenerator *':
             # Milestone B: `for x in <supported generator call>():` —
             # checked before the generic user-struct __iter__ protocol
             # branch below (which would otherwise treat MojoGenerator*
@@ -1195,8 +1195,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     'the handle at run time', it_val)
                 _gen_for_unknown_generator(gen, var, it_val, node.body,
                                            node=node, shadow_name=shadow_name)
-        elif ((gimple_ctypes.TypeLattice.ends_in_star(it_type) and not gimple_ctypes.TypeLattice.is_voidp(it_type))
-              or gimple_ctypes.TypeLattice.ends_with_star(it_type)):
+        elif ((gimple_ctypes.TypeLattice.ends_in_star(it_type) and it_type != 'void *')
+              or it_type.endswith('*')):
             # User-defined struct: try __iter__ / __has_next__ / __next__ protocol
             #
             # `void *` is EXCLUDED, and that exclusion is load-bearing.
@@ -2125,8 +2125,7 @@ def _gen_for_zip(gen, node):
             # iteration, so the remainder after `a` is exactly this slot.
             # Declared as the list it is; `_zip_bind_slot` below fills it.
             star_name = starred_slot_name(vn)
-            force = (gen.var_types.get(star_name) is not None
-                     and not gimple_ctypes.TypeLattice.is_list(gen.var_types.get(star_name)))
+            force = gen.var_types.get(star_name) not in (None, 'MojoList *')
             gen._declare_var(star_name, 'MojoList *', force=force)
             return
         force = gen.var_types.get(vn) not in (None, elem)
@@ -2259,7 +2258,7 @@ def _gen_for_enumerate(gen, node):
     # The gate fires only for the registered `_SIterBytes *` type this pass
     # builds, so a non-siter argument behaves byte-identically to
     # pre-branch.
-    if (gimple_ctypes.TypeLattice.is_siter_bytes(lst_type)
+    if (lst_type == '_SIterBytes *'
             and '_SIterBytes' in getattr(gen, '_intu_prereg_structs', ())
             and for_target_is_tuple(node.target)):
         _start_v = start_val if start_val is not None else '0'
@@ -2268,7 +2267,7 @@ def _gen_for_enumerate(gen, node):
                              node.body, node=node)
         return
 
-    if gimple_ctypes.TypeLattice.is_generator(lst_type):
+    if lst_type == 'MojoGenerator *':
         api = gen._generator_var_api.get(lst_val)
         if api is not None:
             _gen_for_enumerate_generator(
@@ -3446,7 +3445,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 vn0 = var_names[0]
                 cvn0 = _slot_cnames[0]
                 vt0 = _slot_ctypes[0]
-                if (gimple_ctypes.TypeLattice.is_word(vt0) or gimple_ctypes.TypeLattice.is_c_int(vt0) or gimple_ctypes.TypeLattice.is_i32(vt0)):
+                if gimple_ctypes.TypeLattice.is_int(vt0):
                     vp = gen._cast('void *', f"{key_tmp}")
                     box = gen._cast('int64_t', vp)
                     gen._copy(f"{cvn0}", f"{box}")
@@ -3456,7 +3455,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     vn = var_names[_vi]
                     cvn = _slot_cnames[_vi]
                     vt = _slot_ctypes[_vi]
-                    if (gimple_ctypes.TypeLattice.is_word(vt) or gimple_ctypes.TypeLattice.is_c_int(vt) or gimple_ctypes.TypeLattice.is_i32(vt)):
+                    if gimple_ctypes.TypeLattice.is_int(vt):
                         gen._cast_into(cvn, 'int64_t', '0')
                     elif gimple_ctypes.TypeLattice.ends_in_star(vt):
                         build.assign(gen, f'{cvn}', f'({vt})0')
@@ -3465,7 +3464,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     else:
         cvar = gen._cname(var)
         vt = gen.var_types.get(var, 'char *')
-        if (gimple_ctypes.TypeLattice.is_word(vt) or gimple_ctypes.TypeLattice.is_c_int(vt) or gimple_ctypes.TypeLattice.is_i32(vt)):
+        if gimple_ctypes.TypeLattice.is_int(vt):
             vp = gen._cast('void *', f"{key_tmp}")
             box = gen._cast('int64_t', vp)
             gen._copy(f"{cvar}", f"{box}")
@@ -3493,7 +3492,7 @@ def _gen_for_set(gen, var: str, it_val: str, body: list, shadow_name: str | None
     `mojo_set_iter_val_int` gives pointer bits for the two pointer
     domains, which is what a set of strings/bytes used to iterate as."""
     _se = gen._elem_of(it_val) or 'int64_t'
-    if gimple_ctypes.TypeLattice.is_bytes(_se):
+    if _se == 'MojoBytes *':
         _loop_ctype, _read = 'MojoBytes *', 'mojo_set_val_bytes'
     elif gimple_ctypes.TypeLattice.is_cstr(_se):
         _loop_ctype, _read = 'char *', 'mojo_set_iter_val_str'
@@ -4549,7 +4548,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         iter_base = base
 
     # If __iter__ returned a generator object, iterate it as a generator
-    if gimple_ctypes.TypeLattice.is_generator(iter_type) or iter_type.endswith('*MojoGenerator*') or iter_type == 'MojoGenerator':
+    if iter_type == 'MojoGenerator *' or iter_type.endswith('*MojoGenerator*') or iter_type == 'MojoGenerator':
         api = getattr(gen, '_generator_var_api', {}).get(iter_var)
         if api is not None:
             destroy_after = False

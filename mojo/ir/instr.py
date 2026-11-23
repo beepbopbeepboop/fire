@@ -17,11 +17,6 @@ Ex.kind
   'call'   a (callee), args
   'bin'    op, a, b
   'cond'   a ? b : c
-  'brace'  a, args, tight             `a{args}` (tight) or `a{ args }` -- a braced construction
-  'comma'  a, b                       `a, b` inside a parenthesized comma expression
-  'lambda' text (return C type), body   `[&]() -> text { body }()`; body is Instr
-  'closure' name (params), text, body  `[&](params) -> text { body }`, a lambda value
-  'cat'    args                       the parts of a text-and-operand line, printed back to back
   'opaque' ty                         something the reader does not model
 
 Instr.kind
@@ -35,13 +30,7 @@ Instr.kind
   'if'     rhs (condition)            `if (c) {` -- opens a block
   'else'                              `else {`
   'elseif' rhs (condition)            `else if (c) {`
-  'endelse'                           `} else {` -- closes a block and opens its `else` on one line
-  'try'                               `try {`
-  'catch' rhs (exception decl)        `catch (<decl>) {`
-  'catch_rethrow'                     `catch (...) { throw; }` -- a one-line catch-all that rethrows
   'end'                               `}` -- closes a block
-  'scope_open' rhs (guard name)        `_MojoScopeExit <g>([&]() {` -- a finally guard opens
-  'scope_close'                       `});` -- the finally guard closes
   'ifbody' rhs (condition), body      `if (c) <body>` -- one-statement body
   'opaque' text                       not three-address; not checked
 """
@@ -60,13 +49,11 @@ class Ex:
         self.suffix: str = ''
         self.arrow: bool = False
         self.tight: bool = False    # `f(...)` rather than `f (...)`
-        self.capture: str = '&'     # 'closure': the capture spec, `[&]` by default
         self.ty: Type = VOID
         self.a: Ex = self          # self = "absent"; keeps the field typed
         self.b: Ex = self
         self.c: Ex = self
         self.args: list[Ex] = []
-        self.body: list = []        # 'lambda': the statements (Instr) of its body
 
     def show(self) -> str:
         k = self.kind
@@ -87,17 +74,6 @@ class Ex:
         if k == 'coawait':
             # A C++ `co_await <expr>` (an awaited expression).
             return 'co_await ' + self.a.show()
-        if k == 'comma':
-            return self.a.show() + ', ' + self.b.show()
-        if k == 'brace':
-            # `T{a, b}` (tight) or `T{ a, b }`: a C++ braced construction; `a` is the type/callee text.
-            brace_parts: list[str] = []
-            for x in self.args:
-                brace_parts.append(x.show())
-            inner = ', '.join(brace_parts)
-            if self.tight:
-                return self.a.show() + '{' + inner + '}'
-            return self.a.show() + '{ ' + inner + ' }'
         if k == 'paren':
             # A parenthesized operand: `(a)`.
             return '(' + self.a.show() + ')'
@@ -113,36 +89,9 @@ class Ex:
             return self.a.show() + ' ' + self.op + ' ' + self.b.show()
         if k == 'cond':
             return self.a.show() + ' ? ' + self.b.show() + ' : ' + self.c.show()
-        if k == 'closure':
-            # `[&](params) -> T { stmt }`: a lambda VALUE, passed on rather than called in place;
-            # `name` is its parameter list text, `text` its return type ('' = none), `capture` its capture (default '&').
-            head = '[' + self.capture + '](' + self.name + ')' + (' -> ' + self.text if self.text else '')
-            return head + ' { ' + _join_nonempty(self.body) + ' }'
-        if k == 'lambda':
-            # `[&]() -> T { stmt stmt }()`: a call-once lambda; `text` is T's C spelling,
-            # or '' for a lambda with no return type (`[&]() { ... }()`). An empty
-            # statement (an opaque block that came out empty) takes no separator.
-            head = '[&]() -> ' + self.text if self.text else '[&]()'
-            return head + ' { ' + _join_nonempty(self.body) + ' }()'
-        if k == 'cat':
-            cat_parts: list[str] = []
-            for x in self.args:
-                cat_parts.append(x.show())
-            return ''.join(cat_parts)
         if k == 'none':
             return ''
         return '<opaque>'
-
-
-def _join_nonempty(stmts: list) -> str:
-    """The statements' text joined by one space, leaving out the empty ones (a lambda body
-    whose opaque block came out empty takes no separator)."""
-    kept: list[str] = []
-    for st in stmts:
-        text = st.show()
-        if text != '':
-            kept.append(text)
-    return ' '.join(kept)
 
 
 def ex_var(name: str) -> Ex:
@@ -173,22 +122,6 @@ def ex_bin(a: Ex, op: str, b: Ex) -> Ex:
 def ex_deref(a: Ex) -> Ex:
     e = Ex('deref')
     e.a = a
-    return e
-
-
-def ex_cat(*parts) -> Ex:
-    """The parts printed back to back, with no separator: each an Ex, or text (an `ex_text` leaf).
-
-    For a line that is partly text and partly an operand, so the operand stays an Ex until the
-    statement helper renders it."""
-    e = Ex('cat')
-    args: list[Ex] = []
-    for p in parts:
-        if isinstance(p, Ex):
-            args.append(p)
-        else:
-            args.append(ex_text(p))
-    e.args = args
     return e
 
 
@@ -242,8 +175,6 @@ class Instr:
             return 'for (' + self.rhs.show() + ') {'
         if k == 'break':
             return 'break;'
-        if k == 'continue':
-            return 'continue;'
         if k == 'coyield':
             # A C++ coroutine's `co_yield <expr>;` (the generator printer).
             return 'co_yield ' + self.rhs.show() + ';'
@@ -262,21 +193,6 @@ class Instr:
             return 'else {'
         if k == 'elseif':
             return 'else if (' + self.rhs.show() + ') {'
-        if k == 'endelse':
-            return '} else {'
-        if k == 'try':
-            return 'try {'
-        if k == 'catch':
-            # `catch (_MojoCppExc &e) {`: the handler of a `try` (the rhs is the exception declaration).
-            return 'catch (' + self.rhs.show() + ') {'
-        if k == 'catch_rethrow':
-            return 'catch (...) { throw; }'
-        if k == 'scope_open':
-            # `_MojoScopeExit <guard>([&]() {`: a scope guard whose body (a `finally`) is a capturing lambda.
-            return '_MojoScopeExit ' + self.rhs.show() + '([&]() {'
-        if k == 'scope_close':
-            # `});`: closes the guard's lambda and the guard call.
-            return '});'
         if k == 'end':
             return '}'
         if k == 'ifbody':
@@ -302,19 +218,6 @@ class Instr:
         if self.kind == 'label':
             return '\n' + self.show() + self.text
         return ' ' * self.indent + self.show()
-
-
-def render_lines(lines) -> list[str]:
-    """The one rendering edge for a function body (doc/GIR.md, stage 7 T5): a mixed list of statement
-    `Instr` and raw C text lines, as the text lines a function body prints. An `Instr` is rendered by
-    `Instr.line()` (its own indent, a label at column 0); a `str` is already text and passes through."""
-    out: list[str] = []
-    for ln in lines:
-        if isinstance(ln, Instr):
-            out.append(ln.line())
-        else:
-            out.append(ln)
-    return out
 
 
 class Sig:

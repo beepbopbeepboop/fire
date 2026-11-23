@@ -6,7 +6,7 @@ This allows us to run Mojo code by:
 2. Executing AST via this interpreter
 3. Comparing output to verify correctness
 
-Eventually will be compiled to .mojo for full bootstrap.
+Eventually will be transpiled to .mojo for full bootstrap.
 """
 
 import sys
@@ -10001,7 +10001,7 @@ class Interpreter:
             # unresolved symbol (missing/unshimmed import, unknown attribute).
             # It subclasses int, so `str + stub` would raise TypeError (can
             # only concatenate str, not "_AutoStubValue") — mojolib BUG-2026-029,
-            # hit when the compiler concatenates an unresolved value into a
+            # hit when the transpiler concatenates an unresolved value into a
             # string. Degrade gracefully instead, matching _AutoStubValue's
             # whole design: treat the unresolved operand as an empty string in
             # a string-concatenation context so the program keeps running.

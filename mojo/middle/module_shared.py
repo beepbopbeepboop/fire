@@ -1423,20 +1423,6 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                         ft = _UNKNOWN_FIELD_CTYPE
                 else:
                     ft = _UNKNOWN_FIELD_CTYPE
-                # An EXPLICIT struct annotation on the assignment
-                # (`self.lhs: Ex = ex_none()`) is the field's type when the value
-                # told us nothing (the erased word): a call to a function defined
-                # LATER, or `self`, has no type yet, and the field came out
-                # `int64_t`, so every `self.lhs.show()` was a method call on a
-                # word -- the identity stub. The self-hosted compiler printed
-                # `\xd3\b = 4368822592;` for every statement (the IR's `Ex`/`Instr`).
-                _ann_sf = getattr(node, 'type_ann', None)
-                if (_ann_sf is not None and gimple_ctypes.TypeLattice.is_int_word(ft)
-                        and isinstance(_ann_sf, str)):
-                    _aft = self._resolve_type(_ann_sf)
-                    if (isinstance(_aft, str) and gimple_ctypes.TypeLattice.ends_in_star(_aft)
-                            and _aft[:-2].strip() in self.struct_field_types):
-                        ft = _aft
                 _updates.append((fn, ft))
                 # `self._str_pool: dict[str, str] = {}` in
                 # __init__: capture the dict VALUE type from the
@@ -1444,7 +1430,7 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                 # items()` unpacks `v` as `char *`, not int64
                 # (int64 -> `str()` on the pointer -> garbage
                 # `_slit_N` names in the emitted string pool).
-                if gimple_ctypes.TypeLattice.is_dict(ft) and getattr(node, 'type_ann', None):
+                if ft == 'MojoDict *' and getattr(node, 'type_ann', None):
                     _dv_sa = self._annotation_dict_val_type(node.type_ann)
                     if _dv_sa is not None:
                         _dv_hits.append((fn, _dv_sa))
@@ -1454,7 +1440,7 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                 # dict-value seed just above. Without it a later
                 # `for x in sorted(self._x):` / `for x in self._x:`
                 # left `x` boxed int64_t.
-                if ((gimple_ctypes.TypeLattice.is_set(ft) or gimple_ctypes.TypeLattice.is_list(ft))
+                if (ft in ('MojoList *', 'MojoSet *')
                         and getattr(node, 'type_ann', None)
                         and '[' in str(node.type_ann)):
                     _li_sa = gimple_ctypes._split_top_level_commas(

@@ -597,7 +597,7 @@ def test_elaboration_failure_is_not_cached(wd):
 
 
 def test_elaboration_failure_is_a_failed_verdict(wd):
-    """`compile_stdlib.compile_file` reports a degraded elaboration as FAILED.
+    """`compile_stdlib.transpile_file` reports a degraded elaboration as FAILED.
 
     The sweep's verdict used to be gcc's opinion of the produced C only, so
     `std/simd.mojo` counted as `passed` while the compiler printed that its C
@@ -627,9 +627,9 @@ def test_elaboration_failure_is_a_failed_verdict(wd):
     open(path, 'w').write("fn el_verdict_probe():\n    pass\n")
     compile_stdlib.compile_module_to_c_cached = _degraded
     try:
-        ok, msg, _cg, _gcc, refusals = compile_stdlib.compile_file(path)
+        ok, msg, _cg, _gcc, refusals = compile_stdlib.transpile_file(path)
         check("verdict: a module built through a failed elaboration is NOT a pass",
-              not ok, "compile_file counted a degraded module as PASSED")
+              not ok, "transpile_file counted a degraded module as PASSED")
         check("verdict: ... and the FAILED reason names the degradation",
               bool(msg) and 'elaboration' in msg
               and 'advance without converging' in msg,
@@ -859,7 +859,7 @@ def test_elaboration_refusal_is_not_console_noise(wd):
     on. The detail belongs to the run's log (module name + reason, kept
     here in `refusal_log()` / `last_degradations()` for the driver to
     write), and the console keeps a count — which `compile_stdlib.
-    compile_file` carries back as its fifth return element, alongside the
+    transpile_file` carries back as its fifth return element, alongside the
     FAILED verdict the same refusal produces.
 
     bug:CODEGEN_stdlib_run_prints_elaboration_refusals."""
@@ -929,13 +929,13 @@ def test_elaboration_refusal_is_not_console_noise(wd):
             # And the channel the sweep's console count line is built on. The
             # same call takes the verdict, so the degraded module is FAILED and
             # its reason still reaches the count/log channel.
-            ok, _msg, _cg, _gcc, refusals = compile_stdlib.compile_file(path)
+            ok, _msg, _cg, _gcc, refusals = compile_stdlib.transpile_file(path)
             check("refusal: the sweep's per-module channel carries the refusal",
                   any(reason in r for r in refusals),
-                  f"compile_file -> ok={ok}, msg={_msg}, refusals={refusals[:1]}")
+                  f"transpile_file -> ok={ok}, msg={_msg}, refusals={refusals[:1]}")
             check("refusal: ... and the sweep counts that module FAILED",
                   not ok and 'elaboration' in (_msg or ''),
-                  f"compile_file -> ok={ok}, msg={_msg}")
+                  f"transpile_file -> ok={ok}, msg={_msg}")
         finally:
             bsd._stdlib_compile_cache.clear()
             os.remove(path)
@@ -2021,7 +2021,7 @@ def test_type_param_markers_and_simd_unification(wd):
           el.unbound_type_parameter(_dflt, ['2']) is None
           and el.bind_type_args(_dflt, ['2']) == {'x': '2', 'y': '4'})
     # The generic-struct binder, measured on std/collections/span.mojo's head
-    # (bugs/hard/CODEGEN_prelude_sort_is_not_resolved.md, binder defects 1-4). The
+    # (bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md, binder defects 1-4). The
     # synthetic head has the same shape: a `//`-deduced `mut`, an origin whose
     # annotation names `mut` inside brackets, a `*`, and a leading-dot enum
     # default.

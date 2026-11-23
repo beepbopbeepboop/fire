@@ -411,7 +411,7 @@ class _DylibGeneratedCppError(RuntimeError):
 
 def compile_module_to_c(src: str, path: str, module_name: str,
                         linkable: bool = True, no_mangle: tuple = ()) -> str:
-    """Compile one library module to GIMPLE C with no main/entry points.
+    """Transpile one library module to GIMPLE C with no main/entry points.
 
     `no_mangle`: free-function names whose C symbol is emitted EXACTLY as
     written instead of being module-qualified and overload-suffixed. The
@@ -1307,7 +1307,7 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
     """Per-module independent work (source → object): read, collect exports,
     compile (cache-or-build). Each module is fully independent — no shared
     state — so this parallelizes across processes the same way
-    compile_stdlib.py's compile_file does. Returns (path, name, ofile,
+    compile_stdlib.py's transpile_file does. Returns (path, name, ofile,
     exports, error, hit) — error is None on success; the symbol-collision
     dedup afterward (order-sensitive, so kept sequential) reads ofile.
 

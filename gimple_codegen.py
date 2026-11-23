@@ -11,8 +11,6 @@ import sys
 import hashlib
 import dataclasses
 
-from mojo.ir.instr import Instr
-
 from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
@@ -741,7 +739,7 @@ _SYS_PATH_INSERT_RE = re.compile(
 # file's own path, so `os.path.dirname(__file__)` is resolvable statically
 # too — see _record_sys_path_inserts, which treats a bare "." result (empty
 # capture) as `base_dir` itself. Found via mojolib BUG-2026-032:
-# compiler.mojo's `import os; sys.path.insert(0,
+# transpiler.mojo's `import os; sys.path.insert(0,
 # os.path.join(os.path.dirname(__file__), ".."))` inside a function body,
 # to reach its sibling parser_core.mojo/lexer.mojo/arena.mojo one directory
 # up — invisible to the plain-literal regex above.
@@ -3015,13 +3013,6 @@ class GimpleGen:
         self._scope_live_depth: list = []
         self._scope_live_fn: list = []
         self._current_filename: str = ""  # filename for #line directives
-        # The source file a re-emitted INHERITED method body belongs to (overrides
-        # `_current_filename` in `#line` directives); "" outside that unit.
-        self._line_src_file: str = ""
-        # The FunctionDef being lowered (None at module level / outside a function). Declared
-        # here: it was only assigned inside `gen_func`, so a read before the first function
-        # (`_keep_tagged_arg`) raised AttributeError.
-        self._current_func_node: FunctionDef = None
         self._stmt_line_directive: str | None = None  # `#line` for the innermost statement being emitted (see emit_stmts.gen_stmt)
         # external_call["name", Ret](args) targets → (ret_ctype, [arg_ctypes]); first use wins.
         # Shared across imported modules so the root preamble can emit one extern proto each.
@@ -3157,30 +3148,6 @@ class GimpleGen:
         # `_reconcile_imported_global_accessors` to take the definer's final
         # C type once that module is compiled into this unit.
         self._imported_global_module: dict = {}
-        # Imported global names whose DEFINING value is a Python bool (`FLAG
-        # = True`). Their accessor is a C `int`, so the bool-ness has to ride
-        # beside it for `print` to render True/False. Set beside
-        # `_imported_global_accessors` by `_emit_imported_global_accessors`;
-        # read by `gimple_exprtypes.is_python_bool_expr`.
-        self._imported_global_bool: set = set()
-        # Module-alias-qualified data global name -> (c_return_type,
-        # accessor_c_symbol, DEFINING module's qualified name, the global's
-        # name in that module), keyed by the alias LOCAL name first
-        # (`alias -> {member -> entry}`). Populated by
-        # `_emit_imported_global_accessors` for a `import X as alias`
-        # statement (or a bare `import X`), the same export table and the
-        # same accessor symbol the `from X import <global>` spelling uses —
-        # but kept OUT of `_imported_global_accessors`, which is keyed by
-        # the bare name a `from` import binds and is consulted by the bare
-        # read in `_lower_IdentExpr`. A bare name in an `import` statement
-        # is never bound by that import, so registering it there would
-        # route a bare read to an accessor that is not this module's to
-        # read. Consulted by `_lower_MemberExpr`'s module-alias branch.
-        self._imported_alias_accessors: dict = {}
-        # `(alias local name, member)` pairs whose DEFINING value is a Python
-        # bool — the alias spelling's counterpart of `_imported_global_bool`.
-        # Read by `is_python_bool_expr`'s alias-qualified read arm.
-        self._imported_alias_global_bool: set = set()
         # Concrete imported structs used as parameter types here: their StructDefs
         # (so the layout typedef is emitted in dylib mode) and their names (so only
         # these — not local structs — get the authoritative struct-pointer param
@@ -3389,38 +3356,6 @@ class GimpleGen:
         # no call sites and froze int64_t: two different overload suffixes
         # for one symbol — "implicit declaration of function" at g++).
         self._home_def_param_types: dict[str, list] = {}  # _pair_key(sanitized-home-qualifier, fn-name) -> [param ctypes]
-        # The keys of `_home_def_param_types` whose definition has been EMITTED
-        # (`_commit_home_def_pts`), and the parameter lists a call site hashed
-        # BEFORE that happened: `_pair_key(q, name) + '\x1f' + suffix` -> [param
-        # ctypes]. An importer compiled ahead of its definer inside an import
-        # cycle hashes the definer's parameters without the definer's call-site
-        # refinement; the definer emits a forwarder under each such suffix.
-        self._home_def_pts_committed: set[str] = set()
-        # Argument values bound for a tagged-word parameter in the call being lowered
-        # (`_box_param_call_args` fills it, `_emit_call` consumes it): they keep their box.
-        self._tagged_call_arg_vals: set[str] = set()
-        # `<Struct>\x1f<field>` of every field store emitted with no presence bit (see
-        # `types.presence_set_emit`); `_mark_presence_field` will not mint those.
-        self._stores_without_presence: set[str] = set()
-        # free-function C symbol -> its bare source name (`_func_csym` fills it)
-        self._csym_bare: dict[str, str] = {}
-        # C symbol -> [(param, default node)] of an IMPORTED free function, recorded when a
-        # `<alias>.<fn>` call resolves it (`funcs_shared.module_member_function_csym`), so
-        # default padding does not wait on the symbol-keyed `_func_param_defaults` that
-        # the definer's own compile fills (import cycles, early hashes).
-        self._csym_defaults: dict = {}
-        # Parameter value-class facts (emit_infra.collect_param_value_facts, doc/GIR.md
-        # stage 5c). Declared here, typed: an attribute first assigned by a pass is
-        # not a field of the compiled `GimpleGen`, so the pass's `gen._pv_*` writes
-        # and the readers' `getattr(gen, '_pv_*', None)` never met and every
-        # `None` store into a mixed field stayed the bare word 0.
-        self._pv_structs: dict = {}
-        self._pv_param_names: dict = {}
-        self._pv_own_structs: set = set()
-        self._pv_mixed_cache: dict = {}
-        self._pv_local_structs: dict = {}
-        self._param_value_obs: dict = {}
-        self._early_def_pts_used: dict[str, list] = {}
         # _pair_key(sanitized home-module qualifier, fn name) -> return ctype —
         # the RETURN-type twin of the store just added, and written for the same
         # reason with the same key, writer discipline and reader order, because
@@ -3442,19 +3377,6 @@ class GimpleGen:
         # `test_gimple.py`'s
         # `two_modules_one_same_named_function_keep_their_own_return_types`.
         self._home_def_return_types: dict[str, str] = {}
-        # The whole-closure type solver (bugs/GIR_type_solver.md, S1). `_tsolve` is
-        # the solution for this compile (None without imports); `_qualifier_paths`
-        # maps a module qualifier to its abspath once the module starts compiling;
-        # `_analyzed_paths` holds the modules whose return-type passes have finished;
-        # `_tsolve_frozen` is the early answers (pair key -> ctype); the ledger lists
-        # every decision. Shared by reference with every sub-generator.
-        self._tsolve = None
-        self._qualifier_paths: dict = {}
-        self._analyzed_paths: set = set()
-        self._tsolve_frozen: dict = {}
-        self._tsolve_ledger: list = []
-        # Keys already written to the ledger (one line per decision, not per read).
-        self._tsolve_logged: dict = {}
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen
@@ -4998,7 +4920,7 @@ class GimpleGen:
     def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict: dict, call_has_spread=False):
         return ggc._pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
 
-    def _expand_sole_spread_into_fixed_slots(self, node: CallExpr, fname, fname_raw, arg_pairs, expected_params):
+    def _expand_sole_spread_into_fixed_slots(self, node, fname, fname_raw, arg_pairs, expected_params):
         return ggc._expand_sole_spread_into_fixed_slots(self, node, fname, fname_raw, arg_pairs, expected_params)
 
     def _lower_named_call(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:
@@ -5226,13 +5148,13 @@ class GimpleGen:
             return None
         cdecl = self._global_c_decl_types.get(name)
         if (cdecl is not None and TypeLattice.ends_in_star(cdecl)
-                and (TypeLattice.is_set(cdecl) or TypeLattice.is_dict(cdecl) or TypeLattice.is_list(cdecl))):
+                and cdecl in ('MojoDict *', 'MojoList *', 'MojoSet *')):
             return cdecl
         if TypeLattice.is_py_scalar(own):
             return own
-        if ((TypeLattice.is_set(own) or TypeLattice.is_dict(own) or TypeLattice.is_list(own))
+        if (own in ('MojoDict *', 'MojoList *', 'MojoSet *')
                 and not (cdecl is not None
-                         and (TypeLattice.is_set(cdecl) or TypeLattice.is_dict(cdecl) or TypeLattice.is_list(cdecl)))
+                         and cdecl in ('MojoDict *', 'MojoList *', 'MojoSet *'))
                 and dispatch_table_global_ctype(name) is None):
             # A NON-dispatch CONTAINER own-conclusion whose shared cdecl is
             # absent OR non-container: the module-global C struct-field
@@ -5249,15 +5171,6 @@ class GimpleGen:
             # cdecl; when it doesn't, this exclusion preserves the
             # pre-existing raw-type return).
             return 'int64_t'
-        # A STRUCT pointer this module declares (`BOOL: STy = ...`) beats a different struct
-        # pointer of the same bare name that another module declared (`mojo/ir/types.py`'s
-        # `BOOL: Type`): the homonym's cdecl must not re-type this module's own global. The
-        # field is declared from this same rule, so the field and every store agree
-        # (bugs/GIR_type_solver_precision.md, 4.6 step 4b).
-        if (cdecl is not None and cdecl != own
-                and TypeLattice.ends_in_star(own) and TypeLattice.ends_in_star(cdecl)
-                and not _is_c_container(own) and not _is_c_container(cdecl)):
-            return own
         return cdecl if cdecl is not None else own
 
     def _module_global_field_type(self, module: str, name: str) -> tuple[str, str] | None:
@@ -5630,7 +5543,7 @@ class GimpleGen:
         return gst._gen_stmt_WithStmt(self, node)
 
     # ---- delegates via gex ----
-    def _lower_strided(self, node: CallExpr, store: bool):
+    def _lower_strided(self, node, store: bool):
         return gex._lower_strided(self, node, store)
     def lower_expr(self, node) -> tuple[str, str]:
         _lt, _lv = gex.lower_expr(self, node)
@@ -5771,27 +5684,27 @@ class GimpleGen:
         return gcc_._cpp_expr(self, e)
     def _cpp_expr_ex(self, e):
         return gcc_._cpp_expr_ex(self, e)
-    def _cpp_yield_tuple(self, tup: 'TupleExpr', declared: dict, indent: str) -> list[Instr]:
+    def _cpp_yield_tuple(self, tup: 'TupleExpr', declared: dict, indent: str) -> list[str]:
         return gcc_._cpp_yield_tuple(self, tup, declared, indent)
-    def _cpp_hoist_walrus_decls(self, expr, declared: dict, indent: str) -> list[Instr]:
+    def _cpp_hoist_walrus_decls(self, expr, declared: dict, indent: str) -> list[str]:
         return gcc_._cpp_hoist_walrus_decls(self, expr, declared, indent)
-    def _cpp_stmt(self, s, declared: dict, indent: str) -> list[Instr]:
+    def _cpp_stmt(self, s, declared: dict, indent: str) -> list[str]:
         return gcc_._cpp_stmt(self, s, declared, indent)
-    def _cpp_with_stmt(self, s, declared: dict, indent: str) -> list[Instr]:
+    def _cpp_with_stmt(self, s, declared: dict, indent: str) -> list[str]:
         return gcc_._cpp_with_stmt(self, s, declared, indent)
-    def _cpp_for_generator_delegate(self, target, call: 'CallExpr', body: list, declared: dict, indent: str, index_var: str=None, index_start_expr: str='0') -> list[Instr]:
+    def _cpp_for_generator_delegate(self, target, call: 'CallExpr', body: list, declared: dict, indent: str, index_var: str=None, index_start_expr: str='0') -> list[str]:
         return gcc_._cpp_for_generator_delegate(self, target, call, body, declared, indent, index_var, index_start_expr)
-    def _cpp_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[Instr]:
+    def _cpp_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         return gcc_._cpp_for_stmt(self, s, declared, indent)
     def _cpp_build_container_from_iterable(self, kind: str, iter_node, target_name: str, elem_node, cond_nodes: list) -> str:
         return gcc_._cpp_build_container_from_iterable(self, kind, iter_node, target_name, elem_node, cond_nodes)
-    def _cpp_async_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[Instr]:
+    def _cpp_async_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         return gcc_._cpp_async_for_stmt(self, s, declared, indent)
-    def _cpp_raise_stmt(self, s, indent: str) -> list[Instr]:
+    def _cpp_raise_stmt(self, s, indent: str) -> list[str]:
         return gcc_._cpp_raise_stmt(self, s, indent)
-    def _cpp_try_stmt(self, node, declared: dict, indent: str) -> list[Instr]:
+    def _cpp_try_stmt(self, node, declared: dict, indent: str) -> list[str]:
         return gcc_._cpp_try_stmt(self, node, declared, indent)
-    def _cpp_yield_from(self, yf: 'YieldFromExpr', indent: str) -> list[Instr]:
+    def _cpp_yield_from(self, yf: 'YieldFromExpr', indent: str) -> list[str]:
         return gcc_._cpp_yield_from(self, yf, indent)
     def _cls_refs_supported(self, body, struct_name: str) -> bool:
         return gcc_._cls_refs_supported(self, body, struct_name)
@@ -5809,15 +5722,15 @@ class GimpleGen:
         return gca._cpp_dict_key_expr(self, idx_node, idx_cpp)
     def _cpp_fresh_name(self, prefix: str='_mg_t') -> str:
         return gca._cpp_fresh_name(self, prefix)
-    def _cpp_stmt_with_break_flag(self, s, declared: dict, indent: str, brk_var: str) -> list[Instr]:
+    def _cpp_stmt_with_break_flag(self, s, declared: dict, indent: str, brk_var: str) -> list[str]:
         return gca._cpp_stmt_with_break_flag(self, s, declared, indent, brk_var)
     def _cpp_with_guard_type_name(self, expr) -> str | None:
         return gca._cpp_with_guard_type_name(self, expr)
     def _cpp_iterable_is_delegatable_generator_call(self, iterable) -> bool:
         return gca._cpp_iterable_is_delegatable_generator_call(self, iterable)
-    def _cpp_match_stmt(self, s, declared: dict, indent: str) -> list[Instr]:
+    def _cpp_match_stmt(self, s, declared: dict, indent: str) -> list[str]:
         return gca._cpp_match_stmt(self, s, declared, indent)
-    def _cpp_except_handler_body(self, handler, caught_var: str, declared: dict, indent: str) -> list[Instr]:
+    def _cpp_except_handler_body(self, handler, caught_var: str, declared: dict, indent: str) -> list[str]:
         return gca._cpp_except_handler_body(self, handler, caught_var, declared, indent)
     def _gen_cpp_generator_unit(self, fn: FunctionDef, struct_name: str | None=None,
                                 extra_captures: list | None=None,
@@ -6173,9 +6086,9 @@ class GimpleGen:
         return ggc._future_done_callback_kind_tag(cb_ctype)
     def _lower_generator_next(self, av: str, api: dict) -> tuple[str, str]:
         return ggc._lower_generator_next(self, av, api)
-    def _lower_generator_send(self, node: CallExpr, av: str, api: dict) -> tuple[str, str]:
+    def _lower_generator_send(self, node, av: str, api: dict) -> tuple[str, str]:
         return ggc._lower_generator_send(self, node, av, api)
-    def _lower_generator_throw(self, node: CallExpr, av: str, api: dict) -> tuple[str, str]:
+    def _lower_generator_throw(self, node, av: str, api: dict) -> tuple[str, str]:
         return ggc._lower_generator_throw(self, node, av, api)
     def _lower_generator_close(self, node, av: str, api: dict) -> tuple[str, str]:
         return ggc._lower_generator_close(self, node, av, api)
@@ -6197,12 +6110,6 @@ class GimpleGen:
         return grsl._locally_bound_names(self, body, params)
     def _module_candidate_paths(self, module_name: str) -> list:
         return grsl._module_candidate_paths(self, module_name)
-    def _home_def_return_type_of(self, qualifier: str, bare_name: str):
-        # The defining unit's return ctype, or the solver's early answer (see
-        # emit_funcs._home_def_return_type). Readers outside emit_funcs use this.
-        return gfn._home_def_return_type(self, qualifier, bare_name)
-    def _module_candidate_paths_from(self, module_name: str, importer) -> list:
-        return grsl._module_candidate_paths_from(self, module_name, importer)
     def _submodule_source_path(self, module_name: str) -> str | None:
         return grsl._submodule_source_path(self, module_name)
     def _compile_imported_module(self, module_name: str, loc: str = '0:0') -> tuple:
@@ -6260,10 +6167,6 @@ class GimpleGen:
         return self._words.is_boxed_container(name)
     def _word_mark_boxed(self, name: str) -> None:
         self._words.mark_boxed(name)
-    def _word_is_mixed_field(self, name: str) -> bool:
-        return self._words.is_mixed_field(name)
-    def _word_mark_mixed_field(self, name: str) -> None:
-        self._words.mark_mixed_field(name)
     def _word_mark_tagged(self, name: str) -> None:
         self._words.mark_tagged(name)
     def _word_mark_dyn(self, name: str) -> None:
@@ -6833,38 +6736,6 @@ _PIPELINE_RESULT_ATTRS = frozenset({'_link_dylibs', '_link_objects', '_link_need
                                     '_dropped_companion_cpp'})
 
 
-def _is_c_container(ctype: str) -> bool:
-    """A runtime container pointer (`MojoList *`, `MojoDict *`, `MojoSet *`)."""
-    return TypeLattice.is_list(ctype) or TypeLattice.is_dict(ctype) or TypeLattice.is_set(ctype)
-
-
-def _solve_import_closure(gen, filename: str, stmts: list):
-    """The whole-closure type solution for this compile (bugs/GIR_type_solver.md,
-    S1). It runs once, before any code generation, over the same import closure
-    the compile walks, and reads each module through the compile's own lookup."""
-    from mojo.tsolve import solve_closure
-    from mojo.middle.funcs_shared import ClosureLoader
-    root = os.path.abspath(filename) if filename else ''
-    return solve_closure(root, stmts, ClosureLoader(gen))
-
-
-def _write_tsolve_ledger(gen) -> None:
-    """With FIRE_TSOLVE_LEDGER=<file> set, write the decisions of this compile to it,
-    then one `summary` line counting each kind (bugs/GIR_type_solver_precision.md, 4.5)."""
-    path = os.environ.get('FIRE_TSOLVE_LEDGER', '')
-    if not path:
-        return
-    counts = {'early': 0, 'conflict': 0, 'undecided': 0, 'shadow': 0}
-    with open(path, 'w') as f:
-        for line in gen._tsolve_ledger:
-            kind = line.split(' ', 1)[0]
-            if kind in counts:
-                counts[kind] += 1
-            f.write(line + '\n')
-        f.write('summary early=%d conflict=%d undecided=%d shadow=%d\n'
-                % (counts['early'], counts['conflict'], counts['undecided'], counts['shadow']))
-
-
 def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = "",
                   link_mode: bool = False, auto_gpu: bool = True):
     """Shared driver behind every public compile_* entry point.
@@ -7089,10 +6960,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # consistent with `stmts` — unlike an on-disk file that could have been
     # modified after parse or be unreadable (empty `_current_filename`).
     gen._source_text = mojo_src
-    if do_imports or link_mode:
-        gen._tsolve = _solve_import_closure(gen, filename, stmts)
     code = gen.gen_module(stmts)
-    _write_tsolve_ledger(gen)
     if do_imports or link_mode:
         code = _dedup_guarded_blocks(code)
         code = _relocate_module_instance_defs(code)

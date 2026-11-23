@@ -15,7 +15,7 @@ generated C called a function nothing declares:
   * `with TempEnvWithCleanup(...)` — the one-argument `__exit__(error)`
     overload, while the zero-argument overload was the bare-name target.
 
-Each case compiles to C that gcc accepts. `compile_file` is the same
+Each case transpiles to C that gcc accepts. `transpile_file` is the same
 per-module stage `stdlib-syntax` uses, so this fails before the fix with the
 gate's own `implicit declaration of function` errors.
 """
@@ -27,7 +27,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from compile_stdlib import get_stdlib_path, compile_file
+from compile_stdlib import get_stdlib_path, transpile_file
 
 
 CASES = [
@@ -42,8 +42,8 @@ class TestStdlibSyntaxDunderOverloads(unittest.TestCase):
         root = get_stdlib_path()
         for rel in CASES:
             with self.subTest(module=rel):
-                ok, msg, _cg, _gcc, _ref = compile_file(str(root / rel))
-                self.assertTrue(ok, f"{rel} failed to compile: {msg}")
+                ok, msg, _cg, _gcc, _ref = transpile_file(str(root / rel))
+                self.assertTrue(ok, f"{rel} failed to transpile: {msg}")
 
 
 if __name__ == "__main__":

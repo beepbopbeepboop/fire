@@ -22,7 +22,7 @@ import re
 sys.path.insert(0, '.')
 sys.path.insert(0, 'mojo')
 
-# Import the Mojo interpreter (compiled from Python)
+# Import the Mojo interpreter (transpiled from Python)
 from mojo.myinterpreter import Interpreter
 
 

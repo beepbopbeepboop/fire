@@ -429,7 +429,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                 and symbol_name not in gen.var_types):
             _gv_type = gen._global_var_types[name]
             _gv_ctype = ('int64_t'
-                         if (gimple_ctypes.TypeLattice.is_set(_gv_type) or gimple_ctypes.TypeLattice.is_dict(_gv_type) or gimple_ctypes.TypeLattice.is_list(_gv_type))
+                         if _gv_type in ('MojoDict *', 'MojoList *', 'MojoSet *')
                          else _gv_type)
             gen._declare_var(symbol_name, _gv_ctype)
             safe_owner = gimple_ctypes._c_field_name(_gv_owner) if _gv_owner else "root"
@@ -1886,11 +1886,11 @@ def _dvt_val_cts(_ann):
     if _outer is None:
         _outer = 'int64_t'
     _nested = None
-    if gimple_ctypes.TypeLattice.is_dict(_outer):
+    if _outer == 'MojoDict *':
         _nv = _dvt_val_cts(_vann)
         if _nv is not None:
             _nested = _nv[0]
-    elif (gimple_ctypes.TypeLattice.is_set(_outer) or gimple_ctypes.TypeLattice.is_list(_outer)):
+    elif _outer in ('MojoList *', 'MojoSet *'):
         # `dict[K, list[E]]` / `dict[K, set[E]]` — E, so `d.get(k)[i]`
         # / `for x in d.get(k)` reads with the right accessor instead
         # of boxing (e.g. `func_param_types: dict[str, list[str]]` ->
@@ -2507,11 +2507,10 @@ def _commit_home_def_pts(gen, node) -> list:
         local[node.name] = list(sig)
     key = _pair_key(_func_qualifier(gen, node.name), node.name)
     store[key] = list(sig)
-    gen._home_def_pts_committed.add(key)
     return sig
 
 
-def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> str:
+def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> None:
     """Publish one free function's DEFINITION-side return ctype into the
     whole-program-shared `_home_def_return_types`, under the qualifier its own
     emitted symbol was built from — the return-type twin of
@@ -2537,40 +2536,22 @@ def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> str:
     knows most. That is the discipline `func_return_types[bare_name]` itself
     follows, and it is why `_func_csym` re-mirrors on every call rather than
     freezing the first value it sees.
-
-    Returns the EFFECTIVE ctype, which the definer must use for its own
-    function: the early answer the type solver froze for this name when an
-    importer needed it before this unit ran (`_early_return_decision`). A
-    frozen answer wins over the measured one, and a disagreement is a ledger
-    `conflict` line (bugs/GIR_type_solver.md, S1; the acceptance count is 0).
-    Without a freeze, or when nothing is recorded, the measured ctype comes back.
     """
     store = getattr(gen, '_home_def_return_types', None)
     if store is None or not ctype:
-        return ctype
+        return
     if id(stmt) not in getattr(gen, '_local_top_level_func_stmt_ids', ()):
-        return ctype
+        return
     # Overload sets: see `_commit_home_def_pts`. The bare-name key can hold
     # only the canonical overload's answer; the others publish their own
     # return type under their own symbol at the definition (gen_func).
     if not _def_is_canonical(gen, stmt):
-        return ctype
+        return
     # Never raises for a name this unit defines: `_func_qualifier`'s tier-1
     # check (`bare_name in _local_top_level_func_names`) answers from the
     # module being compiled itself, ahead of the `_AMBIGUOUS_FUNC_HOME`
     # refusal that tiers 2/3 can raise.
-    qualifier = _func_qualifier(gen, bare_name)
-    key = _pair_key(qualifier, bare_name)
-    frozen = gen._tsolve_frozen.get(key)
-    if frozen is not None:
-        kind = _return_disagreement(frozen, ctype)
-        if kind != 'same':
-            _tsolve_log(gen, kind + ':' + qualifier + '.' + bare_name,
-                        kind + ' ' + qualifier + '.' + bare_name
-                        + ' early=' + frozen + ' measured=' + ctype)
-        return frozen
-    store[key] = ctype
-    return ctype
+    store[_pair_key(_func_qualifier(gen, bare_name), bare_name)] = ctype
 
 
 def _home_def_return_type(gen, qualifier: str, bare_name: str):
@@ -2595,143 +2576,9 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     about exactly that definition.
     """
     store = getattr(gen, '_home_def_return_types', None)
-    if store is None:
+    if not store:
         return None
-    # An imported symbol's key is the MANGLED symbol (`<qualifier>_<name>_<hash>`).
-    # The store and the solver are keyed by the definer's bare name, which the
-    # symbol carries; `_definer_name` recovers it, and only a name the closure
-    # defines counts.
-    name = _definer_name(gen, qualifier, bare_name)
-    if name is not None:
-        bare_name = name
-    key = _pair_key(qualifier, bare_name)
-    got = store.get(key)
-    if got is None:
-        return _early_return_decision(gen, qualifier, bare_name)
-    return got
-
-
-def _definer_name(gen, qualifier: str, sym: str):
-    """The bare name of the definition a mangled symbol `sym` names, or None.
-
-    A mangled symbol is `<qualifier>_<name>_<6 hex digits>`, and the solver's
-    table tells us which `name` is a real definition in the qualifier's module,
-    so a symbol that is not a mangled name of a closure definition gives None."""
-    sol = getattr(gen, '_tsolve', None)
-    if sol is None:
-        return None
-    path = gen._qualifier_paths.get(qualifier)
-    if not path:
-        return None
-    pre = qualifier + '_'
-    if not sym.startswith(pre) or len(sym) < len(pre) + 8:
-        return None
-    if sym[len(sym) - 7] != '_':
-        return None
-    for ch in sym[len(sym) - 6:]:
-        if ch not in '0123456789abcdef':
-            return None
-    cand = sym[len(pre):len(sym) - 7]
-    if sol.knows(path, cand):
-        return cand
-    return None
-
-
-def _early_return_decision(gen, qualifier: str, bare_name: str):
-    """The solver's return ctype for a definition whose module has started but has
-    not finished its return-type analysis (an import-cycle back-edge): stored and
-    frozen, so the importer and the definer agree. None otherwise.
-
-    A module reading its OWN functions before its own return passes run is not a
-    back-edge (its passes are about to answer), so it is not decided here.
-    Deciding it would freeze every program's functions, not just cyclic ones."""
-    sol = getattr(gen, '_tsolve', None)
-    if sol is None:
-        return None
-    path = gen._qualifier_paths.get(qualifier)
-    if not path or path in gen._analyzed_paths:
-        return None
-    if gen._current_filename and path == os.path.abspath(gen._current_filename):
-        return None
-    # Only a NAME the closure defines is a decision. An imported-symbol key (a
-    # mangled `a_make_<hash>`) is not a definition, so there is nothing to decide.
-    if not sol.knows(path, bare_name):
-        return None
-    key = _pair_key(qualifier, bare_name)
-    if sol.is_annotated(path, bare_name):
-        # An annotated return is a fact: the definer's own routine answers it (4.4).
-        definition = sol.definition(path, bare_name)
-        ctype = annotated_return_ctype(gen, definition) if definition is not None else None
-        suffix = ' annotated'
-    else:
-        ctype = sol.ret_ctype(gen, path, bare_name)
-        suffix = ''
-    if ctype is None:
-        _tsolve_log(gen, 'undecided:' + qualifier + '.' + bare_name,
-                    'undecided ' + qualifier + '.' + bare_name
-                    + ' reason=' + sol.why_none(path, bare_name))
-        return None
-    gen._home_def_return_types[key] = ctype
-    gen._tsolve_frozen[key] = ctype
-    _tsolve_log(gen, 'early:' + qualifier + '.' + bare_name,
-                'early ' + qualifier + '.' + bare_name + ' ' + ctype + suffix)
-    return ctype
-
-
-def _return_disagreement(frozen: str, measured: str) -> str:
-    """How a frozen early return ctype and the definer's measured one differ
-    (bugs/GIR_type_solver_precision.md, 4.5):
-      same     -- identical;
-      refined  -- the frozen answer is a pointer or `_Bool` and the measured one the boxed
-                  word `int64_t`: the solver knew more than the backend (allowed, listed);
-      weak     -- the frozen answer is the boxed word and the measured one a pointer or
-                  `_Bool`: the solver lost a type the backend knew (must be 0);
-      conflict -- anything else (two pointer types, a word or pointer against `double`,
-                  `void` against a value): a miscompile risk (must be 0).
-    A boxed word and a pointer are representation-compatible (`mojo_box_word` converts)."""
-    if frozen == measured:
-        return 'same'
-    if gimple_ctypes.TypeLattice.is_word(frozen) and _is_boxable_ctype(measured):
-        return 'weak'
-    if gimple_ctypes.TypeLattice.is_word(measured) and _is_boxable_ctype(frozen):
-        return 'refined'
-    return 'conflict'
-
-
-def _is_boxable_ctype(ctype: str) -> bool:
-    """`_Bool` or a pointer: a value the runtime boxes into the boxed word."""
-    return gimple_ctypes.TypeLattice.is_bool(ctype) or gimple_ctypes.TypeLattice.ends_in_star(ctype)
-
-
-def _tsolve_log(gen, dedupe_key: str, line: str) -> None:
-    """Append one ledger line per key: a decision is made once, a read of it is not
-    a new decision (bugs/GIR_type_solver_precision.md, 4.5)."""
-    if dedupe_key in gen._tsolve_logged:
-        return
-    gen._tsolve_logged[dedupe_key] = True
-    gen._tsolve_ledger.append(line)
-
-
-def _shadow_check(gen, bare_name: str, measured: str) -> None:
-    """Ledger only (no C change): for an unannotated definer the solver answers and that
-    was not frozen, record when the solver's lowered return differs from the backend's
-    measured one. This is the S2 shadow report, measured over the whole closure by the
-    same acceptance run (bugs/GIR_type_solver_precision.md, 4.5)."""
-    sol = getattr(gen, '_tsolve', None)
-    if sol is None or not measured or not gen._current_filename:
-        return
-    path = os.path.abspath(gen._current_filename)
-    if not sol.knows(path, bare_name):
-        return
-    qualifier = _func_qualifier(gen, bare_name)
-    if _pair_key(qualifier, bare_name) in gen._tsolve_frozen:
-        return
-    solver = sol.ret_ctype(gen, path, bare_name)
-    if solver is None or solver == measured:
-        return
-    _tsolve_log(gen, 'shadow:' + qualifier + '.' + bare_name,
-                'shadow ' + qualifier + '.' + bare_name + ' solver=' + solver
-                + ' measured=' + measured)
+    return store.get(_pair_key(qualifier, bare_name))
 
 
 def _imported_def_pts(gen, bare_name: str) -> list | None:
@@ -3154,87 +3001,7 @@ def _overload_suffix(gen, bare_name: str) -> str:
     # extern ("expected 'TuffBricks *' but argument is of type 'Tuff *'").
     # The qualifier tier already disambiguates the NAME; this gives the
     # SUFFIX the same per-module truth.
-    _pts = _effective_param_types_hash(gen, bare_name)
-    _sfx = gen.overload_suffix_for(_pts)
-    _note_early_def_pts(gen, bare_name, _pts, _sfx)
-    return _sfx
-
-
-def _note_early_def_pts(gen, bare_name: str, pts, suffix: str) -> None:
-    """Remember the parameter list a call site hashed for an IMPORTED function
-    whose definition has not been emitted yet.
-
-    Inside an import cycle an importer can be compiled before its definer; it
-    hashes the definer's parameters from the snapshot (`int64_t` for a
-    parameter only the definer's call sites refine), and the definer then emits
-    its own, different suffix: an undefined symbol at link. The definer reads
-    this record in `_early_forwarders` and also defines the suffix the earlier
-    call sites named. A name this unit defines itself is the definer, not an
-    importer, and is skipped."""
-    if not pts or suffix == '':
-        return
-    if _local_def_pts(gen, bare_name) is not None:
-        return
-    _key = _pair_key(_func_qualifier(gen, bare_name), bare_name)
-    if _key in gen._home_def_pts_committed:
-        return
-    gen._early_def_pts_used[_key + '\x1f' + suffix] = list(pts)
-
-
-def _early_forwarders(gen, node, safe: str, ret_type: str, def_pts: list) -> list:
-    """C text of one forwarding definition per suffix an earlier call site
-    hashed for this function (`_note_early_def_pts`) that is not the suffix the
-    definition itself carries. Each forwarder has the parameter types that
-    call site assumed and calls the real definition, casting between the word
-    and the pointer the definer refined it to. Empty when nothing was hashed
-    early, or when a difference is not a word/pointer one (a double against a
-    word needs a boxing call, not a cast)."""
-    _key = _pair_key(_func_qualifier(gen, node.name), node.name)
-    _own = _as_str(gen.overload_suffix_for(def_pts))
-    _out: list = []
-    _eks: list = []
-    for _ek0 in gen._early_def_pts_used.keys():
-        _eks.append(_as_str(_ek0))
-    _eks.sort()
-    for _ek in _eks:
-        if not _ek.startswith(_key + '\x1f'):
-            continue
-        _sfx = _ek[len(_key) + 1:]
-        if _sfx == _own or not _own or _sfx == '' or not safe.endswith(_own):
-            continue
-        _used = gen._early_def_pts_used[_ek]
-        if len(_used) != len(def_pts):
-            continue
-        _args = []
-        _decls = []
-        _ok = True
-        for _i in range(len(_used)):
-            _u = _as_str(_used[_i])
-            _d = _as_str(def_pts[_i])
-            if _u == '...' or _d == '...' or _u[:7] == 'struct ':
-                _ok = False
-                break
-            _decls.append(f"{_u} _p{_i}")
-            if _u == _d:
-                _args.append(f"_p{_i}")
-            elif gimple_ctypes.TypeLattice.is_double(_u) or gimple_ctypes.TypeLattice.is_double(_d):
-                _ok = False
-                break
-            elif gimple_ctypes.TypeLattice.ends_in_star(_u) or gimple_ctypes.TypeLattice.ends_in_star(_d):
-                _args.append(f"({_d})(intptr_t)_p{_i}")
-            else:
-                _args.append(f"({_d})_p{_i}")
-        if not _ok:
-            continue
-        _fsym = safe[:len(safe) - len(_own)] + _sfx
-        _arg_s = ', '.join(_args)
-        _call = f"{safe} ({_arg_s})"
-        _decl_s = ', '.join(_decls) if _decls else 'void'
-        if gimple_ctypes.TypeLattice.is_void(ret_type):
-            _out.append(f"void {_fsym} ({_decl_s}) {{ {_call}; }}")
-        else:
-            _out.append(f"{ret_type} {_fsym} ({_decl_s}) {{ return {_call}; }}")
-    return _out
+    return gen.overload_suffix_for(_effective_param_types_hash(gen, bare_name))
 
 
 def _note_own_func_home(gen, bare_name: str, module_name: str,
@@ -3901,10 +3668,6 @@ def _func_csym(gen, bare_name: str, def_pts: list | None = None) -> str:
         rec = {}
         gen._func_csym_record = rec
     rec.setdefault(bare_name, set()).add(sym)
-    # Not when `bare_name` is already the symbol (a call site that resolved the
-    # mangled name first asks again with it): that would erase the source name.
-    if _as_str(sym) != _as_str(bare_name):
-        gen._csym_bare[_as_str(sym)] = _as_str(bare_name)
     return sym
 
 
@@ -4037,10 +3800,7 @@ def _func_csym_impl(gen, bare_name: str, def_pts: list | None = None) -> str:
         _ov_set = (getattr(gen, '_local_def_overloads', None) or {}).get(bare_name)
         if _ov_set and len(_ov_set) >= 2:
             return mangled
-        # The store is keyed by the DEFINER's name, which is `_orig` for an
-        # imported alias (the same name the symbol base above was built from).
-        _def_name = _orig if (_orig and _orig != bare_name) else bare_name
-        _eff_ret = _home_def_return_type(gen, qualifier, _def_name)
+        _eff_ret = _home_def_return_type(gen, qualifier, bare_name)
         if _eff_ret is None:
             _eff_ret = gen.func_return_types.get(bare_name)
         if _eff_ret is not None:
@@ -4150,7 +3910,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
                 gen._nested_elem_types.setdefault(bare, _sc)
         else:
             _ec = _annotated_elem_ctype(gen, _eann)
-            if gimple_ctypes.TypeLattice.is_c_float(_ec):
+            if _ec == 'float':
                 # `Float32` elements of a container are stored as C `double`
                 # (the Array/FixedSizeArray constructor arm does the same:
                 # `MojoList`'s float elements are doubles — emit_calls.py
@@ -4208,7 +3968,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         gen._callable_param_ret_types = {}
         for _cpt_pn, _cpt_fn in (getattr(node, '_mojo_coro_callable_param_fns', None) or {}).items():
             _cpt_rt = gen.func_return_types.get(_as_str(_cpt_fn))
-            if _cpt_rt and not gimple_ctypes.TypeLattice.is_void(_cpt_rt):
+            if _cpt_rt and _cpt_rt != 'void':
                 gen._callable_param_ret_types[_as_str(_cpt_pn)] = _cpt_rt
     else:
         gen._callable_param_gen_api = gen._callable_param_generator_apis_of(node)
@@ -4352,7 +4112,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     for _pct_key in _pct:
         _pct_bare = _as_str(_pct_key)
         _pct_t = _as_str(_pct[_pct_bare])
-        if gimple_ctypes.TypeLattice.is_dict(_pct_t):
+        if _pct_t == 'MojoDict *':
             gen._actual_types[_pct_bare] = _pct_t
     # ...and the dict-VALUE half of the same contract, for the same reason and
     # beside it. A dict parameter has no binding site inside the callee, so
@@ -4392,10 +4152,21 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
 
     # Determine return type: annotation takes priority; infer if absent.
     if node.return_type is not None:
+        ret_type = gen._resolve_type(node.return_type)
         # The SAME body-sensitive decision the struct-method definition
-        # pass makes below (`_gen_struct_method`); one routine for both
-        # (annotated_return_ctype, bugs/GIR_type_solver_precision.md, 4.4).
-        ret_type = annotated_return_ctype(gen, node)
+        # pass makes below (`_gen_struct_method`): a `-> Tuple[...]` return
+        # whose body builds the tuple as a RUNTIME (list-backed) tuple
+        # literal returns `MojoList *`, not the synthesized by-value
+        # struct — without this this definition pass overwrites the
+        # signature pass's `MojoList *` back into func_return_types, the
+        # prototype declares a struct return, and the typedef is never
+        # emitted (`unknown type name 'MojoTuple_...'`; measured 2026-10-21
+        # part 4 integration on `split`'s `-> Tuple[String, String]`).
+        if (isinstance(ret_type, str)
+                and ret_type.startswith('MojoTuple_')
+                and not _body_builds_struct_tuple(
+                        getattr(node, 'body', None))):
+            ret_type = 'MojoList *'
     else:
         # Seed any local holding a closure VALUE (`var f = inner`) so
         # `return f` infers the closure's real MojoBoundMethod*/void*
@@ -4415,13 +4186,9 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         else:
             ret_type = gen._infer_return_type(node.body, node)
         # Special case: main() should return int, not void
-        if node.name == 'main' and gimple_ctypes.TypeLattice.is_void(ret_type):
+        if node.name == 'main' and ret_type == 'void':
             ret_type = 'int64_t'
 
-    # The definer's answer, made effective first: a frozen early answer (the
-    # solver decided this return type for an importer) wins over the measured one.
-    ret_type = _record_home_def_return_type(gen, node, node.name, ret_type)
-    _shadow_check(gen, node.name, ret_type)
     gen.func_ret_type = ret_type
     gen.current_func_ret_ann = (
         node.return_type if isinstance(node.return_type, str) else '')
@@ -4442,6 +4209,8 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # (generated line 885606) precedes its own definition (885849), so the
     # definition's own answer was not in the slot yet and the call site read
     # elab_intu's `MojoList *`.
+    _record_home_def_return_type(gen, node, node.name, ret_type)
+
     # Run layout solver for struct locals
     solver = gimple_solvers.LayoutSolver(gen.struct_field_types)
     gen._struct_layout = solver.solve(node.params, node.body)
@@ -4518,7 +4287,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         if _pp.startswith('*'):
             continue
         _gf = _pg_apis.get(_pb)
-        if _gf is not None and gimple_ctypes.TypeLattice.is_generator(gen.var_types.get(_pb)):
+        if _gf is not None and gen.var_types.get(_pb) == 'MojoGenerator *':
             _api24 = gen._generator_api.get(_gf)
             if _api24 is not None:
                 gen._generator_var_api[gen._cname(_pb)] = _api24
@@ -4623,9 +4392,8 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # `body_lines` has exactly one real entry, hit the crash). Length +
     # a plain, positive-index lookup is the established-safe replacement.
     if node.name == 'main' and gimple_ctypes.TypeLattice.is_int_word(ret_type):
-        _body_text = ginf.body_text(gen)
-        _n_body_lines = len(_body_text)
-        _last_body_line = (_body_text[_n_body_lines - 1]
+        _n_body_lines = len(gen.body_lines)
+        _last_body_line = (gen.body_lines[_n_body_lines - 1].line()
                            if _n_body_lines > 0 else '')
         if not _last_body_line.strip().startswith('return'):
             gen._ret('0')
@@ -4693,7 +4461,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             # and keep `result` as a real `int` process exit code (this
             # wrapper's own C `main()` always returns `int`, regardless
             # of what the compiled Python `main()` itself returns).
-            if gimple_ctypes.TypeLattice.is_void(ret_type):
+            if ret_type == 'void':
                 lines.append(f"  {safe} ({call_args});")
                 lines.append(f"  int result = 0;")
             else:
@@ -4711,12 +4479,12 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             # boxed-zero equivalent (`0`/NULL for every C type this
             # compiler uses — int64_t, char*, MojoList*, ... are all
             # represented as 0) rather than omitting the argument.
-            # Found via mojolib BUG-2026-032: compiler.mojo's
+            # Found via mojolib BUG-2026-032: transpiler.mojo's
             # `def main(args=None):`.
             call_args = ', '.join(['0'] * len(param_strs))
             # See the identical `ret_type == 'void'` guard above (`def
             # main() -> None:`) -- same fix, same reason.
-            if gimple_ctypes.TypeLattice.is_void(ret_type):
+            if ret_type == 'void':
                 lines.append(f"  {safe} ({call_args});")
                 lines.append(f"  int result = 0;")
             else:
@@ -4727,11 +4495,6 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         # `main` returns a C `int`; `result` has the Mojo `main`'s own type.
         lines.append(f"  return (int)result;")
         lines.append(f"}}")
-
-    if node.name != 'main' and _def_pts:
-        for _fwd in _early_forwarders(gen, node, safe, ret_type, _def_pts):
-            lines.append("")
-            lines.append(_fwd)
 
     gen._pop_import_scope()
     return '\n'.join(lines)
@@ -5881,7 +5644,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
                 # the return-type inference below must read the parameter as it.
                 _refined = gen._inferred_param_types.get(
                     f"{struct_name}_{node.name}", {}).get(pname)
-                if (gimple_ctypes.TypeLattice.is_cstr(_refined) or gimple_ctypes.TypeLattice.is_double(_refined)):
+                if _refined in ('char *', 'double'):
                     ctype = _refined
             else:
                 ctype = gen._param_ctype(pname, ptype, node)
@@ -5964,7 +5727,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             pass
         ret_type = gen._infer_return_type(node.body, node)
         gen.var_types = _saved_lv
-        if gimple_ctypes.TypeLattice.is_void(ret_type):
+        if ret_type == 'void':
             ret_type = 'void'
 
     gen.func_ret_type = ret_type

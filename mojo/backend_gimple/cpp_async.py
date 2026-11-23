@@ -50,7 +50,6 @@ import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_exprs as gex
 import mojo.backend_gimple.cpp_core as gcc_
-from mojo.ir.instr import Instr, render_lines
 import mojo.middle.coro as gimple_gen_coro
 def _cpp_declared_type(gen, node) -> str | None:
     """C++ type of a node for `in`/`not in` dispatch, when it is a plain
@@ -186,11 +185,11 @@ def _cpp_fresh_name(gen, prefix: str = "_mg_t") -> str:
 
 
 def _cpp_stmt_with_break_flag(gen, s, declared: dict, indent: str,
-                               brk_var: str) -> list[Instr]:
+                               brk_var: str) -> list[str]:
     """Like _cpp_stmt but intercepts BreakStmt to set brk_var = true before
     breaking, so while/else can detect whether the loop exited via break."""
     if isinstance(s, gimple_ctypes.BreakStmt):
-        return [gcc_._cpp_assign_line(brk_var, 'true', indent), gcc_._cpp_ir_line(indent, 'break')]
+        return [f"{indent}{brk_var} = true;", f"{indent}break;"]
     return gen._cpp_stmt(s, declared, indent)
 
 
@@ -275,7 +274,7 @@ def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
     return False
 
 
-def _cpp_match_stmt(gen, s, declared: dict, indent: str) -> list[Instr]:
+def _cpp_match_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     """`match subject: case p: ... case _: ...` inside a generator body.
     Lowers to a chain of if/else comparisons (switch-style equality),
     mirroring _gen_stmt_MatchStmt's dispatch: each case's patterns are
@@ -290,30 +289,30 @@ def _cpp_match_stmt(gen, s, declared: dict, indent: str) -> list[Instr]:
         is_wildcard = not match_case.patterns or any(
             isinstance(p, gimple_ctypes.IdentExpr) and p.name == '_' for p in match_case.patterns)
         if is_wildcard:
-            lines.append(gcc_._cpp_ir_line(indent, 'else'))
+            lines.append(f"{indent}else {{")
         else:
             conds = []
             for p in match_case.patterns:
-                if isinstance(p, gimple_ctypes.IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(p.name):
+                if isinstance(p, gimple_ctypes.IdentExpr) and p.name == 'None':
                     conds.append(f"({subj} == 0)")
                 elif isinstance(p, gimple_ctypes.CallExpr) and isinstance(p.func, gimple_ctypes.IdentExpr):
                     # class pattern `case str(x)`: bind the capture, match if truthy
                     if p.args and isinstance(p.args[0], gimple_ctypes.IdentExpr):
                         declared[p.args[0].name] = 'int64_t'
-                        lines.append(gcc_._cpp_assign_line(p.args[0].name, subj, indent))
+                        lines.append(f"{indent}{p.args[0].name} = {subj};")
                     conds.append(f"({subj} != 0)")
                 else:
                     conds.append(f"({subj} == {gen._cpp_expr(p)})")
             cond = ' || '.join(conds)
-            lines.append(gcc_._cpp_ir_line(indent, 'if', cond))
+            lines.append(f"{indent}if ({cond}) {{")
         for st in match_case.body:
             lines.extend(gen._cpp_stmt(st, declared, indent + '    '))
-        lines.append(gcc_._cpp_ir_line(indent, 'end'))
+        lines.append(f"{indent}}}")
     return lines
 
 
 def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
-                              indent: str) -> list[Instr]:
+                              indent: str) -> list[str]:
     """Emit one `except ...:` handler's binding + body as C++ lines,
     nested inside the dispatch `if`/`else if` this handler's caller
     (_cpp_try_stmt) already built OUTSIDE the actual `catch` clause (see
@@ -335,7 +334,7 @@ def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
         # _cpp_raise_stmt), so bind as char * — there is no struct-typed
         # exception payload in this scalar-only generator-body model.
         declared[handler.name] = 'char *'
-        lines.append(gcc_._cpp_ir_line(indent, 'decl', f"char *{handler.name} = {caught_var}.msg"))
+        lines.append(f"{indent}char *{handler.name} = {caught_var}.msg;")
     gen._cpp_reraise_stack.append(caught_var)
     try:
         for st in handler.body:
@@ -820,7 +819,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # table: an unstamped node has no evidence of its own, and the
         # table's entry belongs to whichever module ran last.
         _ptr_ev = getattr(fn, '_ptr_evidence', ())
-        if ((gimple_ctypes.TypeLattice.is_cstr(ctype) or (gimple_ctypes.TypeLattice.is_set(ctype) or gimple_ctypes.TypeLattice.is_dict(ctype) or gimple_ctypes.TypeLattice.is_list(ctype)))
+        if ((gimple_ctypes.TypeLattice.is_cstr(ctype) or ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'))
                 and (pt is None or pt == '')
                 and pn in _ptr_ev
                 and any(isinstance(_n, gimple_ctypes.CallExpr)
@@ -1230,7 +1229,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     try:
         body_lines: list[str] = []
         for s in fn.body:
-            body_lines.extend(render_lines(gen._cpp_stmt(s, declared, '    ')))
+            body_lines.extend(gen._cpp_stmt(s, declared, '    '))
         # Struct-pointer-yield support: `known_structs` (every struct
         # this compile has a real layout for) validates a "T *" ctype
         # actually names one; `_dict_val_types` maps `self.<field>` (for
@@ -1522,7 +1521,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             "values must agree on one scalar type (int64_t/double/_Bool) "
             "— they disagree, or one of them's value kind could not be "
             "resolved at all")
-    if (gimple_ctypes.TypeLattice.ends_in_star(value_ctype) and not (gimple_ctypes.TypeLattice.is_set(value_ctype) or gimple_ctypes.TypeLattice.is_dict(value_ctype) or gimple_ctypes.TypeLattice.is_list(value_ctype))
+    if (gimple_ctypes.TypeLattice.ends_in_star(value_ctype) and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *')
             and value_ctype[:-2] in gen.struct_field_types):
         gen._cpp_value_struct_names.add(value_ctype[:-2])
 
@@ -1750,7 +1749,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     _ret_cts = []
     for _rpn, _rct in param_ctypes:
         _ret_cts.append(_rct)
-    return '\n'.join(render_lines(lines)), value_ctype, base, _ret_cts
+    return '\n'.join(lines), value_ctype, base, _ret_cts
 
 
 _SIG_WORD_CTYPES = frozenset({'int64_t', '_Bool', 'int', 'char *',
@@ -1850,7 +1849,7 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
         return []
     _vk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(cpp_value_ctype)
     if _vk is None:
-        if (gimple_ctypes.TypeLattice.is_set(cpp_value_ctype) or gimple_ctypes.TypeLattice.is_dict(cpp_value_ctype) or gimple_ctypes.TypeLattice.is_list(cpp_value_ctype)):
+        if cpp_value_ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
             _vk = 4
         else:
             return []
@@ -2279,7 +2278,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
             usage = {}
         for i, (pn, pt) in enumerate(d.params or []):
             ann = gen._param_ctype(pn, pt, d) if pt is not None else None
-            if gimple_ctypes.TypeLattice.is_c_int(ann):
+            if ann == 'int':
                 ann = 'int64_t'
             if pt is not None and ann in _HELPER_SCALAR_CTYPES:
                 out.append((pn, ann))
@@ -2293,7 +2292,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
                     cargs[i], kmap, self_fields, gen._async_api, None,
                     _known_structs, None, gen.func_return_types, _trusted,
                     self_struct_ctype=_self_ctype)
-                if gimple_ctypes.TypeLattice.is_c_int(t):
+                if t == 'int':
                     t = 'int64_t'
                 seen.add(t if t in _HELPER_SCALAR_CTYPES else None)
             if len(seen) == 1 and None not in seen:
@@ -2307,7 +2306,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
             # the same signal `_param_ctype` consults for module-level
             # unannotated params.
             u = usage.get(pn)
-            u = 'int64_t' if gimple_ctypes.TypeLattice.is_c_int(u) else u
+            u = 'int64_t' if u == 'int' else u
             if u in _HELPER_SCALAR_CTYPES:
                 out.append((pn, u))
             else:
@@ -2333,7 +2332,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
                 r.value, hdecl, self_fields, gen._async_api, None,
                 _known_structs, None, gen.func_return_types, _trusted,
                 self_struct_ctype=_self_ctype)
-            if gimple_ctypes.TypeLattice.is_c_int(t):
+            if t == 'int':
                 t = 'int64_t'
             if t not in _HELPER_SCALAR_CTYPES:
                 return None
@@ -2372,7 +2371,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         try:
             lines = []
             for st in body:
-                lines.extend(render_lines(gen._cpp_stmt(st, hdecl, '    ')))
+                lines.extend(gen._cpp_stmt(st, hdecl, '    '))
             hoist = list(gen._cpp_func_scope_decls)
         except gimple_exprtypes._UnsupportedGeneratorShape:
             # Covers _UnsupportedAsyncShape too (subclass).
@@ -2419,12 +2418,12 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         # pointer-shaped (str/list/dict/struct pointers) in addition to int64.
         if len(params_C) > 4:
             return False
-        if any(gimple_ctypes.TypeLattice.is_void(ct) or ct is None for _, ct in params_C):
+        if any(ct == 'void' or ct is None for _, ct in params_C):
             return False
         # For now, allow int64_t and pointer types
         for _, ct in params_C:
-            ct_n = 'int64_t' if gimple_ctypes.TypeLattice.is_c_int(ct) else ct
-            if not gimple_ctypes.TypeLattice.is_word(ct_n) and not (isinstance(ct_n, str) and gimple_ctypes.TypeLattice.ends_with_star(ct_n)):
+            ct_n = 'int64_t' if ct == 'int' else ct
+            if not gimple_ctypes.TypeLattice.is_word(ct_n) and not (isinstance(ct_n, str) and ct_n.endswith('*')):
                 return False
         if any(isinstance(x, gimple_ctypes.NonlocalStmt)
                for x in gimple_exprtypes._walk_own_body(C.body)):
@@ -2447,13 +2446,13 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         if f_emit is None:
             return False
         hC = dict(hF)
-        hC.update({pn: (ct if not gimple_ctypes.TypeLattice.is_c_int(ct) else 'int64_t') for pn, ct in params_C})
+        hC.update({pn: (ct if ct != 'int' else 'int64_t') for pn, ct in params_C})
         c_ret = _helper_return_ctype(C.body, hC)
         if c_ret is None:
             return False
-        c_ret_n = 'int64_t' if gimple_ctypes.TypeLattice.is_c_int(c_ret) else c_ret
+        c_ret_n = 'int64_t' if c_ret == 'int' else c_ret
         # Allow int64_t and pointer types as returns
-        if not gimple_ctypes.TypeLattice.is_void(c_ret_n) and not gimple_ctypes.TypeLattice.is_word(c_ret_n) and not (isinstance(c_ret_n, str) and gimple_ctypes.TypeLattice.ends_with_star(c_ret_n)):
+        if c_ret_n != 'void' and not gimple_ctypes.TypeLattice.is_word(c_ret_n) and not (isinstance(c_ret_n, str) and c_ret_n.endswith('*')):
             return False
         c_kw = _helper_kw_renames(params_C)
         c_emit = _emit_helper_body(C.body, hC, c_kw)
@@ -2461,8 +2460,8 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
             return False
         # Build typed callable
         try:
-            c_param_list = [(ct if not gimple_ctypes.TypeLattice.is_c_int(ct) else 'int64_t') for _, ct in params_C]
-            callable_ct = gimple_ctypes.callable_ctype(c_param_list, c_ret_n if not gimple_ctypes.TypeLattice.is_void(c_ret_n) else 'int64_t')
+            c_param_list = [(ct if ct != 'int' else 'int64_t') for _, ct in params_C]
+            callable_ct = gimple_ctypes.callable_ctype(c_param_list, c_ret_n if c_ret_n != 'void' else 'int64_t')
         except Exception:
             callable_ct = (gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG if params_C
                            else gimple_ctypes._CPP_CALLABLE_CTYPE)
@@ -2474,7 +2473,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         # Pass through as-is for pointers, int64_t for ints
         sig_C_list = []
         for pn, ct in params_C:
-            pct = ct if not gimple_ctypes.TypeLattice.is_c_int(ct) else 'int64_t'
+            pct = ct if ct != 'int' else 'int64_t'
             pct_cpp = gimple_exprtypes._c_to_cpp_scalar_type(pct)
             sig_C_list.append(f"{pct_cpp} {c_kw.get(pn, pn)}")
         sig_C = ', '.join(sig_C_list)
@@ -2485,11 +2484,11 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
                    f"return (*({callable_ct} *)env)({call_args}); }}")
         block = [f"static int64_t {csym} ({sig_F}) {{"]
         block += [f"    {x}" for x in f_emit[0] + f_emit[1]]
-        cpp_ret_c = gimple_exprtypes._c_to_cpp_scalar_type(c_ret_n) if not gimple_ctypes.TypeLattice.is_void(c_ret_n) else 'int64_t'
+        cpp_ret_c = gimple_exprtypes._c_to_cpp_scalar_type(c_ret_n) if c_ret_n != 'void' else 'int64_t'
         block.append(f"    {callable_ct} *_clo = new {callable_ct}([=]({sig_C}) mutable -> {cpp_ret_c} {{")
         block += [f"        {x}" for x in c_emit[0] + c_emit[1]]
-        if not gimple_ctypes.TypeLattice.is_void(cpp_ret_c):
-            dflt = 'nullptr' if gimple_ctypes.TypeLattice.ends_with_star(cpp_ret_c) else '0'
+        if cpp_ret_c != 'void':
+            dflt = 'nullptr' if cpp_ret_c.endswith('*') else '0'
             block.append(f"        return ({cpp_ret_c}){dflt};  /* fallthrough guard */")
         else:
             pass  # void case shouldn't happen if we require returns, but handle
@@ -2552,7 +2551,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
             return False
         hoist, hbody = emitted
         csym = f"{base}_h_{gimple_ctypes._safe_name(d.name)}"
-        cpp_ret = ('void' if gimple_ctypes.TypeLattice.is_void(ret_ct)
+        cpp_ret = ('void' if ret_ct == 'void'
                    else gimple_exprtypes._c_to_cpp_scalar_type(ret_ct))
         sig = ', '.join(
             f"{gimple_exprtypes._c_to_cpp_scalar_type(ct)} {kw_renames.get(pn, pn)}"
@@ -2561,13 +2560,13 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         block = [f"static {cpp_ret} {csym} ({sig}) {{"]
         block += [f"    {x}" for x in hoist]
         block += hbody
-        if not gimple_ctypes.TypeLattice.is_void(cpp_ret):
-            _dflt = 'nullptr' if gimple_ctypes.TypeLattice.ends_with_star(cpp_ret) else '0'
+        if cpp_ret != 'void':
+            _dflt = 'nullptr' if cpp_ret.endswith('*') else '0'
             block.append(f"    return ({cpp_ret}){_dflt};  /* fallthrough guard */")
         block.append("}")
         defs.extend(block)
         gen._cpp_nested_helper_syms[d.name] = csym
-        reg_rettypes[d.name] = ret_ct if not gimple_ctypes.TypeLattice.is_void(ret_ct) else 'int64_t'
+        reg_rettypes[d.name] = ret_ct if ret_ct != 'void' else 'int64_t'
         return True
 
     for d in targets:
@@ -2989,7 +2988,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
     try:
         body_lines: list[str] = []
         for s in fn.body:
-            body_lines.extend(render_lines(gen._cpp_stmt(s, declared, '    ')))
+            body_lines.extend(gen._cpp_stmt(s, declared, '    '))
         # The single scalar type every `return <expr>` in fn's own body
         # must agree on -- reuses _generator_yield_ctype's exact same
         # walk-and-unify logic (it only ever looks at ReturnStmt/
@@ -3115,8 +3114,9 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
     # MojoList*/MojoDict*/MojoSet*/MojoBytes*, char *, struct pointers,
     # etc.) are stored in the coroutine promise's result slot and read back
     # unchanged by awaiters/consumers.
-    if (not gimple_ctypes.TypeLattice.is_void(value_ctype) and gimple_ctypes.TypeLattice.ends_in_star(value_ctype)
-            and not (gimple_ctypes.TypeLattice.is_bytes(value_ctype) or gimple_ctypes.TypeLattice.is_voidp(value_ctype) or gimple_ctypes.TypeLattice.is_list(value_ctype) or gimple_ctypes.TypeLattice.is_cstr(value_ctype) or gimple_ctypes.TypeLattice.is_dict(value_ctype) or gimple_ctypes.TypeLattice.is_set(value_ctype))
+    if (value_ctype != 'void' and gimple_ctypes.TypeLattice.ends_in_star(value_ctype)
+            and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *',
+                                    'MojoBytes *', 'char *', 'void *')
             and value_ctype[:-2] in gen.struct_field_types):
         gen._cpp_value_struct_names.add(value_ctype[:-2])
 
@@ -3196,7 +3196,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         f"    void await_resume() noexcept {{}}",
         f"}};",
         f"struct {promise} {{",
-        (f"    {cpp_value_ctype} result{{}};" if not gimple_ctypes.TypeLattice.is_void(value_ctype)
+        (f"    {cpp_value_ctype} result{{}};" if value_ctype != 'void'
          else "    /* void: no stored return value */"),
         # Step E (exceptions): an exception that escapes this
         # coroutine's own body uncaught is NOT translated straight into
@@ -3287,7 +3287,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         f"        }}",
         f"    }}",
         (f"    void return_value({cpp_value_ctype} v) {{ result = v; }}"
-         if not gimple_ctypes.TypeLattice.is_void(value_ctype) else "    void return_void() noexcept {}"),
+         if value_ctype != 'void' else "    void return_void() noexcept {}"),
         f"}};",
         f"inline std::coroutine_handle<> {final_awaiter}::await_suspend({handle_t} h) noexcept {{",
         f"    std::coroutine_handle<> cont = h.promise().continuation;",
@@ -3331,7 +3331,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         f"}}",
         f'extern "C" {cpp_value_ctype} {base}_value (MojoAsync *g) {{',
         f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
-        ("    (void)h;" if gimple_ctypes.TypeLattice.is_void(value_ctype) else "    return h.promise().result;"),
+        ("    (void)h;" if value_ctype == 'void' else "    return h.promise().result;"),
         f"}}",
         f'extern "C" void {base}_destroy (MojoAsync *g) {{',
         f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
@@ -3442,13 +3442,13 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         f"            throw __e;",
         f"        }}",
         (f"        {cpp_value_ctype} v = callee_h.promise().result;"
-         if not gimple_ctypes.TypeLattice.is_void(value_ctype) else "        callee_h.destroy();"),
-        ("        callee_h.destroy();" if not gimple_ctypes.TypeLattice.is_void(value_ctype) else ""),
-        ("        return v;" if not gimple_ctypes.TypeLattice.is_void(value_ctype) else "        return;"),
+         if value_ctype != 'void' else "        callee_h.destroy();"),
+        ("        callee_h.destroy();" if value_ctype != 'void' else ""),
+        ("        return v;" if value_ctype != 'void' else "        return;"),
         f"    }}",
         f"}};",
     ]
-    return '\n'.join(render_lines(lines)), value_ctype, base, [ct for _, ct in param_ctypes]
+    return '\n'.join(lines), value_ctype, base, [ct for _, ct in param_ctypes]
 
 
 def _resolve_and_start_task(gen, inner) -> tuple[str, dict] | None:
@@ -4148,7 +4148,7 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
     try:
         body_lines: list[str] = []
         for s in fn.body:
-            body_lines.extend(render_lines(gen._cpp_stmt(s, declared, '    ')))
+            body_lines.extend(gen._cpp_stmt(s, declared, '    '))
         # Struct-pointer-yield support — mirrors _gen_cpp_generator_
         # unit's/_gen_cpp_async_unit's identical widening (see their own
         # comments): async generator methods aren't struct-scoped here
@@ -4186,7 +4186,7 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
             f"{fn.name}: every `yield <value>` must carry a scalar "
             "value (int64_t/double/_Bool), and all of them must agree "
             "on one consistent type")
-    if (gimple_ctypes.TypeLattice.ends_in_star(value_ctype) and not (gimple_ctypes.TypeLattice.is_set(value_ctype) or gimple_ctypes.TypeLattice.is_dict(value_ctype) or gimple_ctypes.TypeLattice.is_list(value_ctype))
+    if (gimple_ctypes.TypeLattice.ends_in_star(value_ctype) and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *')
             and value_ctype[:-2] in gen.struct_field_types):
         gen._cpp_value_struct_names.add(value_ctype[:-2])
 
@@ -4279,4 +4279,4 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         f"    }}",
         f"}};",
     ]
-    return '\n'.join(render_lines(lines)), value_ctype, base, param_ctypes
+    return '\n'.join(lines), value_ctype, base, param_ctypes

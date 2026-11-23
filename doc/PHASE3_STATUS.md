@@ -8,10 +8,10 @@
 > that failure mode is worse than an obviously stale one, because it stops
 > being obvious.
 >
-> What it describes: `make compile` running `apex py2mojo` to write a Mojo
+> What it describes: `make transpile` running `apex py2mojo` to write a Mojo
 > compiler into `mojo/*.mojo`, compiled from there by a `build/mojo` binary
 > into `stage1/mojo` and `stage2/mojo`. None of that exists: there is no
-> `compile:` rule in the Makefile, no `mojo/mojo_main.mojo`, no
+> `transpile:` rule in the Makefile, no `mojo/mojo_main.mojo`, no
 > `mojo_compiler.mojo`, and `build/mojo` is written by `build_mojo_cli.py`,
 > which nothing runs (see the note in `doc/IMPL.md`).
 >
@@ -28,7 +28,7 @@
 - ✓ Phase 2: Parser via interpreter (5/5 tests pass)
 - ✓ Interpreter loads and executes tokenizer.mojo
 - ✓ Interpreter loads and executes parser.mojo
-- ⚠ Codegen files partially loaded (syntax issues from compilation)
+- ⚠ Codegen files partially loaded (syntax issues from transpilation)
 
 ### What's Blocking Phase 3
 
@@ -37,17 +37,17 @@ Codegen modules have issues:
 2. **module_loader.mojo** - syntax error at line 13
 3. **codegen.mojo** - syntax error at line 33 (unexpected indent)
 
-These were compiled from Python using APEX, and the syntax doesn't properly convert to Python-compatible Mojo syntax.
+These were transpiled from Python using APEX, and the syntax doesn't properly convert to Python-compatible Mojo syntax.
 
 ### Root Cause
 
-The compiled .mojo files contain Mojo-specific syntax (like `struct` with decorators, or other features) that:
+The transpiled .mojo files contain Mojo-specific syntax (like `struct` with decorators, or other features) that:
 1. Don't convert properly with our simple mojo_to_python regex converter
 2. Contain Python syntax that our converter misses
 
 ### Path Forward: Two Options
 
-**Option A: Fix the Compiled Files**
+**Option A: Fix the Transpiled Files**
 1. Hand-edit generated_dispatch.mojo, module_loader.mojo to be Python-compatible
 2. Hand-edit codegen.mojo to fix syntax issues
 3. Remove dependency on undefined symbols
@@ -55,7 +55,7 @@ The compiled .mojo files contain Mojo-specific syntax (like `struct` with decora
 
 **Option B: Simplify and Focus on Bootstrap**
 1. Skip full codegen for now
-2. Compile the working interpreter (tokenizer + parser) to .mojo
+2. Transpile the working interpreter (tokenizer + parser) to .mojo
 3. Use those working Mojo files in actual bootstrap
 4. Add simple code generation or output formatting for proof-of-concept
 5. Complete the bootstrap with what we have
@@ -70,7 +70,7 @@ The compiled .mojo files contain Mojo-specific syntax (like `struct` with decora
 
 ### Next Steps (Recommended)
 
-1. **Compile the interpreter to Mojo**
+1. **Transpile the interpreter to Mojo**
    - myinterpreter.py → myinterpreter.mojo
    - Test that it works in .mojo form
 

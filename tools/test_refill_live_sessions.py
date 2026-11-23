@@ -13,7 +13,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 
-POOL = {"slots": [{"name": "mid-free", "model": "opencode-go/mid-free-model", "count": 2, "class": "mid",
+POOL = {"slots": [{"name": "iceman", "model": "opencode-go/iceman-contributor-free", "count": 2, "class": "mid",
                    "also": ["easy"]}]}
 DEAD_PID = 2 ** 22 - 3          # no such process
 
@@ -21,7 +21,7 @@ DEAD_PID = 2 ** 22 - 3          # no such process
 def worker(name, wt):
     return {"slot": 1, "branch": "work/" + name, "worktree": wt, "claims": ["bug:" + name], "state": None,
             "pid": DEAD_PID, "summary": name, "started": "2026-11-03 10:00:00",
-            "model": POOL["slots"][0]["model"], "pool": "mid-free"}
+            "model": POOL["slots"][0]["model"], "pool": "iceman"}
 
 
 class RefillCountsLiveSessions(unittest.TestCase):
@@ -43,13 +43,13 @@ class RefillCountsLiveSessions(unittest.TestCase):
     def test_dead_pid_with_live_session_still_counts_as_running(self):
         self.assertEqual(C.state_of(self.tasks["a"]), "exited-err")          # the bug's view of it
         live = C.busy_task_names({os.path.realpath(self.wts["a"])}, self.tasks)
-        self.assertEqual(C.running_by_slot(self.tasks, live), {"mid-free": 1})
+        self.assertEqual(C.running_by_slot(self.tasks, live), {"iceman": 1})
         self.assertEqual(C.running_by_slot(self.tasks, frozenset()), {})   # without the sessions, it is not
 
     def test_slot_cap_holds_when_every_worker_has_a_live_session(self):
         live = C.busy_task_names({os.path.realpath(wt) for wt in self.wts.values()}, self.tasks)
         busy = C.running_by_slot(self.tasks, live)
-        self.assertEqual(busy, {"mid-free": 3})
+        self.assertEqual(busy, {"iceman": 3})
         self.assertFalse(C.slot_free(POOL["slots"][0], busy), "3 live workers on a count-2 slot: no room")
 
     def test_unreadable_session_listing_is_unknown_not_empty(self):

@@ -26,7 +26,7 @@ paid = {"name": "opencode-paid", "model": "opencode-go/deepseek-v4.1-flash", "co
 
 check("a free slot takes work", C.slot_free(haiku, {}))
 check("a full slot takes nothing", not C.slot_free(haiku, {"haiku": 1}))
-check("a slot counts only its own running tasks", C.slot_free(haiku, {"inkling-local": 2}))
+check("a slot counts only its own running tasks", C.slot_free(haiku, {"qwen-local": 2}))
 
 h = C.mark_dead(paid["model"], paid)
 check("first limit waits the short block (2.5 h)", abs(h - 2.5) < 1e-9)

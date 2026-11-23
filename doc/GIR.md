@@ -1,8 +1,8 @@
 # GIR: a typed IR for the gimple backend
 
-Status (2026-11-23): stages 0, 1, 2a, 2b, 3a, 3b, 3c, 5a, 5b and 6 are landed, and stage 7 T1-T6 are done. Stage 4
-(types) and stage 5c (None) are the open stages. This file is the plan and the rules. Read it
+Status: stages 0, 1, 2a, 2b, 3a, 3b, 3c and 5a landed (2026-11-21). This file is the plan and the rules. Read it
 before changing anything under `mojo/backend_gimple/` or `mojo/ir/`.
+How the remaining stages are being built with Sonnet/Haiku workers: `doc/GIR_WORKERS.md`.
 
 ## 1. What is wrong today (measured 2026-11-13)
 
@@ -287,31 +287,18 @@ stage 7 has an oracle before it has a builder.
   `test_type_lattice_predicates.py` pins each predicate's exact membership and each codemod table
   entry. The remaining `==` tests are the ones whose left side is an expression the codemod
   deliberately does not accept; the tuple pattern can only shrink from here.
-  *Census 2026-11-23 (the exact rewrites and the single-type codemod).* Stage 4's string tests are about 930, not
-  about 30. The ratchet had counted seven spellings; `test_type_string_ratchet.py` now counts every comparison
-  against a C type spelling in three patterns (`== type string`, `in (type tuple)`, `endswith('*')`). Before this
-  round a grep on master counted 619 `==` tests, 270 tuple tests and 38 `endswith`. The widened tuple rewrites of
-  `6a89c722e` and `cf600c4d5` are now exact (`is_no_type` and the `is_c_int`/`is_i8`/.../`is_c_float` predicates
-  replace the widening predicates, and `ALLOWED_EXTRA` is gone). The single-type equality codemod ran over the
-  backend for `MojoDict *`, `MojoBytes *`, `void`, `MojoSet *`, `void *`, `char` and `MojoStr *`. The ratchet now
-  measures 216 `==` / 263 tuple / 38 `endswith`, and those are its BASELINE. Still open: the `== 'int'` and
-  `== 'float'` equalities (their exact predicates exist; mapping them is a separate change).
-  *One vocabulary (landed 2026-11-23, migration step 1 of
-  `bugs/hard/GIR_stage4_one_type_vocabulary.md`).* `mojo/ir/types.py` is the single source: `Type` is
-  interned by C SPELLING (`char`/`int8_t`, `long`/`int64_t`, `bool`/`_Bool` are distinct objects) and
-  carries `cls`, the semantic type, so `trivially_convertible`, `mismatch_class` and `cast_is_legal`
-  compare `.cls` and still treat `long` and `int64_t` as one GIMPLE class. Every `TypeLattice.is_*`
-  now delegates to `spelled(t)` plus a `Type` method and answers exactly the spellings it did; the nine
-  union predicates are frozen (no new callers). C is byte-identical on all 285 programs. Next: move
-  one side table (`_elem_types`) to `Type`.
+  *Measured 2026-11-22 after the W1 tail* (eight packets, one commit each, the packet docs deleted with
+  them): `== 'int64_t'` 12, `== 'char *'` 5, `== 'MojoList *'` 9, `endswith(' *')` 12, `== '_Bool'` 0,
+  `== 'double'` 0. The live remainder is comments that quote a test, `endswith(' *')` on a receiver that
+  may be `None` (left alone: `ends_in_star(None)` is False where `.endswith` raises), and `rt_call.py`, which
+  has no `gimple_ctypes` import and so stays as it was. The ratchet baseline is lowered to these counts.
 - **Stage 5a (landed 2026-11-14). A value's facts travel with a copy.**
   `carry_value_info(gen, dst, src)` (`emit_infra.py`) copies what the backend
   knows about a VALUE from one name to another, and `gen._copy` calls it for
   every same-typed copy. It carries the 18 type tables (`_elem_types`,
   `_dict_val_types`, `_actual_types`, `_tuple_slot_types`, the callable and
-  generator tables, ...), only ADDS facts (a fact already recorded for the
-  destination wins; the rule for the value kinds is stage 5b's, below), and never
-  carries ownership (`_fresh_vals`, `_owned_*`).
+  generator tables, ...), only FILLS (a fact already recorded for the
+  destination wins), and never carries ownership (`_fresh_vals`, `_owned_*`).
   This CHANGES generated code: 33 compiler modules compile differently
   (about 770 fewer statements; a boxed fallback read becomes a typed read
   where the element type is now known). Small programs are unchanged.
@@ -327,11 +314,7 @@ stage 7 has an oracle before it has a builder.
   `kind` is `Int / Erased(T) / DynWord / Box / Plain` and the flags
   `Tagged`, `SlotKinds`, `BoxedContainer` and `BindBox` carry the facts that
   are not a kind. `int64_t` therefore splits into
-  Int / Erased(T) / DynWord / Box in the value's info. No writer sets `Erased(T)`
-  yet: `carry` moves it (a Box source upgrades a Plain, Dyn or Erased destination;
-  only an Int destination is protected, `mojo/middle/valueinfo.py` `carry`), and
-  `erased_type` is read, but nothing marks a value Erased. It is modelled and
-  carried only.
+  Int / Erased(T) / DynWord / Box in the value's info.
   *Measured 2026-11-20 (the guide for the next round).* The six
   dynamic-word sets, by uses / files / writers (`.add`, `.update`, `[x] =`):
   `_boxed_vals` 93/11/30, `_dyn_word_vals` 75/8/51, `_tagged_word_vals`
@@ -476,12 +459,6 @@ stage 7 has an oracle before it has a builder.
   list/tuple slots and every `.get` domain back as `DynWord`. Do NOT define
   `x == None` as `x == 0`: that was tried and reverted (it makes
   `0 == None` true).
-  *Decision (2026-11-23, owner-delegated):* a slot represents `None` according to what it can hold.
-  If it holds references only, `None` is NULL (`Erased(T)`; today's behaviour, and the compiler's own
-  code). If it holds a scalar beside `None`, `None` is the `mojo_box_none()` box (`DynWord`/`Box`) and
-  every read is box-aware. If it has no informative evidence, nothing changes. An unannotated
-  parameter is classified by the argument kinds at its call sites. Details and the next slice are in
-  `bugs/mid/GIR_stage5c_none_representation.md`.
 - **Stage 6, counted loops (started 2026-11-14).** `gen._loop_head(idx, n,
   bb_cond, bb_body, bb_post, bb_after, stmt)` and `gen._loop_tail(idx,
   bb_cond, bb_post, bb_after, stmt)` (`emit_resolve.py`) are the skeleton of
@@ -553,21 +530,17 @@ stage 7 has an oracle before it has a builder.
   binds a name read later, or calls a nested function).
   `test_gimple_module_passes.py` pins the extracted rows, their annotations,
   the 8,674-line ratchet and the `0 lines can be moved` end state.
-  Fifth round (2026-11-23): the two blocks `4e2efdfee` added to the parent moved out
-  (`_gmp_publish_definer_pts`, `_gmp_emit_str_pool_forward_decl`), and
-  `test_gimple_module_passes.py` pins them. The parent is now 8,679 lines; the 5 over the
-  8,674 ratchet are call-site lines the moves left and one call wrapped by `2adea3531`, so
-  its ratchet is raised to the measured count, with the reason written beside it.
-  NOT moved: 25 of the 32 nested functions (30 direct) read a name bound in
-  `gen_module_impl`'s own body (measured 2026-11-23 by an AST pass; `self` and the
-  parent's parameters do not count). Lifting one needs a typed parameter per captured
-  local. Also not moved: the passes that call them, and the passes that bind a name
-  read later (those need to return a value).
+  NOT moved: 29 nested functions that read a local of `gen_module_impl`
+  (lifting one needs a typed parameter per captured local), the passes
+  that call them, and the passes that bind a name read later (those need
+  to return a value).
+- **Stage 6. Shape.** One loop builder replaces the 18 copies of the counted
+  loop skeleton across 28 `_gen_for_*`/`_compr_*` functions; the giant
+  functions are split along their `isinstance` arms.
 - **Stage 7. Other printers.** The C++ coroutine lowering (`cpp_core.py`,
-  `cpp_async.py`, 16,400 lines, a second walk of the same AST) becomes a printer
-  over GIR. A direct GCC bridge (`gcc/fire/fire-gimple-bridge.cc`) is not in this
-  repository: there is no `gcc/` directory, and `git log --all` has no commit for
-  that path. So stage 7's T1-T8 cover only the C++ printer. Its oracle is in place and
+  `cpp_async.py`, 16,400 lines, a second walk of the same AST) and the direct
+  GCC bridge (`gcc/fire/fire-gimple-bridge.cc`, today a stub that builds
+  `int main(){return 0;}`) become printers over GIR. Its oracle is in place and
   is the second corpus `tools/c_oracle.py` hashes (`tools/cpp_corpus`, 13
   coroutine programs compiled with `MOJO_CORO=cpp`, both promise shapes).
   Shape step (2026-11-22): `extract_arm.py` moved every top-level `if` arm of
@@ -576,269 +549,5 @@ stage 7 has an oracle before it has a builder.
   344 -> 256, `_cpp_yield_from` 716 -> 595, `_cpp_for_stmt` 1,846 -> 456 —
   so `--list ... 25` prints `0 lines can be moved` for all five and an arm is
   the unit that later returns an `Ex`. Both corpora are byte-identical.
-  `test_gimple_cpp_core_arms.py` pins it.
-
-## 5. The two oracles every worker uses
-
-A worker is only as good as the check it runs. Two checks, and a worker never
-reports success without them.
-
-1. **Byte-identical C** (behaviour-preserving work: codemods, extractions,
-   builder migration). Hash the generated C of `tools/pydiff_corpus` at the base
-   commit and on the worker's tree; every hash must match. Today this is the
-   `tools/c_oracle.py`: the scratch script of 2026-11-20/21 became it, and it caches
-   the base hashes per commit so a worker runs only its own side.
-2. **CPython agreement** (behaviour-changing work: stage 5c, bug fixes).
-   `python3 tools/pydiff.py <repro>` prints `OK`, and `python3
-   test_pydiff_ratchet.py` keeps every listed program OK.
-
-Plus the cheap gates every change runs: `python3 test_gimple_lint.py`,
-`python3 test_type_string_ratchet.py`, `python3 tools/dangling_doc_refs.py
---ratchet`, and `python3 -c "import ast; ..."` over every touched file (a
-regex codemod once turned `x not in (...)` into `x is_int_word(not)`).
-
-**The blind spot.** Both oracles run the Python reference compiler. Neither can
-see a self-host failure: stage 5b steps 1-3 passed both and still broke
-`make bootstrap` (the self-hosted compile stubbed every `WordFacts` method).
-A per-module `python3 fire.py --dump <module>.py` does NOT see it either
-(measured 2026-11-21 at `ef53815a1`: 0 stubs in `loops_shared.ci`, where the
-closure had ten). Only the whole-closure dump does, so the self-host check is
-
-    python3 tools/c_oracle.py check --base <sha> --closure
-
-which runs `fire.py --dump-full fire.py` (what `bootstrap-stage1-transitive`
-runs) for both sides and fails on any NEW weak stub. It costs 5-8 minutes and
-about 6 GB, so the orchestrator runs it once per wave on the merged tree, not
-each worker. Any change that adds a module, a class, or a method called across
-modules gets it. The full check is still `make bootstrap` (owner-run; see CLAUDE.md, `## Verification policy`).
-
-## 6. Stage 7: status and todo (measured 2026-11-23)
-
-The T0 baseline, measured on master with an AST pass over `cpp_core.py` before T3 (kept for the record): 0 statement
-f-strings left; 0 expression f-string leaves left (the last two are ported on master); 24 `.show()` boundaries; 39
-functions returning `list[...]` of statement text; 11 functions returning `str`; the three statement helpers have 186
-(`_cpp_ir_line`), 112 (`_cpp_assign_line`), 52 (`_cpp_call_line`) and 60 (`_cpp_instr`) call sites, plus 20
-`_cpp_opaque` and 3 `_cpp_if_break_line`. Re-measured 2026-11-23, after T6: 12 `.show()` calls in `cpp_core.py`
-(`grep -c`); the functions annotated `-> str` are `_cpp_expr` (`cpp_core.py`) and `_cpp_dict_key_expr` and
-`_cpp_fresh_name` (`cpp_async.py`); `_cpp_str_compare` is annotated `str | None` (see T3).
-
-- [x] T1. Statement helpers return `Instr` (with `indent` set), not `str`: `_cpp_ir_line`, `_cpp_assign_line`,
-      `_cpp_call_line`, `_cpp_instr`, `_cpp_opaque`, `_cpp_if_break_line`. Consumers that test a line as text (for
-      example `'co_yield' in ln` over `finally_lines`) must test the Instr's `show()`.
-- [x] T2. The statement printers return `list[Instr]` (merged `cec0b197f`; verified on master 2026-11-23).
-- [x] T3. The `-> str` functions become `Ex` (or stay as text only at a named boundary). Done 2026-11-23, see the T3 status below.
-- [x] T4. The `.show()` calls are removed as their consumers take `Ex`/`Instr` (58 to 7 at T4, and 12 after T6;
-      see the T4 and T6 status below).
-- [x] T5. One rendering edge: each `Instr` is rendered by `.line()` through `render_lines` (`mojo/ir/instr.py`), and
-      the function-assembly joins that print the rendered lines are the `cpp_async.py` and `emit_funcs`/`emit_loops`
-      sites. Done 2026-11-23, see the T5 status below.
-- [x] T6. Call-slot text lists (`_cpp_call_arg_expr` and its consumers) take `Ex`. Done 2026-11-23, see the T6 status below.
-- [x] T7. Verify: `test_gimple_cpp_core_arms.py` (30 arms pinned across 5 printers, 0 failures); `c_oracle check`
-      identical on all 286 pydiff and all 35 coroutine programs (base `868b3fa94`); `compile_stdlib.py` PASSED 610,
-      FAILED 0, no skip lines. Measured 2026-11-25.
-- [ ] T8. Done criterion: delete this doc in the same commit, with `python3 tools/dangling_doc_refs.py --ratchet`.
-
-### Status 2026-11-23: T6 (call-slot text lists take `Ex`)
-
-`_cpp_call_arg_expr(gen, a) -> Ex` now returns an `Ex` (the list-literal case already did): `_cpp_list_literal_arg_expr`
-or `gen._cpp_expr_ex(a)`, no `.show()`. Its consumers now take the Ex:
-- The slot binder `_cpp_generator_call_slot_pairs` returns `[(Ex, ctype), ...]`. Its leading, tail and default slots
-  are normalised there (`_as_ex`, `ex_text`), so no caller hands it text.
-- `_cpp_emit_generator_start_expr` and `_cpp_generator_start_kwargs_expr` build the `<base>_start` arguments with
-  `_cpp_cast_ex`/`_paren_ex` and `_cpp_call_ex`, not f-strings.
-- The `yield from` and `for ... in` consumers: the pointer and word casts are `_cpp_cast_ex`; the `', '.join(arg_exprs)`
-  joins are gone, and the `_mojogen_sub_guard` line is `ex_cat(..., _cpp_call_ex(<base>_start, arg_exprs), ...)`.
-  The `for ... in` `_mj_w(...)` wrap is `_cpp_call_ex`.
-- The builtin-call function (`args = [_cpp_call_arg_expr(gen, a) ...]`): its `f"(T)({args[N]})"` casts and
-  `(void *)(intptr_t)(...)` casts are `_cpp_cast_ex`/`_paren_ex`, the `ex_text(args[0])` wrappers are dropped, and the
-  `tuple`/`list` copy line is `_cpp_iter_word_ex`. The min/max result and the `mojo_reversed` wrap are `_cpp_call_ex`.
-
-Counts (the call-argument path; `.show()` and f-string sites over the argument lists, master `63e597a35` vs this round):
-- Call sites of `_cpp_call_arg_expr` whose result is text: 7 before (the 4 slot/cargs sites at 2315, 2343, 2439, 2442,
-  plus 4933, 10396, 13656), 0 after. Every one now feeds an Ex list.
-- f-string sites over an argument (`{args[...]}`, `{a}` of an argument list, the `(T)(...)` slot casts): 19 before, 2
-  after. Both are statement text (see below).
-- `.show()` calls in `cpp_core.py`: 8 before, 12 after. The one in `_cpp_call_arg_expr` is gone; the 5 added are the
-  text edges listed below, each rendering an argument once at the point it becomes statement text.
-
-Text consumers left in the call-argument path, each a text edge (statement or shape test), with the reason:
-1. The min/max statement body (`_body`, `_a = args[_ai].show()`, `args[0].show()`): built as a C statement string in the
-   reduction lambda. Moving it to `Instr` statements is the next step, not T6's.
-2. The `*args` pack (`_pack_stmts`, `args[_i].show()`): a text list of printed statements (see the T4 note on 5974).
-3. The rethrow argument text (`_cargs = ", ".join(...)` over `[x.show() for x in args]`), passed to
-   `_cpp_rethrow_pending`, which takes text.
-4. The `yield from` shape test (`re.fullmatch(r'-?\d+|true|false', arg_exprs[_ai].show().strip())`): a regex over the
-   printed argument, so it must read the text. The decision is unchanged.
-
-Verification (worktree `work-t6`, branch `work/gir-stage7-t6`, base `63e597a35`):
-- `test_gimple_cpp_core_arms.py`: `30 arm(s) pinned across 5 printer(s), 0 failure(s)`.
-- `c_oracle check --base master`: `all 285 programs generate identical C to 63e597a35a6e` and `all 35 coroutine programs
-  generate identical C++ companion to 63e597a35a6e`.
-- `compile_stdlib.py` (default parallelism): `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no `skip` lines, exit 0.
-  The run was a cold build (`Codegen CAS: 0/610 hits`, `GCC CAS: 0/610 hits`).
-
-T6 is T6-done.
-
-### Status 2026-11-23: T5 (one rendering edge)
-
-The rule `Instr -> text` now lives in one place: `render_lines(lines)` in `mojo/ir/instr.py` (next to `Instr.line()`,
-which it calls). It was previously a copy in `cpp_core.py` (`_cpp_render_lines`) and a second copy as the body of
-`emit_infra.body_text`. `cpp_core` no longer defines it; its callers import `render_lines`.
-
-Rendering edges after T5 (each statement line is rendered once, by `Instr.line()`, through `render_lines`):
-- `mojo/backend_gimple/emit_infra.py` `body_text(gen)`: the function-body edge for `emit_funcs.py` (3 assemblies) and
-  `emit_loops.py` (1 assembly). It delegates to `render_lines(gen.body_lines)`.
-- `mojo/backend_gimple/cpp_async.py`: the coroutine function bodies (`render_lines(gen._cpp_stmt(...))` for the body
-  text, then `'\n'.join(render_lines(lines))` at each of the 3 assemblies).
-- `mojo/backend_gimple/cpp_core.py` 3168: the one loop lambda that is joined into a single opaque block.
-
-Direct `.line()` calls outside the edge: before 6 (cpp_core render helper, `emit_funcs` main-return check,
-`emit_infra.body_text`, two `emit_resolve` diagnostics, `mojo/ir/build.py` `append`), after 2 (`render_lines` itself,
-and `build.py` `append`, which renders once to test whether a statement is blank or a `#` directive and prints nothing).
-
-Statement-to-text joins, measured by an AST pass over `mojo/backend_gimple/*.py` and `mojo/ir/*.py` (a `''`, `' '`,
-`'\n'` join whose argument names statement lines): 46 before, 44 after. The two removed in `cpp_core.py` are the
-statement-list joins: the `' '.join(stmts[:-1])` of the string-join lambda (12858) and the `' '.join(_pack_stmts)` of the
-`**kwargs` pack lambda (6018), which now pass one opaque statement each to the lambda body (its `show()` joins them with
-the same single space). The function-assembly `'\n'.join(lines)` sites in `emit_funcs`, `emit_loops`, `cpp_async` and
-`emit_infra` join text that is already rendered, so they are not counted as renders. Joins of text fragments that are
-not statement lists (`''.join(parts)` in `cpp_core`, C-text processing in `emit_infra`) are unchanged.
-
-Verification (worktree `work-t5`, branch `work/gir-stage7-t5`, base `9904b3b03`):
-- `test_gimple_cpp_core_arms.py`: `30 arm(s) pinned across 5 printer(s), 0 failure(s)`.
-- `c_oracle check --base master`: `all 285 programs generate identical C` and `all 35 coroutine programs generate
-  identical C++ companion`.
-- `compile_stdlib.py` (default parallelism): `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, `skips: 0`, exit 0.
-- Targeted: `test_gir_builder.py` (0 failures), `test_codegen_yield_from_walk_ast_memo.py` (PASS); the latter imports
-  `render_lines` directly now.
-
-T5 is T5-done.
-
-### Status 2026-11-23: T4 (`.show()` removed as consumers take `Ex`)
-
-`.show()` calls in `mojo/backend_gimple/cpp_core.py`: 58 on master `3a215425a` (`grep -c`, and 58 occurrences by
-`grep -o`; the T3 entry above said 60), 7 after this round. The statement sites that built their line as an f-string
-with an interpolated `.show()` are now `Ex` compositions rendered by the statement helper.
-
-What landed:
-- `mojo/ir/instr.py`: a concatenation kind `Ex('cat')` and `ex_cat(*parts)` (parts are Ex or text), so a line that is
-  partly text and partly an operand stays an Ex until the statement helper renders it.
-- `_cpp_ir_line` takes an Ex operand (as `_cpp_assign_line` and `_cpp_instr` already did); `_cpp_call_line` takes Ex args.
-- `_cpp_counted_loop_ex(ctr, lst)` (the `for` header over a list, 7 sites, was copy-pasted) and `_cpp_iter_word_ex(src)`
-  (`mojo_iter_word((int64_t)(intptr_t)(...))`, 5 sites).
-- The dynamic-call wrapper `_cpp_dyn_call_text` is gone; its 5 callers use `_cpp_dyn_call_expr` directly, which returns Ex.
-- `_cpp_module_global_field`'s literal string, `_cpp_boxed_list_literal_expr`, `_cpp_list_literal_arg_expr`, the
-  and/or word pick (`_cpp_cond_ex`), the `while` list/dict/set tests, the raise messages (`ex_cat` of the message Ex,
-  three throw sites), the `yield from` sorted/`sorted` lists, and the list/dict/set iteration reads now take Ex.
-
-Remaining `.show()` calls, each a text boundary, with the reason:
-- `cpp_core.py` 563 (`_kwfwd` lambda): its `lines` are `_cpp_opaque` text blocks (`_cpp_opaque(ln)`).
-- 2482 (generator spread lambda): a `_cpp_opaque` text block joined with text lines.
-- 2573 (boxed list literal): the element `parts` are joined into a `_cpp_opaque` text block.
-- 2653 (`_cpp_call_arg_expr`): returns text; its consumers are the call-slot text lists, which is T6.
-- 5334 (`next(<generator call>)`): the handle is tested with `.isidentifier()` in `_cpp_next_on_generator_expr`, so it is text.
-- 5974 (`**kwargs` literal key): the key goes into `_pack_stmts`, a text list of printed statements.
-- 7014 (`_cpp_expr`): the named text boundary (`_cpp_expr_ex(gen, e).show()`), with its 232 callers.
-
-Verification (worktree `work-t4`, branch `work/gir-stage7-t4`):
-- `test_gimple_cpp_core_arms.py`: `30 arm(s) pinned across 5 printer(s), 0 failure(s)`.
-- `c_oracle check --base master`: `all 285 programs generate identical C` and `all 35 coroutine programs generate
-  identical C++ companion`.
-- `compile_stdlib.py`: `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no `skip` lines, exit 0.
-
-T4 is T4-done.
-
-### Status 2026-11-23: T2 verified on master (merge `cec0b197f`)
-
-T2 (statement printers return `list[Instr]`) was merged before verification and is verified now:
-- `test_gimple_cpp_core_arms.py`: 30 arms, 0 failures.
-- `c_oracle check --base 3dec79e25` (the commit before T2): identical C on all 285 pydiff programs and identical C++ on all 35 coroutine programs.
-- `compile_stdlib.py` (default parallelism): `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no skips. The run was served almost entirely from the content-addressed cache (100% codegen and GCC hits), so it confirms the same code compiles, not a fresh build.
-
-T2 is T2-done.
-
-### Status 2026-11-23: T3 (`-> str` functions return `Ex`)
-
-The AST pass (`FunctionDef` whose `returns` unparses to `str`) finds 7 functions in `cpp_core.py`; the other 4 of
-the "11" are annotated `str | None` and are listed below as not converted.
-
-Converted:
-- `_cpp_as(ctype, expr) -> Ex`: `_cpp_cast_ex(ctype, _paren_ex(_as_ex(expr)))`, 87 call sites. 44 are f-string fields
-  now `{...show()}`, the text sinks for statement lines. The Ex consumers (`_cpp_call_ex` args, `_cpp_comma_ex`,
-  `ex_text(...)` wrappers) take the Ex directly.
-- `_cpp_in_link(gen, a: Ex, a_node, b: Ex, b_node, negate) -> Ex`: built from `_cpp_call_ex`, `_cpp_cast_ex`,
-  `_paren_ex`, `_cpp_not_ex`. The `in` branch of the compare-chain arm computes its operands as Ex; the other
-  comparisons keep the text boundary, because `_cpp_str_compare` takes text.
-- `_cpp_apply_fstring_spec(part_val: Ex, spec) -> Ex` and `_cpp_fstring_list_piece(gen, expr_node, v) -> Ex`
-  (unannotated before, now Ex because it feeds the same pieces).
-- `_cpp_string_literal_expr(gen, val, is_interp) -> Ex`: the pieces are Ex, the `mojo_str_cat` chain is
-  `_cpp_call_ex`. 3 call sites.
-- `_cpp_tagged_operand_word(gen, node) -> Ex`: `_cpp_cast_ex` chain. 1 call site.
-- `_cpp_build_container_from_iterable`: the annotation was `-> str` but the body already returned an Ex
-  (the lambda). Annotation corrected to `-> Ex`.
-
-Kept as text, on purpose:
-- `_cpp_expr(gen, e) -> str` is THE named text boundary (`_cpp_expr_ex(gen, e).show()`), 232 callers. Its callers
-  that need text are the sinks T4/T6 remove.
-
-Not converted (annotated `str | None`, outside the literal `-> str` pass):
-- `_cpp_percent_format`, `_cpp_fn_container_shape`, `_cpp_str_compare` (takes text operands),
-  `_cpp_literal_slot_ctype` (a C type spelling, not an expression). The first three are the next candidates.
-
-Irreducible text leaves (`ex_text`), recorded here:
-- C string literal spellings (`"..."`, `""`, `"True"`, `"False"`, `"fill"`) and the constants `'0'`, `'NULL'`,
-  `'-1'`, which are `ex_text` leaves with no shape.
-- `_cpp_word_of_kind(ctype, text)` (in `mojo/middle/exprtypes.py`, returns str): its result is an `ex_text` leaf
-  inside `_cpp_tagged_operand_word`. Converting it is that module's own step.
-
-Show count in `cpp_core.py`: 15 on master, 60 now. The new `.show()` calls are each a text sink (`_cpp_assign_line`,
-`_cpp_ir_line`, f-string conditions, `_cpp_instr` text). T4 removes them as those sinks take Ex.
-
-Verification (worktree `work-t3`, base `master` HEAD 051634f49):
-- `test_gimple_cpp_core_arms.py`: `30 arm(s) pinned across 5 printer(s), 0 failure(s)`. One fixture line changed:
-  the `_EGen` stub's `_cpp_in_link` takes and returns Ex, because the interface changed.
-- `c_oracle check --base master`: `all 285 programs generate identical C` and `all 35 coroutine programs generate
-  identical C++ companion`. A first run caught a leftover placeholder (`_cpp_marker_void`), fixed before the run
-  reported here.
-- `compile_stdlib.py`: `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no `skip` lines, exit 0.
-
-T3 is T3-done.
-
-Status: stage 7 T1 (statement helpers return `Instr`) and T2 (statement printers return `list[Instr]`) are on
-master and verified. T3 to T6 are done since (see their entries). Status (2026-11-23): still open: T7 and T8.
-This file is the only GIR document; the dated history of
-the stage 7 work is in git history (the stage 6 and 7 bug log, deleted 2026-11-23).
-
-## Selfhost closure and the gate (2026-11-25)
-
-State at `ec1c68c09`-plus: the whole-closure translation unit compiles with **0 gcc errors**, the `mojoc` and
-`selfhost` gate jobs PASS, and `make gate` is down to the jobs that need the self-hosted compiler's OUTPUT to be
-the reference's.
-
-What the `mojoc` / `selfhost` failures were, each a landed fix with a pin test (`bugs/GATE_selfhost_and_mojoc_link_failures.md`
-has the order they were peeled in):
-- `unknown type name 'WordFacts'` in every per-module compile of a compiler source file (`_SELFHOST_SIGS` names it,
-  only the closure TU defined it): a struct layout beside `Interpreter`'s.
-- `ld: undefined` module-global accessors (`types__mojo_global_get_PRESENCE_WORD`): the importer named the accessor after
-  the file basename, the definer after its spelling.
-- `ld: undefined` for five functions an importer hashed with `int64_t` parameters before the definer refined them
-  (`annotated_return_ctype` ...): the definer also defines each suffix an earlier call site hashed, as a forwarder.
-  The proper fix is parameter types from the solver (stage S4, `bugs/GIR_type_solver.md`).
-- the three `MojoList * + double` errors (`52e02dc2d`).
-- the built binary's startup: `sys.maxsize` as a value, the solver's `vars()` walk, an aliased import of a compiled
-  module, an unannotated `sdef`/`ctx`/`node`, `mojo_`-prefix "runtime helper" test, tagged `= None` parameters (method
-  calls, forwarding, a `_cur_default_none_params` erased right after it was set), presence bits minted after a bit-less
-  store, `dict.get` boxed results, an annotated `self.f: T = call()` field typed from the value.
-
-What is still red in `python3 tools/suite.py gate` (run 2026-11-25, 165 passed, 5 failed of 182 tests; four of the five
-were fixed since): `ab-native` and `native-dumpfull` (the native `mojoc` writes a `.ci` that differs from the reference's:
-`bugs/hard/GIR_selfhost_compiled_output_diverges.md`) and the bootstrap chain behind them (`bootstrap-stage2-*`,
-`-stage3-*`, `-verify`, `-validate`: skipped; `bootstrap-stage1-transitive` and `bootstrap-stage2-cc` are disabled by their
-bug docs). The bootstrap was last green on 2026-10-25; the changes since that touch what the compiled compiler does are the
-presence bits (11-01), the IR (11-13..11-21), stage 5c tagged parameters (11-20..) and the solver (11-24).
-
-`tools/selfhost_probe.py` is how the compiled compiler is debugged: build the binary once, diff its `.ci` against the
-reference's per probe in seconds, and run `lldb` with ASLR ON.
-
-The type solver (`bugs/GIR_type_solver.md`) is the long-term direction for every signature, field and local type
-(stages S1-S6). S1 is the first consumer. S4 takes over the overload hash's parameter types, and S6 is the unboxing stage.
+  `test_gimple_cpp_core_arms.py` pins it. The builder it prints through
+  (stage 2b, `mojo/ir/build.py`) is still the blocker.

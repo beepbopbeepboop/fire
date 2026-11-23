@@ -30,7 +30,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mojo.middle.exprtypes as ET
 import mojo.middle.types as gimple_ctypes
 import mojo.backend_gimple.cpp_core as cc
-from mojo.ir.instr import render_lines
 
 
 class _StubGen:
@@ -171,12 +170,11 @@ def main():
     if not any(n is call.func for n in recorded):
         fails.append("rewritten MemberExpr was never invalidated")
     for node in (call, call.func):
-        if ET._nid(node) in ET._WALK_AST_MEMO:
+        if id(node) in ET._WALK_AST_MEMO:
             fails.append("walk memo still holds an entry for %s after the "
                          "rewrite site invalidated it" % type(node).__name__)
-    out_text = render_lines(out)
-    if not (isinstance(out_text, list) and out_text
-            and all(isinstance(s, str) for s in out_text)):
+    if not (isinstance(out, list) and out and all(isinstance(s, str)
+                                                  for s in out)):
         fails.append("_cpp_yield_from did not return emitted C++ lines")
 
     # Scenario 2 — the classname path (`yield from S.plan(...)`): same write
@@ -192,9 +190,8 @@ def main():
     if not any(n is call2 for n in recorded2):
         fails.append("classname path: enclosing CallExpr was never "
                      "invalidated at the rewrite site")
-    out2_text = render_lines(out2)
-    if not (isinstance(out2_text, list) and out2_text
-            and all(isinstance(s, str) for s in out2_text)):
+    if not (isinstance(out2, list) and out2
+            and all(isinstance(s, str) for s in out2)):
         fails.append("classname path: _cpp_yield_from did not return "
                      "emitted C++ lines")
 

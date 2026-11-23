@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from mojo.middle.types import TypeLattice, _LIBM_FN_RETVALS,_C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES, _SIGNED_INT_TRUE_DIV_TYPES
 import dataclasses
-from fire_compiler import is_fstring_literal, for_target_names, AugAssignStmt, MultiAssignStmt, WalrusExpr, VarDecl, WithStmt, TryStmt, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CompareChain, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _as_list, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
+from fire_compiler import is_fstring_literal, for_target_names, AugAssignStmt, MultiAssignStmt, WalrusExpr, VarDecl, WithStmt, TryStmt, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CompareChain, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 # Whether a node's CLASS is a dataclass, cached beside the field names for
 # the same reason and on the same key. `dataclasses.is_dataclass` is a pure
@@ -83,20 +83,6 @@ _WALK_AST_PARENTS: dict = {}
 _WALK_INDEX_MEMO: dict = {}
 
 
-def _nid(node) -> int:
-    """The memo key of `node`: `id(node) * 2 + 1`.
-
-    Not the bare address. The self-hosted runtime classifies a raw integer dict
-    key by looking its VALUE up among the live containers (`mojo_dict_key_for`),
-    so `memo[id(some_list)]` raised "unhashable type: 'list'" -- the integer
-    equalled a registered list's address -- and the compiled compiler died in
-    `_walk_ast_invalidate` on the first struct it registered. An address is
-    16-aligned, so an odd number can never equal one; doubling keeps distinct
-    nodes distinct."""
-    return id(node) * 2 + 1
-
-
-
 def _walk_ast_invalidate(node) -> None:
     """Drop every memo entry that could contain `node`'s pre-mutation walk.
 
@@ -118,10 +104,10 @@ def _walk_ast_invalidate(node) -> None:
 
     Cycles are possible in a walked graph (the walk itself is depth-capped,
     so it survives one), hence the `seen` set rather than a plain loop."""
-    stack: list = [_nid(node)]
-    seen: set = set()
+    stack = [id(node)]
+    seen = set()
     while stack:
-        k: int = stack.pop()
+        k = stack.pop()
         if k in seen:
             continue
         seen.add(k)
@@ -129,10 +115,11 @@ def _walk_ast_invalidate(node) -> None:
             del _WALK_AST_MEMO[k]
         if k in _WALK_INDEX_MEMO:
             del _WALK_INDEX_MEMO[k]
-        par: list = _as_list(_WALK_AST_PARENTS.get(k, []))
-        for p in par:
-            if p not in seen:
-                stack.append(p)
+        par = _WALK_AST_PARENTS.get(k)
+        if par is not None:
+            for p in par:
+                if p not in seen:
+                    stack.append(p)
 
 
 def _walk_ast_reset() -> None:
@@ -189,9 +176,9 @@ def _walk_ast_into(node, out, _depth=0, _from=0):
     if node is None:
         return
     if _from:
-        _nk = _nid(node)
-        _par: list = _as_list(_WALK_AST_PARENTS.get(_nk, []))
-        if len(_par) == 0:
+        _nk = id(node)
+        _par = _WALK_AST_PARENTS.get(_nk)
+        if _par is None:
             _WALK_AST_PARENTS[_nk] = [_from]
         elif _par[-1] != _from:
             # One dict write per descended node, which the memo is what makes
@@ -201,11 +188,11 @@ def _walk_ast_into(node, out, _depth=0, _from=0):
     if _depth > _WALK_AST_MAX_DEPTH:
         return
     if isinstance(node, list) or isinstance(node, tuple):
-        _lk = _nid(node)
+        _lk = id(node)
         for item in node:
             _walk_ast_into(item, out, _depth + 1, _lk)
         return
-    _self_id = _nid(node)
+    _self_id = id(node)
     out.append(node)
     if isinstance(node, type):
         return
@@ -276,10 +263,10 @@ def _walk_ast(node):
 
     A one-node result is not memoized: it is a leaf, so there is nothing to
     reuse, and caching it would pin every distinct scalar ever walked."""
-    key = _nid(node)
-    hit: list = _as_list(_WALK_AST_MEMO.get(key, []))
-    if len(hit) == 2:
-        return _as_list(hit[1])
+    key = id(node)
+    hit = _WALK_AST_MEMO.get(key)
+    if hit is not None:
+        return hit[1]
     out = []
     _walk_ast_into(node, out)
     if len(out) > 1:
@@ -318,9 +305,9 @@ def _walk_derived_index(stmts: list, build) -> object:
     call that produces the answer — the memo entry is written AFTER `build`
     returns, and a write-site invalidation can only find it through edges the
     walk already recorded."""
-    key = _nid(stmts)
-    hit: list = _as_list(_WALK_INDEX_MEMO.get(key, []))
-    if len(hit) == 2:
+    key = id(stmts)
+    hit = _WALK_INDEX_MEMO.get(key)
+    if hit is not None:
         return hit[1]
     out = build(stmts)
     _WALK_INDEX_MEMO[key] = (stmts, out)
@@ -743,7 +730,7 @@ def record_bool_params(gen, node) -> None:
         _pn = _as_str(_p[0])
         if not _pn or _pn.startswith('*'):
             continue
-        if _p[1] is not None and TypeLattice.is_cpp_bool(_as_str(_p[1]).strip()):
+        if _p[1] is not None and _as_str(_p[1]).strip() == 'bool':
             _names.add(_pn)
 
 
@@ -824,25 +811,6 @@ def is_python_bool_expr(gen, node) -> bool:
     if isinstance(node, IdentExpr) and node.name in getattr(gen, '_bool_valued', ()):
         return True
     if isinstance(node, IdentExpr) and bool_param_in_scope(gen, _as_str(node.name)):
-        return True
-    # A bare-imported module global whose defining value is a Python bool
-    # (`from helper import FLAG` with `FLAG = True`). Its accessor is a C
-    # `int`, so the bool-ness is recorded beside it. A same-named LOCAL
-    # shadows the import exactly as `_lower_IdentExpr` decides, so the local
-    # wins here too.
-    if (isinstance(node, IdentExpr)
-            and _as_str(node.name) in getattr(gen, '_imported_global_bool', ())
-            and _as_str(node.name) not in getattr(gen, 'var_types', {})):
-        return True
-    # A module-alias-qualified global whose defining value is a Python bool
-    # (`import helper as h`, `h.FLAG` with `FLAG = True`): the same accessor
-    # and the same bool-ness record as the bare `from` spelling above, keyed
-    # by the alias. A local of the same name shadows the alias, as it does
-    # in `_lower_MemberExpr`.
-    if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
-            and (_as_str(node.obj.name), _as_str(node.member))
-            in getattr(gen, '_imported_alias_global_bool', ())
-            and _as_str(node.obj.name) not in getattr(gen, 'var_types', {})):
         return True
     if isinstance(node, MemberExpr):
         return _is_python_bool_field(gen, node)
@@ -1227,12 +1195,12 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
     if isinstance(e, SliceExpr):
         return 'char *'
     if isinstance(e, SubscriptExpr):
-        if known is not None and isinstance(e.obj, IdentExpr) and ((TypeLattice.is_dict(known.get(e.obj.name)) or TypeLattice.is_list(known.get(e.obj.name)))):
+        if known is not None and isinstance(e.obj, IdentExpr) and (known.get(e.obj.name) in ('MojoList *', 'MojoDict *')):
             # A dict whose stored VALUE type the caller knows (a struct
             # pointer, `dict_val_types[name]`) reads back as that type, not the
             # boxed int64 word the dict stores it as. Only a dict is consulted:
             # a list's element type is not in this registry.
-            if TypeLattice.is_dict(known.get(e.obj.name)) and dict_val_types is not None:
+            if known.get(e.obj.name) == 'MojoDict *' and dict_val_types is not None:
                 _vt = dict_val_types.get(e.obj.name)
                 if _vt is not None:
                     return _vt
@@ -1288,8 +1256,7 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
                                                   nested_generator_api=nested_generator_api,
                                                   outer_fn_name=outer_fn_name,
                                                   known=known)
-        return (_inner_ctype if _inner_ctype is not None
-            and not TypeLattice.is_cstr(_inner_ctype) else 'int64_t')
+        return _inner_ctype if _inner_ctype not in (None, 'char *') else 'int64_t'
     # `yield from cls.<generator>(...)` -- a @classmethod generator
     # delegating to a SIBLING generator method of the same class. Resolved
     # from the same `generator_method_api` the body-emission side reads
@@ -1356,15 +1323,15 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
                 return _mapi.get('value_ctype')
         et = (field_elem_types or {}).get(_mname)
         if et is not None:
-            return et if (TypeLattice.is_cstr(et) or TypeLattice.is_double(et)) else 'int64_t'
+            return et if et in ('char *', 'double') else 'int64_t'
     elif isinstance(call, MemberExpr) and isinstance(call.obj, IdentExpr) and (call.obj.name == 'self'):
         et = (field_elem_types or {}).get(call.member)
         if et is not None:
-            return et if (TypeLattice.is_cstr(et) or TypeLattice.is_double(et)) else 'int64_t'
+            return et if et in ('char *', 'double') else 'int64_t'
     elif isinstance(call, IdentExpr):
         et = (local_elem_types or {}).get(call.name)
         if et is not None:
-            return et if (TypeLattice.is_cstr(et) or TypeLattice.is_double(et)) else 'int64_t'
+            return et if et in ('char *', 'double') else 'int64_t'
         # `yield from <opaque word local>` — a local/param this unit holds as
         # a bare `int64_t` word: `items = iter(...)` passed into an escaped
         # nested generator, a tuple-unpacked element of an unknown-kind call
@@ -2642,7 +2609,7 @@ def _cpp_word_of_kind(ctype: str, expr: str) -> str:
     `mojo_box_from_str`, None as `mojo_box_none()`, and an int as itself. The
     single mapping both a tagged yield slot (`_cpp_tag_yield_sites`) and a
     tagged operand of `and`/`or` (`cpp_core._cpp_tagged_operand_word`) use."""
-    if TypeLattice.is_none_type(ctype):
+    if ctype == 'None':
         return "mojo_box_none()"
     if TypeLattice.is_double(ctype):
         return f"mojo_box_from_double((double)({expr}))"
@@ -2652,7 +2619,7 @@ def _cpp_word_of_kind(ctype: str, expr: str) -> str:
         # boxed by kind like the others: a raw pointer is only read as a
         # string when the runtime registered it (a C++ literal is not)
         return f"mojo_box_from_str((char *)({expr}))"
-    if TypeLattice.is_bytes(ctype):
+    if ctype == 'MojoBytes *':
         return f"(int64_t)(intptr_t)({expr})"
     return f"(int64_t)({expr})"
 

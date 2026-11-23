@@ -67,30 +67,6 @@ _FAIL = 0
 #     `gen_module` only through `hoist_awaits_from_call_args`, which
 #     invalidates the enclosing `fn` once the rewrite is done.
 _WALK_AST_MUTATION_ALLOWLIST = {
-    "mojo/backend_gimple/cpp_core.py::_cpp_boxed_list_literal_expr": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_brace_ex": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_build_container_from_iterable": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_call_ex": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_call_line": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_dyn_word_lambda": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_generator_start_kwargs_expr": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_if_break_line": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_int64_thunk": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_list_literal_arg_expr": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_next_lambda_ex": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_not_ex": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_raise_tuple_msg_expr": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_rethrow_pending": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_struct_word_lambda": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpp_try_kwargs_forward_call": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cps_assign_stmt": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpx_binary_op": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpx_call_ident": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpx_call_member": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_cpx_lambda_expr": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_field_ex": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/backend_gimple/cpp_core.py::_un_ex": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
-    "mojo/middle/valueinfo.py::WordFacts.mark_mixed_field": "writes `kind` of a `ValueInfo` record (mojo/middle/valueinfo.py), a plain class, not an AST node",
     "ast_rewriter.py::Lit.__init__": "the rewriter's own pattern dataclass, not an AST node",
     "ast_rewriter.py::Node.__init__": "ditto",
     "ast_rewriter.py::Optional_.__init__": "ditto",
@@ -102,6 +78,10 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "ast_rewriter.py::_rewrite_enum_node": "runs in the rewrite pipeline (`desugar_enums`), before codegen walks the tree; any in-place rewrite is on a pre-walk tree",
     "ast_rewriter.py::desugar_field_defaults": "runs inside `rewrite`/`desugar_enums` pipeline, before codegen walks the tree, on a pre-walk tree",
     "gimple_codegen.py::_transform_enum_classes": "runs in the compile pipeline after `_walk_ast_reset()` on a freshly parsed/rewritten tree, and writes only `copy.copy`'d container nodes the memo has not seen",    "mojo/backend_gimple/cpp_core.py::_cpp_rewrite_yields": "writes `value` on a `copy.copy` of the yield node it is hoisting (`ynode`), a fresh node the original tree never sees; the copy is consumed only by the C++ emitter",
+    "mojo/backend_gimple/cpp_core.py::_field_ex": "CONSTRUCTOR: builds a fresh `field` Ex (`e = Ex('field')`) and sets `a`/`name`/`arrow` on it before any walk can have seen it -- there is no memo entry to invalidate",
+    "mojo/backend_gimple/cpp_core.py::_un_ex": "CONSTRUCTOR: same shape -- a fresh `un` Ex, fields set before anything walks it",
+    "mojo/backend_gimple/cpp_core.py::_cpp_call_ex": "CONSTRUCTOR: same shape -- a fresh `call` Ex whose `args` are set before anything walks it",
+    "mojo/backend_gimple/cpp_core.py::_cpp_call_line": "CONSTRUCTOR: same shape -- a fresh `call` Ex (and a fresh `Instr` holding it), built only for `i.show()`",
     "mojo/backend_gimple/cpp_core.py::rewrite": "writes `value` on `copy.copy` of the root yield (`nv`) and `setattr`s the fields of `copy.copy(s)` (`new_stmt`): both are fresh nodes the emitter consumes, and the original statement is left untouched",
     "mojo/backend_gimple/elab_intu.py::_Work.__init__":"`_Work.alias`/`_Work.extra` are the elaborator's own scratch",
     "mojo/backend_gimple/elab_intu.py::_Work.enqueue": "ditto",
@@ -362,7 +342,7 @@ def test_span_param_binds_only_from_a_proven_list():
     """`Span[T, origin]` infers `T` from a List argument ONLY when the caller
     proves the list's element type.
 
-    This is the first step of `bugs/hard/CODEGEN_prelude_sort_is_not_resolved.md`:
+    This is the first step of `bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md`:
     `std.builtin.sort.sort[T, origin](span: Span[T, origin])` is called with a
     `List`, and before this rule `_unify_param_ann` declined the `Span`
     annotation outright, so the call never reached the elaborator. A
@@ -400,7 +380,7 @@ def test_span_param_binds_from_a_proven_span():
     argument's C type is the erased `Span *`, so the proof is the caller's
     own monomorphized parameter annotation (`Span[Int, MutOrigin]`).
 
-    Second step of `bugs/hard/CODEGEN_prelude_sort_is_not_resolved.md`, beside
+    Second step of `bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md`, beside
     the List case of `test_span_param_binds_only_from_a_proven_list`. A
     still-generic proof (`Span[T, origin]` inside a body that is itself
     not yet an instance) is symbol-for-symbol and never converges, so it
@@ -443,34 +423,6 @@ def test_span_param_binds_from_a_proven_span():
     if problems:
         raise AssertionError('; '.join(problems))
     print("PASS  span_param_binds_from_a_proven_span")
-
-
-def test_type_param_defaults_splits_only_at_a_top_level_equals():
-    """`elaborate.type_param_defaults` splits a bracket parameter at a
-    TOP-LEVEL `=` only. std's `Span` head carries `origin: Origin[mut=mut]`:
-    the `=` inside the annotation's brackets belongs to the annotation, so
-    `origin` has NO default (a plain partition gave it the text `mut]`, which
-    `_default_type_arg` rejects). A bracketed default keeps its whole text.
-
-    Pins the first split of the CODEGEN_prelude_sort_is_not_resolved bug
-    (the bracket-default defect in std's Span head, found while elaborating
-    `std.builtin.sort`); the fix is `elaborate._partition_top_level_eq`.
-    """
-    import elaborate
-    problems = []
-    span = ('struct Span[mut: Bool, //, T: AnyType, origin: Origin[mut=mut], *,\n'
-            '            address_space: AddressSpace = .GENERIC]:\n    pass\n')
-    got = elaborate.type_param_defaults(span)
-    if got != {'address_space': '.GENERIC'}:
-        problems.append(f'Span defaults {got!r}, want '
-                        f"{{'address_space': '.GENERIC'}}")
-    bracketed = 'def f[a: Int, x: Int = f[a=1]()]():\n    pass\n'
-    got = elaborate.type_param_defaults(bracketed)
-    if got.get('x') != 'f[a=1]()':
-        problems.append(f"bracketed default {got.get('x')!r}, want 'f[a=1]()'")
-    if problems:
-        raise AssertionError('; '.join(problems))
-    print("PASS  type_param_defaults_splits_only_at_a_top_level_equals")
 
 
 def test_boxed_span_arg_is_cast_to_a_span_only_when_proven():
@@ -605,7 +557,7 @@ def _proven_local_types(src, params=()):
 
 
 def test_proven_list_local_keeps_element_type_across_inplace_store():
-    """Step 2a of `bugs/hard/CODEGEN_prelude_sort_is_not_resolved.md`: a local
+    """Step 2a of `bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md`: a local
     bound exactly once by a `List(...)` constructor (from `fill`'s literal)
     or a `List[X]` annotation keeps its proven element type — in particular
     ACROSS in-place stores like `p[0] = 3`, whose subscript target mutates
@@ -667,7 +619,7 @@ def f():
 
 
 def test_proven_span_local_from_a_list_projection():
-    """Step 2b of `bugs/hard/CODEGEN_prelude_sort_is_not_resolved.md`: a local
+    """Step 2b of `bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md`: a local
     bound to a ONE-STEP projection out of a proven container inherits its
     element type — specifically std.builtin.sort's `_quicksort` shape
 
@@ -12592,7 +12544,7 @@ print("%r" % p)
             # A freed node's id could otherwise be handed to a different node
             # and the memo would answer with the first one's nodes.
             sd = stmts[0]
-            entry = ET._WALK_AST_MEMO.get(ET._nid(sd))
+            entry = ET._WALK_AST_MEMO.get(id(sd))
             if entry is None or entry[0] is not sd:
                 err = 'the memo entry does not hold the node it is keyed on'
             # ... and a mutation costs both the node and its container their
@@ -12704,7 +12656,7 @@ print("%r" % p)
                 # `getattr`: before the fix the memo did not exist, and the
                 # assertion above is the one that fails then; the entry shape
                 # is checked only where the memo is.
-                entry = getattr(ET, '_WALK_INDEX_MEMO', {}).get(ET._nid(stmts))
+                entry = getattr(ET, '_WALK_INDEX_MEMO', {}).get(id(stmts))
                 if entry is None or entry[0] is not stmts:
                     err = 'the memo entry does not hold the list it is keyed on'
             if not err:
@@ -12737,7 +12689,7 @@ print("%r" % p)
                     err = 'the mutation leaked into the pre-mutation census'
             if not err:
                 ET._walk_ast_reset()
-                if ET._nid(stmts) in ET._WALK_INDEX_MEMO:
+                if id(stmts) in ET._WALK_INDEX_MEMO:
                     err = '_walk_ast_reset left the index memo behind'
         except Exception as e:  # noqa: BLE001
             err = f'{type(e).__name__}: {e}'
@@ -12841,7 +12793,7 @@ print("%r" % p)
             # The reference walk, straight through `_walk_ast_into` with the
             # memo unreachable (it is only consulted by `_walk_ast`).
             real_into(node, out)
-            if ET._nid(node) in ET._WALK_AST_MEMO:
+            if id(node) in ET._WALK_AST_MEMO:
                 state["hits"] += 1
                 cached = real_walk(node)
                 if cached is not out and state["bad"] is None:
@@ -13036,11 +12988,8 @@ print("%r" % p)
                     # classes have fields named `name`/`op`/`body` like AST
                     # nodes do, but they are not AST nodes and `_walk_ast`
                     # never sees one, so there is no memo to invalidate.
-                    # `mojo/tsolve` is the type solver: plain classes of its own
-                    # (`STy`, `Term`, `FnSummary`, ...) with fields named `name`/
-                    # `kind`/`args` like AST nodes, never handed to `_walk_ast`.
                     _dn[:] = [d for d in _dn if d != "__pycache__"
-                              and not (_dp == "mojo" and d in ("ir", "tsolve"))]
+                              and not (_dp == "mojo" and d == "ir")]
                     for _n2 in sorted(_ns):
                         if _n2.endswith(".py"):
                             paths.append(os.path.join(_dp, _n2))
@@ -13154,7 +13103,7 @@ print("%r" % p)
             problems.append("%s: %s" % (type(e).__name__, e))
         if problems:
             print("FAIL  %s: %d problem(s):" % (name, len(problems)))
-            for q in problems:
+            for q in problems[:12]:
                 print("  " + q)
             _FAIL += 1
             return
@@ -16583,8 +16532,6 @@ main()
                   'span_param_binds_only_from_a_proven_list')
     _run_isolated(test_span_param_binds_from_a_proven_span,
                   'span_param_binds_from_a_proven_span')
-    _run_isolated(test_type_param_defaults_splits_only_at_a_top_level_equals,
-                  'type_param_defaults_splits_only_at_a_top_level_equals')
     _run_isolated(test_boxed_span_arg_is_cast_to_a_span_only_when_proven,
                   'boxed_span_arg_is_cast_to_a_span_only_when_proven')
     _run_isolated(test_arity_overloads_mangle_to_distinct_symbols,

@@ -1,5 +1,3 @@
-SPLIT: FORMAL_eval_eq_mojo_bridge_red_on_head-part1, FORMAL_eval_eq_mojo_bridge_red_on_head-part2
-
 # FORMAL: `test_formal_eval_eq_mojo_bridge.py` is red on head (5 failures)
 
 `test_formal_eval_eq_mojo_bridge.py` is not registered in `tools/suite.py`, so

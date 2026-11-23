@@ -12,13 +12,13 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 
-# Only a mid+easy slot (the shape haiku serves since the iceman cutover): mid and easy, never hard.
-MID_ONLY = {"mode": "build", "slots": [{"name": "mid-free", "model": "opencode-go/mid-free-model", "count": 20,
+# Only iceman, as tools/pool.json has it: mid and easy, never hard.
+ICEMAN_ONLY = {"mode": "build", "slots": [{"name": "iceman", "model": "opencode-go/iceman-contributor-free", "count": 20,
                           "class": "mid", "also": ["easy"]}]}
 
 
 def item(cls):
-    return {"name": "bug-mid-x", "claims": ["bug:CODEGEN_x"], "cls": cls, "pool": "mid-free"}
+    return {"name": "bug-mid-x", "claims": ["bug:CODEGEN_x"], "cls": cls, "pool": "iceman"}
 
 
 class ClassFollowsTheFile(unittest.TestCase):
@@ -27,7 +27,7 @@ class ClassFollowsTheFile(unittest.TestCase):
         for d in ("bugs/mid", "bugs/hard"):
             os.makedirs(os.path.join(self.root, d))
         self.patches = [mock.patch.object(C, "MAIN", self.root),
-                        mock.patch.object(C, "load_pool", return_value=MID_ONLY)]
+                        mock.patch.object(C, "load_pool", return_value=ICEMAN_ONLY)]
         for p in self.patches:
             p.start()
 
@@ -48,19 +48,19 @@ class ClassFollowsTheFile(unittest.TestCase):
         os.rename(mid, os.path.join(self.root, "bugs/hard/CODEGEN_x.md"))   # the reclass
         self.assertEqual(C.doc_class_now(item("mid")), "hard")
 
-    def test_stale_mid_queue_entry_no_longer_lands_on_mid_free(self):
-        # The bug: the queue entry still says mid, and mid-free takes mid. This is what ran hard docs.
+    def test_stale_mid_queue_entry_no_longer_lands_on_iceman(self):
+        # The bug: the queue entry still says mid, and iceman takes mid. This is what ran hard docs.
         os.rename(self._doc("mid"), os.path.join(self.root, "bugs/hard/CODEGEN_x.md"))
         stale = item("mid")
-        self.assertEqual(C.pick_slot(stale, {})["name"], "mid-free")       # the bug: the stored class picks mid-free
+        self.assertEqual(C.pick_slot(stale, {})["name"], "iceman")       # the bug: the stored class picks iceman
         refreshed = dict(stale, cls=C.doc_class_now(stale))
         self.assertIsNone(C.pick_slot(refreshed, {}),
-                          "a hard doc must wait for a hard slot; mid-free has none, so the task must not start")
+                          "a hard doc must wait for a hard slot; iceman has none, so the task must not start")
 
-    def test_mid_doc_still_runs_on_mid_free(self):
+    def test_mid_doc_still_runs_on_iceman(self):
         self._doc("mid")
         it = item("mid")
-        self.assertEqual(C.pick_slot(dict(it, cls=C.doc_class_now(it)), {})["name"], "mid-free")
+        self.assertEqual(C.pick_slot(dict(it, cls=C.doc_class_now(it)), {})["name"], "iceman")
 
     def test_easy_doc_is_easy(self):
         path = os.path.join(self.root, "bugs", "CODEGEN_x.md")
@@ -87,7 +87,7 @@ class RefillPersistsItsDecisions(unittest.TestCase):
             f.write("# doc\n")
         self.qd = os.path.join(self.root, "queue")
         os.makedirs(self.qd)
-        self.item = {"name": "bug-mid-x", "claims": ["bug:CODEGEN_x"], "cls": "mid", "pool": "mid-free",
+        self.item = {"name": "bug-mid-x", "claims": ["bug:CODEGEN_x"], "cls": "mid", "pool": "iceman",
                      "base": "work/no-such-branch", "task": "t", "files": [], "needs": [], "added": 1.0,
                      "model": None}
         with open(os.path.join(self.qd, "bug-mid-x.json"), "w") as f:
@@ -96,7 +96,7 @@ class RefillPersistsItsDecisions(unittest.TestCase):
         self.patches = [
             mock.patch.object(C, "MAIN", self.root),
             mock.patch.object(C, "qdir", return_value=self.qd),
-            mock.patch.object(C, "load_pool", return_value=MID_ONLY),
+            mock.patch.object(C, "load_pool", return_value=ICEMAN_ONLY),
             mock.patch.object(C, "load", return_value={}),
             mock.patch.object(C, "live_names", return_value=set()),
             mock.patch.object(C, "dead_models", return_value={}),
@@ -131,12 +131,12 @@ class RefillPersistsItsDecisions(unittest.TestCase):
         self.assertNotIn("is now", second)
         self.assertNotIn("no longer exists", second)
 
-    def test_hard_doc_waits_on_an_mid_free_only_pool(self):
+    def test_hard_doc_waits_on_an_iceman_only_pool(self):
         self._refill()
-        self.assertEqual(self.spawned, [], "mid-free has no hard slot: the hard doc must not start")
+        self.assertEqual(self.spawned, [], "iceman has no hard slot: the hard doc must not start")
 
     def test_hard_slot_starts_it_from_master(self):
-        pool = {"mode": "build", "slots": MID_ONLY["slots"] + [{"name": "opus", "model": "claude-opus-5-5", "count": 1,
+        pool = {"mode": "build", "slots": ICEMAN_ONLY["slots"] + [{"name": "opus", "model": "claude-opus-5-5", "count": 1,
                                                   "class": "hard"}]}
         with mock.patch.object(C, "load_pool", return_value=pool):
             self._refill()

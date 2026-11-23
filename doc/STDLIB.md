@@ -1,4 +1,4 @@
-# Stdlib Compilation Status
+# Stdlib Transpilation Status
 
 This document describes the current state of compiling the upstream Mojo
 standard library through the compiler. It covers what is tested, what works,
@@ -59,7 +59,7 @@ monkeypatch for debugging).
 No currently-known failing file. (An earlier version of this document
 tracked a single failure, `test/format/test_tstring.mojo` — nested template
 strings with alternating quote characters, which broke the old regex-based
-single-pass string scanner. That file now compiles and passes the GIMPLE
+single-pass string scanner. That file now transpiles and passes the GIMPLE
 syntax check cleanly; re-verified directly via `compile_module_to_c` as part
 of writing this update, not just inferred from the aggregate count.)
 

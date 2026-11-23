@@ -698,7 +698,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     for _cpn in _pct_env:
         _cpp = _pct_env[_cpn]
         if isinstance(_cpp, tuple) and len(_cpp) >= 2 \
-                and gimple_ctypes.TypeLattice.is_dict(_cpp[0]):
+                and _cpp[0] == 'MojoDict *':
             env.setdefault(_cpn, ('dict', 'p'))
     # Lambda-bound locals: `f = lambda: <body>` makes `f()` answer the body's
     # kind, so `r = f()` / `yield f()` are typed the way `r = h()` for a named
@@ -2110,7 +2110,7 @@ NONE_YIELD_CPP_REFUSAL = ("a None yield (bare `yield` / `yield None`) has no val
 
 def _is_none_slot(e) -> bool:
     """A tuple element that is the literal None (the parser spells it as an IdentExpr)."""
-    return isinstance(e, N.NoneLiteral) or (isinstance(e, N.IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(e.name))
+    return isinstance(e, N.NoneLiteral) or (isinstance(e, N.IdentExpr) and e.name == 'None')
 
 
 def _is_none_yield(y) -> bool:
@@ -2122,7 +2122,7 @@ def _is_none_yield(y) -> bool:
     # so the NoneLiteral arm is for any producer that builds the literal node.
     return isinstance(y, N.YieldExpr) and (
         y.value is None or isinstance(y.value, N.NoneLiteral)
-        or (isinstance(y.value, N.IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(y.value.name)))
+        or (isinstance(y.value, N.IdentExpr) and y.value.name == 'None'))
 
 
 def _generator_value_kind(fn: N.FunctionDef,
@@ -3778,7 +3778,7 @@ def _rewrite_native_future_refs(stmts: list) -> list:
             if not (isinstance(s, N.StructDef) and s.name in _NATIVE_FUTURE_CLASSES)]
 
 
-def _resolve_call_args(name: str, node: gimple_ctypes.CallExpr, cvar: str) -> list:
+def _resolve_call_args(name: str, node, cvar: str) -> list:
     """Positional args, in order, for a call to `name(...)` -- resolving
     any keyword arguments via _PARAM_NAMES when known. Falls back to
     positional-only (kwargs dropped) if `name` wasn't seen -- the emitted
@@ -5252,7 +5252,7 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env, extra_containers=None
         _ecpn = _local_param_name(_cm_as_str(_ecn))
         _epair = extra_containers[_ecn]
         _ect = _cm_as_str(_epair[0])
-        if (gimple_ctypes.TypeLattice.is_set(_ect) or gimple_ctypes.TypeLattice.is_dict(_ect) or gimple_ctypes.TypeLattice.is_list(_ect)):
+        if _ect in ('MojoList *', 'MojoDict *', 'MojoSet *'):
             containers[_ecpn] = _ect
         if _epair[1] is not None:
             dict_vals[_ecpn] = _cm_as_str(_epair[1])
@@ -5695,7 +5695,7 @@ def _box_tag(e, env) -> int:
         return 2
     if isinstance(e, N.NoneLiteral):
         return 4
-    if isinstance(e, N.IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(e.name):
+    if isinstance(e, N.IdentExpr) and e.name == 'None':
         return 4
     if isinstance(e, (N.TupleExpr, N.ListExpr, N.DictExpr, N.SetExpr)):
         return 3
@@ -8489,7 +8489,7 @@ def _append_box_args(call, cap_map: dict) -> None:
         _append_box_arg(call, _hidden_box_name(n))
 
 
-def _append_box_arg(call: gimple_ctypes.CallExpr, argname: str) -> None:
+def _append_box_arg(call, argname: str) -> None:
     """Append `argname` as a trailing IdentExpr argument, unless the call
     already carries it. Two nested `async def`s capturing the same
     enclosing local both thread the SAME box handle into a shared sibling

@@ -99,23 +99,11 @@ ROUND_2026_11_21B = [
     ('_gmp_propagate_generator_returns', 'self, _ret_changed: bool, _ret_defs: list'),
 ]
 
-# 2026-11-23: the two blocks `4e2efdfee` added to `gen_module_impl`, moved out
-# whole with `--phase`. Each reads only `self` and/or `parts` and binds nothing.
-ROUND_2026_11_23 = [
-    ('_gmp_emit_str_pool_forward_decl', 'self, parts: list[str]'),
-    ('_gmp_publish_definer_pts', 'self'),
-]
-
-ROUNDS = [ROUND_2026_11_21, ROUND_2026_11_21B, ROUND_2026_11_23]
+ROUNDS = [ROUND_2026_11_21, ROUND_2026_11_21B]
 
 # The parent's own line span; it may only shrink as passes move out.  A pass
-# written inline here instead of extracted makes this fail.  Measured
-# 2026-11-23 (8674 at `8eba91535`).  The +5 that remains is not an inlined
-# pass: the two `--phase` moves left one call line each, `2adea3531` wrapped
-# its `_gmh_record_param_box_names(..., stmts)` call over two lines in each of
-# this function's two call sites (+2), and the rest is call-site growth from
-# `4e2efdfee` and stage 5c (`ef2df0065`, `84dc1ba8e`, merged in `8f244354d`).
-PARENT_LINES = 8679
+# written inline here instead of extracted makes this fail.
+PARENT_LINES = 8674
 
 
 def main() -> int:

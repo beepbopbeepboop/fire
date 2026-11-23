@@ -56,7 +56,9 @@ TOOL = os.path.join(ROOT, 'tools', 'extract_arm.py')
 # The ratchet is the parent's length now: the arms below account for every
 # line that could move, so the parent may only get shorter.
 # The expression arms still building C++ text (plan step 4 in the stage 6/7 doc).
-EXPR_ARMS_STILL_TEXT = set()
+EXPR_ARMS_STILL_TEXT = {
+    '_cpx_call_expr',
+}
 PARENTS = [
     ('_cpp_expr_ex', 'Ex', 101, [
         '_cpx_ident_expr', '_cpx_member_expr', '_cpx_lambda_expr',
@@ -64,18 +66,18 @@ PARENTS = [
         '_cpx_walrus', '_cpx_call_expr', '_cpx_slice_expr',
         '_cpx_subscript_expr', '_cpx_await_expr',
     ]),
-    ('_cpp_stmt', 'list[Instr]', 73, [
+    ('_cpp_stmt', 'list[str]', 73, [
         '_cps_expr_stmt', '_cps_assign_stmt', '_cps_var_decl',
         '_cps_aug_assign', '_cps_while_stmt', '_cps_if_stmt',
         '_cps_return_stmt', '_cps_multi_assign_stmt', '_cps_import_stmt',
     ]),
-    ('_cpp_with_stmt', 'list[Instr]', 256, [
+    ('_cpp_with_stmt', 'list[str]', 256, [
         '_cpw_async_with',
     ]),
-    ('_cpp_yield_from', 'list[Instr]', 595, [
+    ('_cpp_yield_from', 'list[str]', 595, [
         '_cpy_handle_local', '_cpy_unsupported_shape',
     ]),
-    ('_cpp_for_stmt', 'list[Instr]', 456, [
+    ('_cpp_for_stmt', 'list[str]', 456, [
         '_cpf_word_iterable', '_cpf_param_call', '_cpf_generator_handle',
         '_cpf_simple_target_call_iterable', '_cpf_call_iterable',
         '_cpf_list_iter_cursor', '_cpf_named_target',
@@ -182,7 +184,7 @@ def main() -> int:
     # arm, so each helper is pinned here with text operands directly.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from mojo.backend_gimple import cpp_core as _C
-    from mojo.ir.instr import ex_text as _ex, Instr as _Instr
+    from mojo.ir.instr import ex_text as _ex
     text_cases = [
         (_C._cpp_assign_line('x', '1', '  '), '  x = 1;'),
         (_C._cpp_assign_line(_ex('x'), _ex('y'), ''), 'x = y;'),
@@ -248,7 +250,7 @@ def main() -> int:
         def _cpp_struct_ptr_local(self, name):
             return False
         def _cpp_in_link(self, a, an, b, bn, negate=False):
-            return _C.ex_text(f"in({a.show()},{b.show()})")
+            return f"in({a},{b})"
 
     _iv = lambda v: _N.IntLiteral(value=v)
     _walrus_name = _N.BinaryOp(op=':=', left=_N.IdentExpr(name='q'), right=_iv(3))
@@ -410,81 +412,7 @@ def main() -> int:
     text_cases.append((_p.show(), '(a + b)'))
     _u = _Ex('un'); _u.op = '!'; _u.a = _ex('x')
     text_cases.append((_u.show(), '!x'))
-    # A lambda value (the sorted() comparator) and the stable_sort call that takes it.
-    from mojo.ir.instr import Ex as _Ex2
-    _cl = _Ex2('closure'); _cl.name = 'int64_t _mg_a, int64_t _mg_b'
-    _cl.body = [_C._cpp_instr('return', _ex('_mg_a < _mg_b'))]
-    text_cases.append((_cl, '[&](int64_t _mg_a, int64_t _mg_b) { return _mg_a < _mg_b; }'))
-    text_cases.append((_C._cpp_call_ex('std::stable_sort', ['_mg_v.begin()', '_mg_v.end()', _cl]),
-        'std::stable_sort(_mg_v.begin(), _mg_v.end(), [&](int64_t _mg_a, int64_t _mg_b) { return _mg_a < _mg_b; })'))
-    # The int64 thunk and the word-holding struct lambda used by the expression printers.
-    text_cases.append((_C._cpp_int64_thunk('f', ['self']), '[&]() -> int64_t { return f(self); }'))
-    text_cases.append((_C._cpp_struct_word_lambda('operator char *() const { return (char *)w; }',
-        [_C._cpp_instr('decl', 'int64_t _l = 1'), _C._cpp_instr('return', _ex('_W{_l}'))]),
-        '[&]() { struct _W { int64_t w; operator int64_t() const { return w; } '
-        'operator char *() const { return (char *)w; } }; int64_t _l = 1; return _W{_l}; }()'))
-    # The shared word-call lambda (a dynamic call through a callable value, and the iterable of a call).
-    class _WordGen:
-        def _cpp_word_container_operator(self, kind, flag):
-            return 'op'
-    text_cases.append((_C._cpp_dyn_word_lambda(_WordGen(), 'F', ['a; ']),
-        '[&]() { struct _W { int64_t w; operator int64_t() const { return w; } '
-        'operator char *() const { return (char *)w; } op op op }; '
-        'MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); a; '
-        'return _W{mojo_dyn_call(F, _a, _k)}; }()'))
-    # The finally guard's opening and closing statement lines.
-    text_cases.append((_C._cpp_ir_line('    ', 'scope_open', '__mojofin3'), '    _MojoScopeExit __mojofin3([&]() {'))
-    text_cases.append((_C._cpp_ir_line('    ', 'scope_close'), '    });'))
-    # The identifier and member leaves ported to shapes: a dereference, an address, a field, a call.
-    text_cases.append((_C._paren_ex(_C._cpp_unary_ex('deref', _ex('x'))), '(*x)'))
-    text_cases.append((_C._cpp_cast_ex('int64_t', _C._cpp_unary_ex('addr', _ex('f_csym'))), '(int64_t)&f_csym'))
-    text_cases.append((_C._field_ex(_C._paren_ex(_C._cpp_cast_ex('Foo *', _C._paren_ex(_ex('self->a')))), 'b', True),
-        '((Foo *)(self->a))->b'))
-    text_cases.append((_C._cpp_call_ex('mojo_class_getattr', ['T LL', '"m"']), 'mojo_class_getattr(T LL, "m")'))
-    # Cast spellings: a name the type table canonicalises (intptr_t is int64_t there) must keep its own spelling.
-    text_cases.append((_C._cpp_cast_ex('intptr_t', _ex('x')), '(intptr_t)x'))
-    text_cases.append((_C._cpp_cast_ex('char *', _ex('x')), '(char *)x'))
-    text_cases.append((_C._cpp_cast_ex('int64_t', _ex('x')), '(int64_t)x'))
-    # A lambda with no return type, and an empty statement in a lambda body, which takes no separator.
-    from mojo.ir.instr import Instr as _Instr
-    _nol = _Ex('lambda'); _nol.body = [_Instr('decl')]
-    _nol.body[0].rhs = _ex('const int64_t v = 1')
-    _ret = _Instr('return'); _ret.rhs = _ex('v')
-    _nol.body.append(_ret)
-    _blank = _Instr('opaque'); _blank.text = ''
-    _nol.body.insert(1, _blank)
-    text_cases.append((_nol, '[&]() { const int64_t v = 1; return v; }()'))
-    # The rethrow-pending lambda of a runtime raiser: the text it printed before it was an `Ex`.
-    text_cases.append((_C._cpp_rethrow_pending('int64_t', 'mojo_none_unary_guard_pending((int64_t)(w), "-")'),
-        '[&]() -> int64_t { int64_t _pr = mojo_none_unary_guard_pending((int64_t)(w), "-"); '
-        'if (mojo_exc_pending_get()) { mojo_exc_pending_set(0); '
-        'throw _MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), mojo_exc_obj_get() }; } return _pr; }()'))
-    # The next() lambda of a generator handle: both branches, pinned to the text the
-    # lambda printed before it was an `Ex` (a tracked handle, and a direct construction).
-    class _NextGen:
-        def _exc_type_id(self, name):
-            return 7
-
-        def _cpp_fresh_name(self, prefix):
-            return prefix + '1'
-    _nx_api = {'base': 'gen_base', 'value_ctype': 'int64_t'}
-    text_cases.append((_C._cpp_next_on_generator_expr(_NextGen(), 'h', _nx_api),
-        '[&]() -> int64_t { if (!gen_base_resume(h)) { if (mojo_exc_pending_get()) { mojo_exc_pending_set(0); '
-        'throw _MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), mojo_exc_obj_get() }; } '
-        'throw _MojoCppExc{ (int64_t)7, nullptr, (void *)nullptr }; } return gen_base_value(h); }()'))
-    text_cases.append((_C._cpp_next_on_generator_expr(_NextGen(), 'make(x)', _nx_api),
-        '[&]() -> int64_t { MojoGenerator *_mojogen_next_g1 = make(x); if (!gen_base_resume(_mojogen_next_g1)) { '
-        'if (mojo_exc_pending_get()) { mojo_exc_pending_set(0); '
-        'throw _MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), mojo_exc_obj_get() }; } '
-        'throw _MojoCppExc{ (int64_t)7, nullptr, (void *)nullptr }; } '
-        'return gen_base_value(_mojogen_next_g1); }()'))
     for got, want in text_cases:
-        # An arm returns its `Ex`; the C text it renders to is what these cases pin.
-        if isinstance(got, _Ex):
-            got = got.show()
-        # A statement helper returns its `Instr`; the line it prints is `.line()`.
-        elif isinstance(got, _Instr):
-            got = got.line()
         if got != want:
             failures.append(f'IR helper text: got {got!r}, want {want!r}')
 

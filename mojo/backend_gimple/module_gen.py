@@ -418,7 +418,7 @@ def _gmi_apply_call_site_param_evidence(gen, stmts: list):
             # which is `test_gimple.py`'s
             # `a_forwarded_string_argument_keeps_its_type`. So the veto is on
             # the member's shape, not on how many members there are.
-            if not (gimple_ctypes.TypeLattice.is_bytes(call_type) or gimple_ctypes.TypeLattice.is_cstr(call_type) or gimple_ctypes.TypeLattice.is_double(call_type)):
+            if call_type not in ('char *', 'double', 'MojoBytes *'):
                 continue
             ipt.setdefault(fname, {})[pname] = call_type
             continue
@@ -546,7 +546,7 @@ def _gmi_closure_call_site_param_evidence(gen, stmts: list) -> None:
                 cts = _as_str(seen[pname]).split('\x1f')
                 if len(cts) != 1 or pname in ann:
                     continue
-                if not (gimple_ctypes.TypeLattice.is_cstr(_as_str(cts[0])) or gimple_ctypes.TypeLattice.is_double(_as_str(cts[0]))):
+                if _as_str(cts[0]) not in ('char *', 'double'):
                     continue
                 lifted = closure_lifted_name(outer, iname)
                 gen._closure_call_site_types.setdefault(lifted, {})[pname] = _as_str(cts[0])
@@ -883,7 +883,7 @@ def _list_literal_slot_kinds(gen, node, param_kinds=None) -> list:
             return []
         if (isinstance(_el, gimple_ctypes.NoneLiteral) or (
                 isinstance(_el, gimple_ctypes.IdentExpr)
-                and gimple_ctypes.TypeLattice.is_none_type(_el.name))):
+                and _el.name == 'None')):
             out.append('int')
             continue
         if isinstance(_el, gimple_ctypes.IdentExpr) and param_kinds:
@@ -962,7 +962,7 @@ wrong-static-answer failure the whole table exists to avoid.
                 return False
             if (isinstance(_el, gimple_ctypes.NoneLiteral) or (
                     isinstance(_el, gimple_ctypes.IdentExpr)
-                    and gimple_ctypes.TypeLattice.is_none_type(_el.name))):
+                    and _el.name == 'None')):
                 _kinds.add('n')
                 _saw_typed = True
                 continue
@@ -1379,7 +1379,7 @@ def _homogeneous_tuple_ann_elem(self, _ret_ann):
 
 
 
-def _mark_presence_field(sdef, fname, stored_without_bit):
+def _mark_presence_field(sdef, fname):
     """Record the compiler-MINTED field `fname` of `sdef` as presence-tracked
     (see StructDef.presence_fields), unless `sdef`'s own `__init__` assigns
     it: a constructor-assigned field is part of every instance by definition,
@@ -1394,12 +1394,6 @@ def _mark_presence_field(sdef, fname, stored_without_bit):
     if sdef.presence_fields is None:
         sdef.presence_fields = []
     if fname in sdef.presence_fields:
-        return
-    # A store of this field was already emitted with no presence bit (its
-    # module was compiled before this struct's phantom fields were found, which
-    # an import cycle makes ordinary): minting now would guard every later read
-    # on a bit that store never sets (`presence_set_emit`).
-    if (_as_str(sdef.name) + '\x1f' + fname) in stored_without_bit:
         return
     for _m in sdef.methods:
         if _m.name != '__init__':
@@ -2666,7 +2660,7 @@ def _emit_reflection_dispatch(self, parts):
             if fname in bool_fields:
                 val_expr = f'({fref} ? "True" : "False")'
                 owned = 'F'
-            elif fname in boxed and (gimple_ctypes.TypeLattice.is_word(ftype) or gimple_ctypes.TypeLattice.is_c_int(ftype) or gimple_ctypes.TypeLattice.is_i8(ftype) or gimple_ctypes.TypeLattice.is_i16(ftype) or gimple_ctypes.TypeLattice.is_i32(ftype) or gimple_ctypes.TypeLattice.is_u8(ftype) or gimple_ctypes.TypeLattice.is_u16(ftype) or gimple_ctypes.TypeLattice.is_u32(ftype) or gimple_ctypes.TypeLattice.is_uword(ftype)):
+            elif fname in boxed and gimple_ctypes.TypeLattice.is_int(ftype):
                 val_expr = f'_mojo_generic_elem_repr((int64_t){fref})'
                 owned = 'T'
             elif gimple_ctypes.TypeLattice.is_cstr(ftype):
@@ -2675,7 +2669,7 @@ def _emit_reflection_dispatch(self, parts):
             elif gimple_ctypes.TypeLattice.is_bool(ftype):
                 val_expr = f'({fref} ? "True" : "False")'
                 owned = 'F'
-            elif (gimple_ctypes.TypeLattice.is_double(ftype) or gimple_ctypes.TypeLattice.is_c_float(ftype)):
+            elif ftype in ('double', 'float'):
                 val_expr = f'mojo_repr_float((double){fref})'
                 owned = 'T'
             elif gimple_ctypes.TypeLattice.is_list(ftype):
@@ -2692,14 +2686,14 @@ def _emit_reflection_dispatch(self, parts):
                     # `mojo_repr_list_*` helper, so the dump owns this field's
                     # string only when the pointer is there to make it.
                     owned = 'I' + fref
-            elif gimple_ctypes.TypeLattice.is_dict(ftype):
+            elif ftype == 'MojoDict *':
                 if fname in nullable_containers:
                     val_expr = f'({fref} ? _mojo_repr_dict({fref}) : _mojo_repr_none())'
                     owned = 'T'
                 else:
                     val_expr = f'_mojo_repr_dict({fref})'
                     owned = 'I' + fref
-            elif (gimple_ctypes.TypeLattice.is_word(ftype) or gimple_ctypes.TypeLattice.is_c_int(ftype) or gimple_ctypes.TypeLattice.is_i8(ftype) or gimple_ctypes.TypeLattice.is_i16(ftype) or gimple_ctypes.TypeLattice.is_i32(ftype) or gimple_ctypes.TypeLattice.is_u8(ftype) or gimple_ctypes.TypeLattice.is_u16(ftype) or gimple_ctypes.TypeLattice.is_u32(ftype) or gimple_ctypes.TypeLattice.is_uword(ftype)):
+            elif gimple_ctypes.TypeLattice.is_int(ftype):
                 val_expr = f'mojo_repr_int((int64_t){fref})'
                 owned = 'T'
             elif gimple_ctypes.TypeLattice.ends_in_star(ftype):
@@ -3458,7 +3452,7 @@ def _class_field_decl(field):
         return field.name, field.value
     if isinstance(field, VarDecl) and field.name and field.value is None:
         _ft = _mojo_type(getattr(field, 'type_ann', None))
-        if (gimple_ctypes.TypeLattice.is_set(_ft) or gimple_ctypes.TypeLattice.is_dict(_ft) or gimple_ctypes.TypeLattice.is_list(_ft)):
+        if _ft in ('MojoList *', 'MojoDict *', 'MojoSet *'):
             return field.name, None
     return None
 
@@ -3579,7 +3573,7 @@ def _module_class_attr_global_ctype(gen, value):
     # A module `Int` global is declared `int` (the frontend's spelling); the
     # class attribute it seeds is the 64-bit `int64_t` every literal `Int`
     # class attribute uses, and the store widens it.
-    if gimple_ctypes.TypeLattice.is_c_int(_t):
+    if _t == 'int':
         return 'int64_t'
     if _t in _MODULE_CLASS_ATTR_GLOBAL_CTYPES:
         return _t
@@ -4176,11 +4170,11 @@ def _asdict_scalar_none_annot(ann) -> bool:
     _nones = 0
     _rest = ''
     for _p in _parts:
-        if gimple_ctypes.TypeLattice.is_none_type(_p):
+        if _p == 'None':
             _nones += 1
         elif _p:
             _rest = _p
-    return _nones == 1 and (gimple_ctypes.TypeLattice.is_c_int(_rest) or gimple_ctypes.TypeLattice.is_c_float(_rest))
+    return _nones == 1 and _rest in ('int', 'float')
 
 
 def _cattr_value_is_cell(gen, cls_name: str, v) -> bool:
@@ -4834,7 +4828,7 @@ def _gmi_apply_class_ref_types(self) -> None:
         if _scope is not None and _typed is None and not _direct:
             _drop.append(_gname)
             continue
-        if (gimple_ctypes.TypeLattice.is_no_type(_ctype) or gimple_ctypes.TypeLattice.is_void(_ctype) or gimple_ctypes.TypeLattice.is_none_type(_ctype) or gimple_ctypes.TypeLattice.is_unsolved(_ctype)):
+        if _ctype in ('', 'None', 'void', 'unknown'):
             _ctype = 'int64_t'
         _cells[_gname] = _ctype
         self._global_var_types[_gname] = _ctype
@@ -5265,7 +5259,7 @@ def _literal_arg_kind(a):
     """
     if isinstance(a, gimple_ctypes.NoneLiteral):
         return 'none'
-    if isinstance(a, gimple_ctypes.IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(_as_str(a.name)):
+    if isinstance(a, gimple_ctypes.IdentExpr) and _as_str(a.name) == 'None':
         return 'none'
     if isinstance(a, gimple_ctypes.StringLiteral):
         return 'str'
@@ -6163,7 +6157,7 @@ def _gmp_emit_generator_cpp_units(self) -> None:
                     _fparams = self.func_param_types.get(_fname, [])
                     _fret_cpp = _fret.replace('_Bool', 'bool')
                     _fparam_str = ', '.join(
-                        p if not gimple_ctypes.TypeLattice.is_bool(p) else 'bool' for p in _fparams)
+                        p if p not in ('_Bool',) else 'bool' for p in _fparams)
                     cpp_parts.append(
                         f'extern "C" {_fret_cpp} {_fsym} '
                         f'({_fparam_str});')
@@ -6244,7 +6238,7 @@ def _gmp_emit_generator_cpp_units(self) -> None:
                     if not _known_params or (
                             len(_known_params) == 1 and _known_params[0] == '...'):
                         _stub_guard = _stub_guard_name(f"{_smkey}")
-                        if gimple_ctypes.TypeLattice.is_void(_smret_cpp):
+                        if _smret_cpp == 'void':
                             _stub_body = (f'{{ (void)_self; mojo_print ((char *)'
                                           f'"{_sm_struct}.{_sm_method}: unavailable in '
                                           f'compiled mode (inherited from an unmodeled '
@@ -6517,9 +6511,9 @@ def _gmp_emit_struct_accessors(self, _sa_names: list[str], parts: list[str]) -> 
                 _fresh_ct = (getattr(self, '_fresh_field_cattrs', None) or {}).get(_gname)
                 if gimple_ctypes.TypeLattice.is_list(_fresh_ct):
                     _ai_parts.append(f"  _p->{_safe_field(_aname)} = mojo_list_new ();\n")
-                elif gimple_ctypes.TypeLattice.is_dict(_fresh_ct):
+                elif _fresh_ct == 'MojoDict *':
                     _ai_parts.append(f"  _p->{_safe_field(_aname)} = mojo_dict_new ();\n")
-                elif gimple_ctypes.TypeLattice.is_set(_fresh_ct):
+                elif _fresh_ct == 'MojoSet *':
                     _ai_parts.append(f"  _p->{_safe_field(_aname)} = mojo_set_new ();\n")
                 else:
                     _ai_parts.append(f"  _p->{_safe_field(_aname)} = {_gname};\n")
@@ -6853,7 +6847,7 @@ def _gmp_class_attr_globals(self, _cai_structs: list, class_attr_decls: list[str
                                 and len(getattr(v, 'args', []) or []) == 1
                                 and isinstance(v.args[0], (SetExpr, ListExpr, TupleExpr))):
                             _lit_v = v.args[0]
-                        if gimple_ctypes.TypeLattice.is_set(ctype):
+                        if ctype == 'MojoSet *':
                             _lit_init_lines = [f"  {mangled} = mojo_set_new();"]
                             _set_elts = (_lit_v.elements
                                          if isinstance(_lit_v, (SetExpr, ListExpr, TupleExpr))
@@ -6864,7 +6858,7 @@ def _gmp_class_attr_globals(self, _cai_structs: list, class_attr_decls: list[str
                                 elif isinstance(elt, IntLiteral):
                                     _lit_init_lines.append(f'  mojo_set_add_int ({mangled}, {_signed_int64_c_literal(elt.value)});')
                             class_attr_inits.extend(_lit_init_lines)
-                        elif gimple_ctypes.TypeLattice.is_dict(ctype):
+                        elif ctype == 'MojoDict *':
                             _di = [f"  {mangled} = mojo_dict_new();"]
                             _pairs = _lit_v.pairs if isinstance(_lit_v, DictExpr) else []
                             _all_str = bool(_pairs) and all(
@@ -6932,7 +6926,7 @@ def _gmp_class_attr_globals(self, _cai_structs: list, class_attr_decls: list[str
                                 class_attr_inits.append(f"  {mangled} = mojo_list_new();")
                             else:
                                 class_attr_inits.extend(_lit_init_lines)
-                        elif gimple_ctypes.TypeLattice.is_struct_fmt(ctype):
+                        elif ctype == 'MojoStructFmt *':
                             _sfmt = (v.args[0].value
                                      if (getattr(v, 'args', None)
                                          and isinstance(v.args[0], StringLiteral))
@@ -7017,7 +7011,7 @@ def _gmp_fill_missing_global_decls(self, _declared_global_inits: dict, _declared
             elif g_mtype and gimple_ctypes.TypeLattice.ends_in_star(g_mtype) \
                     and self._cpp_known_ptr_struct(g_mtype):
                 c_type = g_mtype
-            elif (gimple_ctypes.TypeLattice.is_set(g_mtype) or gimple_ctypes.TypeLattice.is_dict(g_mtype) or gimple_ctypes.TypeLattice.is_list(g_mtype)):
+            elif g_mtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                 # Box as `int64_t` at the C struct-field level — the
                 # whole-codebase module-global convention. This fallback
                 # used to pass the bare container ctype straight through
@@ -7208,7 +7202,7 @@ def _gmp_generator_returning_methods(self, stmts: list) -> None:
                                 else:
                                     if rv is None or isinstance(rv, NoneLiteral):
                                         continue
-                                    if isinstance(rv, IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(rv.name):
+                                    if isinstance(rv, IdentExpr) and rv.name == 'None':
                                         continue
                                     bad = True
                                     break
@@ -8113,7 +8107,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                             _fann_s = _opt_m.group(1).strip()
                         elif '|' in _fann_s:
                             _parts_s = [p.strip() for p in _fann_s.split('|')]
-                            _non_none_s = [p for p in _parts_s if p and not gimple_ctypes.TypeLattice.is_none_type(p)]
+                            _non_none_s = [p for p in _parts_s if p and p != 'None']
                             if len(_non_none_s) == 1:
                                 _fann_s = _non_none_s[0]
                         # PART 6 (2026-10-22, family C): mark the tagged
@@ -8273,9 +8267,9 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         if _ann_bare in ('object', 'Any') or (
                                 ' | ' in _ann_bare
                                 and any(p.strip()[:1].isupper()
-                                        for p in _ann_bare.split(' | ') if not gimple_ctypes.TypeLattice.is_none_type(p.strip()))):
+                                        for p in _ann_bare.split(' | ') if p.strip() != 'None')):
                             self.struct_boxed_fields.setdefault(s.name, set()).add(f_name)
-                        if gimple_ctypes.TypeLattice.is_cpp_bool(_ann_bare):
+                        if _ann_bare == 'bool':
                             self.struct_bool_fields.setdefault(s.name, set()).add(f_name)
                         if field.type_ann and not _arr_m:
                             _ann_str = _as_str(field.type_ann)
@@ -8318,7 +8312,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         _dv_early = self._annotation_dict_val_type(_as_str(field.type_ann))
                         if _dv_early is not None:
                             self._field_dict_val_types.setdefault(s.name, {})[f_name] = _dv_early
-                        if (gimple_ctypes.TypeLattice.is_set(_dv_early) or gimple_ctypes.TypeLattice.is_dict(_dv_early) or gimple_ctypes.TypeLattice.is_list(_dv_early)):
+                        if _dv_early in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                             _nv_early = self._annotation_dict_nested_val_type(_as_str(field.type_ann))
                             if _nv_early is not None and not gimple_ctypes.TypeLattice.is_word(_nv_early):
                                 self._field_dict_nested_val_types.setdefault(
@@ -8342,7 +8336,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         # annotation is static truth available right here;
                         # only non-default element types need recording
                         # (int64_t is what every fallback already assumes).
-                        if ((gimple_ctypes.TypeLattice.is_set(ft) or gimple_ctypes.TypeLattice.is_list(ft)) and field.type_ann
+                        if (ft in ('MojoList *', 'MojoSet *') and field.type_ann
                                 and '[' in _as_str(field.type_ann)):
                             _ann_el = _as_str(field.type_ann)
                             # A top-level UNION annotation (e.g.
@@ -8441,7 +8435,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                     ptype = _mpj[1]
                     if pname != 'self':
                         if ptype:
-                            if gimple_ctypes.TypeLattice.is_cpp_bool(_as_str(ptype).strip()):
+                            if _as_str(ptype).strip() == 'bool':
                                 self._gmi_bool_params.add(pname)
                             pm[pname] = self._resolve_type(ptype)
                         elif pname in _defaults:
@@ -8551,7 +8545,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                                      else getattr(getattr(_f, 'target', None),
                                                   'name', None)) == fn
                                 for _f in s.fields))
-                    can_override = ((gimple_ctypes.TypeLattice.is_c_int(existing_ft) and gimple_ctypes.TypeLattice.ends_in_star(ft))
+                    can_override = ((existing_ft == 'int' and gimple_ctypes.TypeLattice.ends_in_star(ft))
                                     or (existing_ft == s.name + ' *'
                                         and ft != existing_ft
                                         and not _annotated_self))
@@ -8559,7 +8553,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         self.struct_field_types[s.name][fn] = ft
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
-                            _mark_presence_field(s, fn, self._stores_without_presence)
+                            _mark_presence_field(s, fn)
                             already.add(fn)
                             _walk_ast_invalidate(s)
             # A method that returns a `bool`-annotated FIELD hands back an
@@ -8651,7 +8645,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         self.struct_field_types[s.name][fn] = _base_ft if _base_ft is not None else ft
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
-                            _mark_presence_field(s, fn, self._stores_without_presence)
+                            _mark_presence_field(s, fn)
                             already.add(fn)
                             _walk_ast_invalidate(s)
 
@@ -8747,7 +8741,7 @@ def _gmp_order_struct_fields_base_first(self, all_struct_defs: list) -> None:
                 table[f] = _as_str(self.struct_field_types[b][f])
             if f not in _declared:
                 sdef.fields.append(VarDecl(name=f, type_ann=None, value=None))
-                _mark_presence_field(sdef, f, self._stores_without_presence)
+                _mark_presence_field(sdef, f)
                 _declared.add(f)
                 _walk_ast_invalidate(sdef)
         if desired != list(table.keys()):
@@ -9375,17 +9369,6 @@ def _gmp_selfhost_ast_layouts(self, _is_selfhost_file: bool) -> None:
         # _struct_method_qualifier returns 'myinterpreter' for
         # Interpreter methods at call sites that hardcode the layout.
         self._imported_struct_home['Interpreter'] = 'myinterpreter'
-        # WordFacts (mojo/middle/valueinfo.py) is named by 19 `_SELFHOST_SIGS`
-        # rows (`WordFacts_carry`, ...), so EVERY compiler-source module
-        # forward-declares `WordFacts *` parameters in its preamble. Only a TU
-        # that defines the class (the whole-closure dump) had the typedef; a
-        # per-module compile (`mojoc`'s link mode, the stdlib dylib build of
-        # `mojo/middle/__init__.py`) died with `unknown type name 'WordFacts'`.
-        # The module that really defines it replaces this layout with its own.
-        self.struct_field_types['WordFacts'] = {
-            '_values': 'MojoDict *',
-        }
-        self._imported_struct_home['WordFacts'] = 'mojo_middle_valueinfo'
         self.struct_field_types['Parser'] = {
             '_tok': 'MojoList *',
             '_pos': 'int64_t',
@@ -10254,7 +10237,6 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
     are pre-signature and either may be the first to see a function."""
     import mojo.middle.infra_infer as ginf
     self._param_box_names: dict[str, set] = {}
-    self._method_param_names: dict[str, list] = {}
     # Whole-module call-site evidence for the tagged word (a bool or None
     # LITERAL passed for an unannotated parameter); read by
     # `infra_infer.param_default_none_names` from both the call-site record
@@ -10284,22 +10266,6 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
                 _pbk = f"{_as_str(_sd_pb.name)}_{_as_str(_pm_pb.name)}"
                 self._param_box_names[_pbk] = ginf.param_boxed_names(
                     self, _pm_pb, _pbk)
-                # The positional parameter names a CALL of this method binds
-                # (the receiver excluded), for `_box_param_call_args`. A method
-                # call has no `_func_param_names` row: that table is the free
-                # functions'.
-                _mpn: list = []
-                _mfirst = True
-                for _mp in (_pm_pb.params or []):
-                    _mpname = _as_str(_mp[0])
-                    if _mpname.startswith('*'):
-                        continue
-                    if _mfirst and (_mpname == 'self' or _mpname == 'cls'):
-                        _mfirst = False
-                        continue
-                    _mfirst = False
-                    _mpn.append(_mpname)
-                self._method_param_names[_pbk] = _mpn
                 self._param_box_defaults[_pbk] = ginf.param_tagged_defaults(
                     _pm_pb, ginf.param_default_none_names(self, _pm_pb, _pbk))
     # The DECLARATION half of the same rule, applied to the table every
@@ -10391,12 +10357,12 @@ def _gmh_reconcile_param_container_kinds(self):
         # value, so it holds for a slot the refiners below retyped.
         _pbns = (getattr(self, '_param_box_names', None) or {}).get(_fn)
         for _pname, _ctype in _pmap.items():
-            if not (gimple_ctypes.TypeLattice.is_set(_ctype) or gimple_ctypes.TypeLattice.is_dict(_ctype) or gimple_ctypes.TypeLattice.is_list(_ctype)):
+            if _ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                 continue
             if _pbns and _pname in _pbns:
                 continue
             _cur = self._inferred_param_types[_fn].get(_pname)
-            if (gimple_ctypes.TypeLattice.is_int_word_or_none(_cur) or gimple_ctypes.TypeLattice.is_no_type(_cur)):
+            if (gimple_ctypes.TypeLattice.is_int_word_or_none(_cur) or gimple_ctypes.TypeLattice.is_unsolved(_cur)):
                 self._inferred_param_types[_fn][_pname] = _ctype
 
 
@@ -10517,7 +10483,7 @@ def _gmh_arg_scalar_type(self, caller_name, a, deep_str=False,
         t = self._inferred_var_types.get(_cn, {}).get(_an)
         if prefer_refined_param:
             _pt = self._inferred_param_types.get(_cn, {}).get(_an)
-            if (gimple_ctypes.TypeLattice.is_cstr(_pt) or gimple_ctypes.TypeLattice.is_double(_pt)):
+            if _pt in ('char *', 'double'):
                 return _pt
             return t or _pt
         t_global = self._global_var_types.get(_an)
@@ -10551,7 +10517,7 @@ def _gmh_arg_scalar_type(self, caller_name, a, deep_str=False,
         else:
             return None
         _ft = self.struct_field_types.get(_own, {}).get(_as_str(a.member))
-        return _ft if (gimple_ctypes.TypeLattice.is_cstr(_ft) or gimple_ctypes.TypeLattice.is_double(_ft)) else None
+        return _ft if _ft in ('char *', 'double') else None
     if isinstance(a, BinaryOp) and a.op == '+':
         # `self._path + "!"` — a concat with a str literal on either
         # side proves the whole expression is a `char *` (str.__add__
@@ -10844,7 +10810,7 @@ def _gmh_is_noncontainer_arg(self, a, caller_name, st):
         _conf = (getattr(self, '_confident_scalar_locals', None) or {}).get(
             _as_str(caller_name), ())
         return _as_str(a.name) in _conf
-    return (gimple_ctypes.TypeLattice.is_c_int(_st) or gimple_ctypes.TypeLattice.is_cpp_bool(_st))
+    return _st in ('int', 'bool')
 
 
 def _gmh_resolve_param_containers(self):
@@ -11050,7 +11016,7 @@ def _gmh_element_is_scalar(self, callee, e):
         _vt = self._inferred_var_types.get(callee, {}).get(_nm)
         if _vt is None:
             _vt = self._inferred_param_types.get(callee, {}).get(_nm)
-        return (gimple_ctypes.TypeLattice.is_cstr(_as_str(_vt)) or gimple_ctypes.TypeLattice.is_double(_as_str(_vt)))
+        return _as_str(_vt) in ('char *', 'double')
     return False
 
 
@@ -11077,29 +11043,21 @@ def _gmh_element_is_scalar(self, callee, e):
 # reaches a container guess, so it keeps the int64_t box that
 # `_param_noncontainer_obs` exists to choose, and is not refused.
 def _gmh_refuse_mixed_container_params(self):
-    """A parameter passed a container at one call site and something else at another.
-
-    A NUMBER cannot be iterated, so a number beside a container is still refused at compile
-    time. A STRING iterates at run time: the loop over the kind-neutral word dispatches
-    (`mojo_iter_boxed_list`: a list its elements, a string its one-character strings), so a
-    string beside a container makes the parameter that word instead of the `MojoList *`
-    guess the body's `for x in xs` left in `_inferred_param_types` (which read the string as a
-    list header: SIGSEGV)."""
     for _mc_callee, _mc_pm in list(self._param_container_obs.items()):
         _mc_ck = _as_str(_mc_callee)
         _mc_nc = self._param_noncontainer_obs.get(_mc_ck) or set()
-        _mc_str = self._param_str_obs.get(_mc_ck) or set()
-        _mc_num = self._param_numeric_obs.get(_mc_ck) or set()
         _mc_inf = self._inferred_param_types.get(_mc_ck) or {}
         for _mc_pname, _mc_types in list(self._param_container_obs[_mc_ck].items()):
             _mc_pk = _as_str(_mc_pname)
-            if not _mc_types or (_mc_pk not in _mc_nc and _mc_pk not in _mc_str):
+            if not _mc_types or _mc_pk not in _mc_nc:
                 continue
-            if not (gimple_ctypes.TypeLattice.is_list(_as_str(_mc_inf.get(_mc_pk)))
-                    or gimple_ctypes.TypeLattice.is_dict(_as_str(_mc_inf.get(_mc_pk)))
-                    or gimple_ctypes.TypeLattice.is_set(_as_str(_mc_inf.get(_mc_pk)))):
-                continue
-            if _mc_pk in _mc_num:
+            # Refuse when the same parameter is observed as a container at one
+            # call site and a non-container (scalar) at another, and the body
+            # uses the parameter as a container (its inferred type is
+            # container-shaped). Str/tuple-slot variables are not counted as
+            # non-container observations (their kind is decided at run time by
+            # word dispatch), so they don't trigger refusal here.
+            if _as_str(_mc_inf.get(_mc_pk)) in ('MojoList *', 'MojoDict *', 'MojoSet *'):
                 raise RuntimeError(
                     f"parameter {_mc_pk!r} of {_mc_ck!r} is passed a "
                     "container at one call site and a str or number at "
@@ -11107,14 +11065,6 @@ def _gmh_refuse_mixed_container_params(self):
                     "compiled path has no representation for that yet "
                     "(the per-kind clone pass only covers literal "
                     "arguments)")
-            # Only strings beside the container(s): the word dispatch answers both.
-            self._inferred_param_types[_mc_ck][_mc_pk] = 'int64_t'
-            _mc_kinds = self._container_param_kinds.get(_mc_ck)
-            if _mc_kinds is not None and _mc_pk in _mc_kinds:
-                _mc_kinds.pop(_mc_pk, None)
-            _mc_ct = self._param_container_types.get(_mc_ck)
-            if _mc_ct is not None:
-                _mc_ct[_mc_pk] = ''
 
 
 # The same "this untyped int64_t slot PROVABLY may hold a string"
@@ -11758,15 +11708,6 @@ def _gmp_emit_closure_env_helpers(self, parts: list[str]) -> None:
                 parts.append(f"static void * {static_name} = (void *){ci.lifted_name};")
 
 
-# The substrings that mark `ret_type` text as already a C type (or a system
-# spelling `_resolve_type` should not touch): a pointer star, a space (a
-# multi-word type, `unsigned int`), or any of the C scalar names. NOT a type
-# vocabulary and NOT a `in (<type tuple>)` test — it asks whether the text
-# already looks like a C type at all, so `is_c_int` and friends cannot answer
-# it. One name so the two questions stay distinct (stage 4).
-_C_TYPE_TEXT_HINTS = ('*', ' ', 'int', 'char', 'void', 'float', 'double')
-
-
 def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: set[str], hardcoded: set[str], inline_defined: set, parts: list[str]) -> None:
     """Emit a declaration or stub for every imported symbol.
 
@@ -11864,7 +11805,7 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
             self._emitted_unresolved_stub_syms.add(cname)
             ret_type = sym_info.get('return_type', 'int64_t')
             ret_type = self._resolve_type(ret_type) if ret_type and ret_type != 'unknown' else 'int'
-            if gimple_ctypes.TypeLattice.is_void(ret_type):
+            if ret_type == 'void':
                 _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); }}'
             else:
                 _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
@@ -11906,7 +11847,7 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
                 else:
                     ret_type = _as_str(sym_info.get('c_return_type')) or _as_str(sym_info.get('return_type', 'int64_t'))
                     if ret_type and ret_type != 'unknown' and not any(
-                            c in ret_type for c in _C_TYPE_TEXT_HINTS):
+                            c in ret_type for c in ('*', ' ', 'int', 'char', 'void', 'float', 'double')):
                         ret_type = self._resolve_type(ret_type)
                     elif not ret_type or ret_type == 'unknown':
                         ret_type = 'int64_t'
@@ -12048,7 +11989,7 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
                             # compiles before the definition, which is the case.
                             _def_in_this_tu = bool(self.do_imports)
                             _scan_sig = _as_str(_m_sig.group(2))
-                            if (gimple_ctypes.TypeLattice.is_no_type(_scan_sig.strip()) or gimple_ctypes.TypeLattice.is_void(_scan_sig.strip())):
+                            if _scan_sig.strip() in ('', 'void'):
                                 _scan_parts = []
                             else:
                                 _scan_parts = [_p.strip()
@@ -12195,7 +12136,7 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
                 if safe in self._emitted_unresolved_stub_syms:
                     continue
                 self._emitted_unresolved_stub_syms.add(safe)
-                if gimple_ctypes.TypeLattice.is_void(ret_type):
+                if ret_type == 'void':
                     _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); }}'
                 else:
                     _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
@@ -12496,7 +12437,7 @@ def _gmp_reconcile_reassigned_globals(self, _mgk: set, _none_init_globals: set, 
             _mgk.add(_rgname)
             continue
         _rgn = len(_rgkinds)
-        if gimple_ctypes.TypeLattice.ends_with_star(_rgbase):
+        if _rgbase.endswith('*'):
             if _rgbase not in _rgkinds:
                 _rgn += 1
         elif _rgbase:
@@ -12554,14 +12495,14 @@ def _gmp_infer_return_types_late(self, all_functions: list) -> None:
                 if _cln not in self.var_types:
                     self.var_types[_cln] = _clt
             inferred = self._infer_return_type(_p3b_s.body, _p3b_s)
-            if _p3b_s.name == 'main' and gimple_ctypes.TypeLattice.is_void(inferred):
+            if _p3b_s.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
             self.var_types = _saved_vt_3b
             self._scan_scratch_top = _scratch_mark_3b
             self.current_func_name = _saved_fcn_3b
-            inferred = _ggf_dup._record_home_def_return_type(
-                self, _p3b_raw, _p3b_s.name, inferred)
             self.func_return_types[_p3b_s.name] = inferred
+            _ggf_dup._record_home_def_return_type(
+                self, _p3b_raw, _p3b_s.name, inferred)
 
 
 def _gmp_discover_closures(self, stmts: list) -> None:
@@ -13037,9 +12978,9 @@ def _gmp_apply_xmod_param_hints(self, all_functions: list) -> None:
                 if _xg_ct and gimple_ctypes.TypeLattice.is_int_word_or_none(_xg_tgt.get(_xg_pn)):
                     _xg_tgt[_xg_pn] = _xg_ct
                 elif ((gimple_ctypes.TypeLattice.is_cstr(_xg_ct)
-                       and (gimple_ctypes.TypeLattice.is_set(_xg_tgt.get(_xg_pn)) or gimple_ctypes.TypeLattice.is_dict(_xg_tgt.get(_xg_pn)) or gimple_ctypes.TypeLattice.is_list(_xg_tgt.get(_xg_pn))))
+                       and _xg_tgt.get(_xg_pn) in ('MojoList *', 'MojoSet *', 'MojoDict *'))
                       or (gimple_ctypes.TypeLattice.is_cstr(_xg_tgt.get(_xg_pn))
-                          and (gimple_ctypes.TypeLattice.is_set(_xg_ct) or gimple_ctypes.TypeLattice.is_dict(_xg_ct) or gimple_ctypes.TypeLattice.is_list(_xg_ct)))):
+                          and _xg_ct in ('MojoList *', 'MojoSet *', 'MojoDict *'))):
                     # The str-vs-container ambiguity, settled by the callers
                     # exactly as the same-module pass settles it
                     # (`_gmi_apply_call_site_param_evidence`): the body only
@@ -13055,7 +12996,7 @@ def _gmp_apply_xmod_param_hints(self, all_functions: list) -> None:
                 if gimple_ctypes.TypeLattice.is_cstr(_xg_ct):
                     self._coro_str_params.setdefault(_xg_body, set()).add(_xg_pn)
                     self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
-                if gimple_ctypes.TypeLattice.is_bytes(_xg_ct):
+                if _xg_ct == 'MojoBytes *':
                     self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
 
 
@@ -13212,11 +13153,11 @@ def _gmp_infer_return_types(self, stmts: list, all_functions: list) -> None:
                     self.var_types[pname] = self._param_ctype(
                         pname, ptype, _as_s_p1)
             inferred = self._infer_return_type(_as_s_p1.body, _as_s_p1)
-            if _as_s_p1.name == 'main' and gimple_ctypes.TypeLattice.is_void(inferred):
+            if _as_s_p1.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
-            inferred = _ggf_dup._record_home_def_return_type(
-                self, s, _as_s_p1.name, inferred)
             self.func_return_types[_as_s_p1.name] = inferred
+            _ggf_dup._record_home_def_return_type(
+                self, s, _as_s_p1.name, inferred)
             self.var_types.clear()
             self.current_func_name = _saved_fcn_p1
 
@@ -13230,14 +13171,27 @@ def _gmp_annotated_return_types(self, stmts: list, all_functions: list) -> None:
             continue
         if isinstance(s, FunctionDef) and s.return_type is not None:
             funcs_shared.record_annotated_tuple_slots(self, s.name, s.return_type)
-            # One routine for the annotated return (funcs_shared.annotated_return_ctype): the
-            # body-sensitive rule lives there, once. A struct-tuple body also registers its typedef.
-            _fn_ret_ct = funcs_shared.annotated_return_ctype(self, s)
-            if (isinstance(_fn_ret_ct, str) and _fn_ret_ct.startswith('MojoTuple_')
-                    and _body_builds_struct_tuple(getattr(s, 'body', None))):
-                self._ensure_tuple_struct(s.return_type)
-            _fn_ret_ct = _ggf_dup._record_home_def_return_type(self, s, s.name, _fn_ret_ct)
+            _fn_ret_ct = self._resolve_type(s.return_type)
+            if isinstance(_fn_ret_ct, str) and _fn_ret_ct.startswith(
+                    'MojoTuple_'):
+                # The SAME body-sensitive decision the struct-method loop
+                # below makes (see there for the full reasoning): part 4's
+                # `_mojo_type` Tuple branch resolves a `-> Tuple[...]`
+                # return to the synthesized by-value struct, but a plain
+                # fn whose body builds the tuple as a RUNTIME (list-backed)
+                # literal — `split`'s `return String(head), String(tail)` —
+                # must keep the `MojoList *` return or the definition casts
+                # a list pointer into the struct and the typedef is never
+                # emitted (`unknown type name 'MojoTuple_...'`, measured
+                # 2026-10-21 part 4 integration: test_split/test_modf/
+                # test_location/test_tempfile's monomorphized instances).
+                if _body_builds_struct_tuple(getattr(s, 'body', None)):
+                    self._ensure_tuple_struct(s.return_type)
+                else:
+                    _fn_ret_ct = 'MojoList *'
             self.func_return_types[s.name] = _fn_ret_ct
+            _ggf_dup._record_home_def_return_type(
+                self, s, s.name, self.func_return_types[s.name])
         _s_pts = None
         if isinstance(s, FunctionDef) and s.params:
             if gimple_ctypes._params_have_vararg(s.params):
@@ -14303,7 +14257,8 @@ def _gmp_fix_global_call_slot_types(self, stmts: list) -> None:
                 # exactly the shape this loop was written for, and they
                 # still widen below.
                 if isinstance(_crt, str) and gimple_ctypes.TypeLattice.ends_in_star(_crt) \
-                        and not (gimple_ctypes.TypeLattice.is_generator(_crt) or gimple_ctypes.TypeLattice.is_set(_crt) or gimple_ctypes.TypeLattice.is_dict(_crt) or gimple_ctypes.TypeLattice.is_list(_crt)):
+                        and _crt not in ('MojoDict *', 'MojoList *', 'MojoSet *',
+                                         'MojoGenerator *'):
                     self._global_c_decl_types[_gn] = _crt
                     self._global_var_types[_gn] = _crt
                     # Mirror into this instance's own overlay: the widened
@@ -14376,7 +14331,7 @@ def _gmp_infer_global_var_types_early(self, _early_gvt_items: list) -> None:
             self._global_c_decl_types[_gn] = _forced
         elif _gn in self._global_c_decl_types:
             continue
-        elif (gimple_ctypes.TypeLattice.is_generator(_gt) or gimple_ctypes.TypeLattice.is_set(_gt) or gimple_ctypes.TypeLattice.is_dict(_gt) or gimple_ctypes.TypeLattice.is_list(_gt)):
+        elif _gt in ('MojoDict *', 'MojoList *', 'MojoSet *', 'MojoGenerator *'):
             # A compiled generator/coroutine handle is a heap handle like the
             # containers, so it is BOXED the same way: an `int64_t` struct
             # field, semantic type kept in `_global_var_types`. Copying the
@@ -14644,7 +14599,7 @@ def _gmp_infer_struct_method_return_types(self, all_structs_for_methods: list) -
                 else:
                     self.var_types[_rpn] = self._resolve_type(_rpt)
             _rinf = self._infer_return_type(_rm.body, _rm)
-            if (gimple_ctypes.TypeLattice.is_cstr(_rinf) or gimple_ctypes.TypeLattice.is_double(_rinf)):
+            if _rinf in ('char *', 'double'):
                 self.func_return_types[_rkey] = _rinf
             self.var_types.clear()
             self.var_types.update(_saved_vt)
@@ -14875,12 +14830,12 @@ def _gmp_infer_unannotated_function_returns(self, all_functions: list) -> None:
                 else:
                     self.var_types[bare] = self._param_ctype(pname, ptype, s)
             inferred = self._infer_return_type(s.body, s)
-            if s.name == 'main' and gimple_ctypes.TypeLattice.is_void(inferred):
+            if s.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
             self.var_types = _saved_vt_23e
             self._scan_scratch_top = _scratch_mark_23e
-            inferred = _ggf_dup._record_home_def_return_type(self, s, s.name, inferred)
             self.func_return_types[s.name] = inferred
+            _ggf_dup._record_home_def_return_type(self, s, s.name, inferred)
 
 
 def _gmp_propagate_generator_returns(self, _ret_changed: bool, _ret_defs: list) -> None:
@@ -14914,70 +14869,6 @@ def _gmp_propagate_generator_returns(self, _ret_changed: bool, _ret_defs: list) 
             if rt_prov not in (None, '<conflict>'):
                 self._fn_returns_generator[_rf.name] = rt_prov
                 _ret_changed = True
-
-
-def _gmp_collect_param_value_obs(self, all_functions: list, all_structs_for_methods: list,
-                                 _method_caller_bodies, stmts: list) -> None:
-    """Stage 5c pass of `gen_module_impl`: the value class (refs / scalar /
-    unknown) of every parameter's call-site arguments, for
-    `emit_infra.mixed_field_names` and the field reads that follow its answer.
-    Runs after the ctor/method contracts so their refined types are what
-    `value_class_of` reads. `emit_infra` is imported HERE for the
-    circular-import reason given at the other function-local `emit_infra`
-    import in this file."""
-    import mojo.backend_gimple.emit_infra as _pv_ein
-    _pv_ein.collect_param_value_obs(self, all_functions,
-                                    [_as_structdef_node(_pv_s) for _pv_s in all_structs_for_methods
-                                     if isinstance(_pv_s, StructDef)],
-                                    _method_caller_bodies,
-                                    [_as_str(_pv_o.name) for _pv_o in stmts
-                                     if isinstance(_pv_o, StructDef)])
-
-
-def _gmp_publish_definer_pts(self) -> None:
-    """Publish this module's committed DEFINITION-side free-function signatures
-    to the process-wide registry a SEPARATELY compiled importer (its own
-    GimpleGen instance, do_imports=False — the `compile_module_to_c` per-file
-    and `fire dylib` shapes) reads through `_published_def_pts`, because
-    this instance's `_home_def_param_types` store dies with it and the
-    importer's own view of an unannotated parameter hashes a different
-    overload suffix than the definition emitted (the per-file `undefined
-    symbol _helper_f_9f63a2` against the definition's `helper_f_815e8f`;
-    see `funcs_shared._PUBLISHED_DEF_PTS` for the registry and the
-    qualifier-spelling drift the path keying avoids). After `result` is
-    known good, so a refused compile publishes nothing; the try/except keeps
-    the cache from ever failing the artifact it caches for. In a do_imports
-    compile this republishes what the shared instance store already holds
-    (a strict subset — see the publisher's docstring), so the inline shape
-    answers from tier 0 as before.
-
-    One pass of `gen_module_impl`, which calls this once, after the result is
-    known good."""
-    try:
-        funcs_shared.publish_definer_committed_pts(self)
-    except Exception:
-        pass
-
-
-def _gmp_emit_str_pool_forward_decl(self, parts: list[str]) -> None:
-    """Forward declaration for the string-pool registration the per-file
-    toplevel constructor calls FIRST (see `_gmp_emit_toplevel_function`):
-    the registration is DEFINED after func_parts (so the constructor, which
-    is in func_parts, sees this declaration first) and must be declared
-    before that use or GCC implicitly declares it `int()`. Emitted in this
-    early decl block — NOT next to the definition — so a generated-C reader
-    walking a prototype to the next `}` stops at a real function body here,
-    never at the registration constructor's `}` (see
-    `_gmp_emit_str_pool_registration`'s placement note). Only emitted for a
-    per-file module that both calls it (non-empty pool, emits the pool) —
-    the identical guard to the call site, so the declaration is never orphan
-    and the output is byte-stable across the bootstrap stages.
-
-    One pass of `gen_module_impl`, which calls this once."""
-    if (not self.emit_entry_points and not self.do_imports
-            and hasattr(self, '_str_pool') and self._str_pool
-            and self.emit_str_pool):
-        parts.append("static void _mojo_register_str_pool (void);")
 
 
 def gen_module_impl(self, stmts: list):
@@ -15130,12 +15021,6 @@ def gen_module_impl(self, stmts: list):
     self._actual_types['stmts'] = 'MojoList *'
     if self._current_filename:
         self._inline_module_qualifiers[os.path.abspath(self._current_filename)] = self.module_name
-        # The solver's early decision needs the qualifier -> file map before this
-        # module's imports compile (see emit_funcs._early_return_decision).
-        # Keyed by the sanitized qualifier the symbols and the store use
-        # (`module_qualifier`), and by the raw module name.
-        self._qualifier_paths[self.module_name] = os.path.abspath(self._current_filename)
-        self._qualifier_paths[gimple_exprtypes.module_qualifier(self.module_name)] = os.path.abspath(self._current_filename)
     self._toplevel_dep_init_modules: list[str] = []
     self._import_module_comptime_vals = {}  # module qualifier → {name: comptime value} for import X
     _gmi_prefold_toplevel_comptime(self, stmts)
@@ -16487,13 +16372,13 @@ def gen_module_impl(self, stmts: list):
                 # declaration it has always had.
                 _mft = 'int'
                 _afn = _assigned_member_ctypes.get((obj_name, fn))
-                if _afn and (gimple_ctypes.TypeLattice.ends_in_star(_afn) or (gimple_ctypes.TypeLattice.is_double(_afn) or gimple_ctypes.TypeLattice.is_c_float(_afn))):
+                if _afn and (gimple_ctypes.TypeLattice.ends_in_star(_afn) or _afn in ('double', 'float')):
                     _mft = _afn
                 self.struct_field_types[target_struct][fn] = _mft
                 if target_def is not None and not any(
                         isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):
                     target_def.fields.append(VarDecl(name=fn, type_ann=None, value=None))
-                    _mark_presence_field(target_def, fn, self._stores_without_presence)
+                    _mark_presence_field(target_def, fn)
                     _walk_ast_invalidate(target_def)
 
     def _scan_scopes_for_local_field_access(body, own_struct_name):
@@ -16823,11 +16708,8 @@ def gen_module_impl(self, stmts: list):
                                 # missing. See CODEGEN_generator_function_
                                 # Lib_tarfile.
                                 self.var_types[pname] = f"{s.name} *"
-                            elif (ptype is None and (
-                                    gimple_ctypes.TypeLattice.is_cstr(self._inferred_param_types.get(
-                                        _mangled_key, {}).get(pname))
-                                    or gimple_ctypes.TypeLattice.is_double(self._inferred_param_types.get(
-                                        _mangled_key, {}).get(pname)))):
+                            elif (ptype is None and self._inferred_param_types.get(
+                                    _mangled_key, {}).get(pname) in ('char *', 'double')):
                                 # A parameter every call site passes a string
                                 # (or float) for: the refinement Pass 1.3e made.
                                 self.var_types[pname] = self._inferred_param_types[
@@ -17056,17 +16938,10 @@ def gen_module_impl(self, stmts: list):
                 # table is authoritative — override this pass's per-instance
                 # inference so `_struct_method_signatures`, the method
                 # externs, the forward decl and the definition all agree.
-                # An explicit presence test, not `.get(...) if ... else None`
-                # followed by `is not None`: on the self-hosted path the `None`
-                # arm and a `.get` miss are boxed words, `is not None` took them
-                # for a signature row, and the unpack below raised "object is not
-                # iterable" on the first program that defines a class.
-                _gg_sigs = _as_dict(self._selfhost_gimplegen_sigs or {})
-                _gg_key = f"GimpleGen_{_as_str(m.name)}"
-                if _as_str(s.name) == 'GimpleGen' and not _oid and _gg_key in _gg_sigs:
-                    _gg_row = _as_list(_gg_sigs[_gg_key])
-                    _fz_ret = _as_str(_gg_row[0])
-                    _fz_params = _as_list(_gg_row[1])
+                _gg_sig = (self._selfhost_gimplegen_sigs or {}).get(
+                    f"GimpleGen_{m.name}") if s.name == 'GimpleGen' and not _oid else None
+                if _gg_sig is not None:
+                    _fz_ret, _fz_params, _ = _gg_sig
                     _ret_type = _fz_ret
                     _all_ctypes = list(_fz_params)
                     param_ctypes = _all_ctypes[1:] if _has_self_first else _all_ctypes
@@ -17887,12 +17762,6 @@ def gen_module_impl(self, stmts: list):
     # (`''`) for that slot, which leaves it at the `int64_t` box the scalar
     # pass already chose for a mixed slot (see `_int64_may_hold_str`).
     self._param_noncontainer_obs: dict[str, set] = {}   # callee -> {pname}
-    # The two kinds of non-container a call site can pass beside a container, kept apart
-    # because they are answered differently: a STRING iterates at run time through the word
-    # dispatch (`mojo_iter_boxed_list`), so the parameter becomes the kind-neutral word; a
-    # NUMBER cannot be iterated and keeps the compile-time refusal.
-    self._param_str_obs: dict[str, set] = {}       # callee -> {pname} passed a str
-    self._param_numeric_obs: dict[str, set] = {}   # callee -> {pname} passed a number
     _free_params: dict = {}
     _gmp_collect_free_params(self, _free_params, all_functions)
 
@@ -18227,52 +18096,6 @@ def gen_module_impl(self, stmts: list):
                 return False
         return True
 
-    def _slot_is_str(callee, index, arity):
-        """Is slot `index` of every return of `callee` a string literal?"""
-        _cfd = _fn_by_name.get(callee)
-        if _cfd is None:
-            return False
-        _nested_ids: set = set()
-        for _n in _walk_ast(_cfd.body):
-            if isinstance(_n, gimple_ctypes.FunctionDef):
-                for _m in _walk_ast(_n.body):
-                    _nested_ids.add(id(_m))
-        _seen = 0
-        for _n in _walk_ast(_cfd.body):
-            if isinstance(_n, gimple_ctypes.ReturnStmt) and id(_n) not in _nested_ids:
-                _rv = _n.value
-                if (not isinstance(_rv, gimple_ctypes.TupleExpr)
-                        or len(_rv.elements) != arity
-                        or not isinstance(_rv.elements[index], gimple_ctypes.StringLiteral)):
-                    return False
-                _seen = _seen + 1
-        return _seen > 0
-
-    def _unpack_from_str_slot(a, caller_name):
-        """Is `a` a name whose every binding in `caller_name` is a tuple-unpack slot that
-        every return of the callee fills with a string literal?"""
-        if not isinstance(a, gimple_ctypes.IdentExpr):
-            return False
-        _bs = _caller_bindings(_as_str(caller_name)).get(_as_str(a.name))
-        if not _bs:
-            return False
-        for _b in _bs:
-            if _b is None or not _slot_is_str(_b[0], _b[1], _b[2]):
-                return False
-        return True
-
-    def _note_arg_kind(callee, pname, a, caller_name, st):
-        """Record whether a non-container call argument is a STRING or a NUMBER."""
-        if (isinstance(a, gimple_ctypes.StringLiteral)
-                or (st and gimple_ctypes.TypeLattice.is_cstr(_as_str(st)))
-                or _unpack_from_str_slot(a, caller_name)):
-            self._param_str_obs.setdefault(_as_str(callee), set()).add(_as_str(pname))
-        elif (isinstance(a, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral,
-                             gimple_ctypes.BoolLiteral))
-                or _gmh_is_noncontainer_arg(self, a, caller_name, st)
-                or _unpack_from_scalar_slot(a, caller_name)):
-            self._param_numeric_obs.setdefault(_as_str(callee), set()).add(_as_str(pname))
-
     _scalar_obs: dict[str, dict[str, set]] = {}   # callee -> {pname -> {types}}
     # Struct-pointer observations, collected in their own map (see
     # `_arg_struct_ptr_type`'s docstring for why they must not share
@@ -18423,8 +18246,6 @@ def gen_module_impl(self, stmts: list):
                     _record_param_container(callee, pnames[i], _pc)
 
                 st = _gmh_arg_scalar_type(self, caller_name, a)
-                if _pc is None and not _unpack_from_container_slot(a, caller_name):
-                    _note_arg_kind(callee, pnames[i], a, caller_name, st)
                 if (_pc is None
                         and not _unpack_from_container_slot(a, caller_name)
                         and (_gmh_is_noncontainer_arg(self, a, caller_name, st)
@@ -18572,9 +18393,6 @@ def gen_module_impl(self, stmts: list):
                                   _gmh_arg_scalar_type(self, caller_name, _kw[1]))
                                   or _unpack_from_scalar_slot(_kw[1], caller_name))):
                             _gmh_record_param_noncontainer(self, callee, _kwn)
-                        if _kwpc is None and not _unpack_from_container_slot(_kw[1], caller_name):
-                            _note_arg_kind(callee, _kwn, _kw[1], caller_name,
-                                           _gmh_arg_scalar_type(self, caller_name, _kw[1]))
                         break
 
     # A CONSTRUCTOR call is a `CallExpr` whose callee is a bare `IdentExpr`
@@ -18972,7 +18790,7 @@ def gen_module_impl(self, stmts: list):
                 _fk_kinds = self._container_param_kinds.setdefault(_fk_caller, {})
                 if _fk_kinds.get(_fk_pn) is None:
                     _fk_kinds[_fk_pn] = ('list' if gimple_ctypes.TypeLattice.is_list(_fk_want) else
-                                         'set' if gimple_ctypes.TypeLattice.is_set(_fk_want) else
+                                         'set' if _fk_want == 'MojoSet *' else
                                          'dict')
           if not _fk_changed:
             break
@@ -19401,7 +19219,7 @@ def gen_module_impl(self, stmts: list):
             continue
         _cs_inferred = self._infer_param_types(_cs_fn)
         for _pn, _ct in _cs_inferred.items():
-            if gimple_ctypes.TypeLattice.is_c_int(_ct):
+            if _ct == 'int':
                 continue
             if _pn in ('self', 'cls'):
                 continue
@@ -19680,8 +19498,6 @@ def gen_module_impl(self, stmts: list):
                     self._inferred_param_types.setdefault(_as_str(_cpn), {})[_cp_argn] = _cp_st
         if not _ctor_changed:
             break
-
-    _gmp_collect_param_value_obs(self, all_functions, all_structs_for_methods, _method_caller_bodies, stmts)
 
     for _gm_stmt in stmts:
         if isinstance(_gm_stmt, AssignStmt) and isinstance(_gm_stmt.target, IdentExpr):
@@ -20263,7 +20079,7 @@ def gen_module_impl(self, stmts: list):
         if isinstance(arg, IdentExpr):
             t = (self._inferred_var_types.get(caller_name, {}).get(arg.name)
                  or self._inferred_param_types.get(caller_name, {}).get(arg.name))
-            if not gimple_ctypes.TypeLattice.is_generator(t):
+            if t != 'MojoGenerator *':
                 return None
             fn = _fn_by_name.get(caller_name)
             if fn is not None:
@@ -20518,8 +20334,6 @@ def gen_module_impl(self, stmts: list):
     # first line below, because `_record_home_def_return_type`'s identity test
     # is the one thing here that must see the ORIGINAL node.
     _gmp_infer_return_types_late(self, all_functions)
-    if self._current_filename:
-        self._analyzed_paths.add(os.path.abspath(self._current_filename))
 
     def _flatten_resolved_conditionals(_root_list: list) -> list:
         _out = []
@@ -20638,7 +20452,8 @@ def gen_module_impl(self, stmts: list):
             _ret = self.func_return_types.get(_value.func.name)
             if isinstance(_ret, str) and gimple_ctypes.TypeLattice.ends_in_star(_ret):
                 _gmh_phase17_set_gtype(self, _gname, _ret, _own)
-                if (gimple_ctypes.TypeLattice.is_generator(_ret) or gimple_ctypes.TypeLattice.is_set(_ret) or gimple_ctypes.TypeLattice.is_dict(_ret) or gimple_ctypes.TypeLattice.is_list(_ret)):
+                if _ret in ('MojoDict *', 'MojoList *', 'MojoSet *',
+                            'MojoGenerator *'):
                     # A container return is the SAME global as a dict/list/set
                     # LITERAL one (the branches above): the C FIELD is the
                     # int64_t box, the pointer stays the SEMANTIC type. The
@@ -20679,7 +20494,7 @@ def gen_module_impl(self, stmts: list):
                 if _bm_sn in self.struct_field_types:
                     _bm_rt = self.func_return_types.get(
                         f"{_bm_sn}_{gimple_ctypes._safe_name(_as_str(_value.member))}")
-                    if isinstance(_bm_rt, str) and not (gimple_ctypes.TypeLattice.is_word(_bm_rt) or gimple_ctypes.TypeLattice.is_no_type(_bm_rt) or gimple_ctypes.TypeLattice.is_void(_bm_rt)):
+                    if isinstance(_bm_rt, str) and not (gimple_ctypes.TypeLattice.is_word_or_unsolved(_bm_rt) or gimple_ctypes.TypeLattice.is_void(_bm_rt)):
                         self._global_callable_ret_types[_gname] = _bm_rt
 
     def _phase17_scan_try_branches(_try_stmt):
@@ -20884,7 +20699,7 @@ def gen_module_impl(self, stmts: list):
                     if _tn not in _declared:
                         continue
                     _qt = _as_str(self._quick_type(_s.value))
-                    if _qt and gimple_ctypes.TypeLattice.ends_with_star(_qt):
+                    if _qt and _qt.endswith('*'):
                         if _tn not in out:
                             out[_tn] = []
                         _known = out[_tn]
@@ -20892,12 +20707,6 @@ def gen_module_impl(self, stmts: list):
                             _known.append(_qt)
         return out
 
-    # The struct names this module defines at top level: an annotation naming one is a
-    # struct-pointer type for the global it annotates (see the bare-name branch below).
-    _module_struct_names = set()
-    for _sn_stmt in _phase17_stmts:
-        if isinstance(_sn_stmt, StructDef):
-            _module_struct_names.add(_as_str(_sn_stmt.name))
     for _scan_stmt in _phase17_stmts:
         # "_phase17_stmts" deliberately spans this module's OWN top-level
         # statements AND every inline-compiled imported module's (the SHARED
@@ -20930,16 +20739,7 @@ def gen_module_impl(self, stmts: list):
             _pre_declared_globals.add(_gname)
             if _gname not in self._global_to_module and _scan_own:
                 self._global_to_module[_gname] = _phase17_mod
-            # `BOX: Box = Box(1)`: the annotation names a struct this module defines, so the
-            # global IS a `Box *`, whether or not the call's inference can see the struct yet
-            # (its registration may come later in this pass). Without this the global has no
-            # type here, the module-attribute read `mod.BOX` falls back to a dynamic getattr,
-            # and that fails at run time (the module-global attribute-read bug).
-            _ann_name = _scan_stmt.type_ann
-            if _ann_name and _ann_name in _module_struct_names:
-                _gmh_phase17_set_gtype(self, _gname, _ann_name + ' *', _scan_own)
-            else:
-                _phase17_infer_global_type(_gname, _scan_stmt.value, _scan_own)
+            _phase17_infer_global_type(_gname, _scan_stmt.value, _scan_own)
         elif isinstance(_scan_stmt, MultiAssignStmt):
             for _tgt in _scan_stmt.targets:
                 if not isinstance(_tgt, IdentExpr):
@@ -20975,7 +20775,7 @@ def gen_module_impl(self, stmts: list):
             if _scan_stmt.type_ann:
                 _resolved = self._resolve_type(_scan_stmt.type_ann)
                 _gmh_phase17_set_gtype(self, _scan_stmt.name, _resolved, _scan_own)
-                if (gimple_ctypes.TypeLattice.is_set(_resolved) or gimple_ctypes.TypeLattice.is_dict(_resolved) or gimple_ctypes.TypeLattice.is_list(_resolved)):
+                if _resolved in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                     self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
             else:
                 if hasattr(_scan_stmt, 'value') and _scan_stmt.value:
@@ -21024,7 +20824,7 @@ def gen_module_impl(self, stmts: list):
                             _gmh_phase17_set_gtype(self, _scan_stmt.name, 'int64_t', _scan_own)
                     else:
                         qt = self._quick_type(_scan_stmt.value) or 'int64_t'
-                        _gmh_phase17_set_gtype(self, _scan_stmt.name, qt if (gimple_ctypes.TypeLattice.ends_in_star(qt) or (gimple_ctypes.TypeLattice.is_bool(qt) or gimple_ctypes.TypeLattice.is_double(qt))) else 'int64_t', _scan_own)
+                        _gmh_phase17_set_gtype(self, _scan_stmt.name, qt if (gimple_ctypes.TypeLattice.ends_in_star(qt) or qt in ('_Bool', 'double')) else 'int64_t', _scan_own)
                 else:
                     _gmh_phase17_set_gtype(self, _scan_stmt.name, 'int64_t', _scan_own)
         elif isinstance(_scan_stmt, TryStmt):
@@ -21079,7 +20879,7 @@ def gen_module_impl(self, stmts: list):
     # only READS it would see no value type. The joined stored-value type is
     # function-independent, like the list answer above.
     for _gname, _gvals in _phase17_store_hits.items():
-        if not gimple_ctypes.TypeLattice.is_dict(self._global_var_types.get(_gname)):
+        if self._global_var_types.get(_gname) != 'MojoDict *':
             continue
         if _gname in self._global_dict_val_types:
             continue
@@ -21932,7 +21732,7 @@ def gen_module_impl(self, stmts: list):
         # into EVERY module's artifact, so every closure carried a stub
         # definition whether or not a call reached it, and the closure check
         # (`fire.py --dump-full`, bootstrap-stage1-transitive) reads that as an
-        # incomplete closure (bugs/hard/CODEGEN_prelude_sort_is_not_resolved.md).
+        # incomplete closure (bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md).
         # FIXME: should be void sort(MojoList *list) [takes MojoList * boxed as int64_t]; variadic so both int and pointer call sites typecheck
         ('Span_byte_length',       'int64_t Span_byte_length(...);'),
         ('_stat_macos',            'int64_t _stat_macos(...);'),
@@ -22245,7 +22045,7 @@ def gen_module_impl(self, stmts: list):
             continue
         self._emitted_ptr_alloc_n.add(et)
         cn = _c_id(et)
-        _sn = et[:-2].strip() if gimple_ctypes.TypeLattice.ends_with_star(et) else et
+        _sn = et[:-2].strip() if et.endswith('*') else et
         if _sn in self.struct_field_types:
             parts.append(
                 f"static {et} * _alloc_n_{cn} (int64_t n) {{\n"
@@ -22543,7 +22343,7 @@ def gen_module_impl(self, stmts: list):
             elif isinstance(value.func, IdentExpr):
                 ret = self.func_return_types.get(value.func.name, '')
                 if gimple_ctypes.TypeLattice.ends_in_star(ret):
-                    if (gimple_ctypes.TypeLattice.is_set(ret) or gimple_ctypes.TypeLattice.is_dict(ret) or gimple_ctypes.TypeLattice.is_list(ret)):
+                    if ret in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                         # A CONTAINER global is BOXED at the C level
                         # (`int64_t`, semantic type kept in
                         # `_global_var_types`) -- the same convention the
@@ -22606,7 +22406,7 @@ def gen_module_impl(self, stmts: list):
                 # effects here mirror the read/readline and readlines
                 # rows verbatim.
                 _mvt = _gmh_phase17_value_type(self, value)
-                if (gimple_ctypes.TypeLattice.is_set(_mvt) or gimple_ctypes.TypeLattice.is_dict(_mvt) or gimple_ctypes.TypeLattice.is_list(_mvt)):
+                if _mvt in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                     global_decls.append(f"int64_t {gname};  /* {_mvt} */")
                     self._global_var_types[gname] = _mvt
                     self._global_c_decl_types[gname] = 'int64_t'
@@ -22684,7 +22484,8 @@ def gen_module_impl(self, stmts: list):
                     _tbl_t = dispatch_table_global_ctype(value.member)
                     if _tbl_t is not None:
                         _oc_t = _tbl_t
-                    elif (gimple_ctypes.TypeLattice.is_generator(_mx_t) or gimple_ctypes.TypeLattice.is_set(_mx_t) or gimple_ctypes.TypeLattice.is_dict(_mx_t) or gimple_ctypes.TypeLattice.is_list(_mx_t)):
+                    elif _mx_t in ('MojoDict *', 'MojoList *', 'MojoSet *',
+                                   'MojoGenerator *'):
                         _oc_t = 'int64_t'
                     else:
                         _oc_t = _mx_t
@@ -22724,7 +22525,7 @@ def gen_module_impl(self, stmts: list):
                 global_decls.append(f"{qt} {gname};")
                 self._global_var_types[gname] = qt
                 self._global_c_decl_types[gname] = (
-                    'int64_t' if (gimple_ctypes.TypeLattice.is_set(qt) or gimple_ctypes.TypeLattice.is_dict(qt) or gimple_ctypes.TypeLattice.is_list(qt))
+                    'int64_t' if qt in ('MojoDict *', 'MojoList *', 'MojoSet *')
                     else qt)
             elif gimple_ctypes.TypeLattice.is_bool(qt):
                 global_decls.append(f"int {gname};")
@@ -22771,7 +22572,7 @@ def gen_module_impl(self, stmts: list):
             if stmt.type_ann and stmt.value is None:
                 _resolved = self._resolve_type(stmt.type_ann)
                 self._global_var_types[gname] = _resolved
-                if (gimple_ctypes.TypeLattice.is_set(_resolved) or gimple_ctypes.TypeLattice.is_dict(_resolved) or gimple_ctypes.TypeLattice.is_list(_resolved)):
+                if _resolved in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                     global_decls.append(f"int64_t {gname};  /* {_resolved} */")
                     self._global_c_decl_types[gname] = 'int64_t'
                 else:
@@ -22820,7 +22621,7 @@ def gen_module_impl(self, stmts: list):
                     # 'World *'" (box.3d/game's engine_create_world()).
                     _ret = self.func_return_types.get(_gv.func.name, '')
                     if gimple_ctypes.TypeLattice.ends_in_star(_ret):
-                        if (gimple_ctypes.TypeLattice.is_set(_ret) or gimple_ctypes.TypeLattice.is_dict(_ret) or gimple_ctypes.TypeLattice.is_list(_ret)):
+                        if _ret in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                             # Boxed, for the same reason and with the same
                             # convention as _gscan_declare_global's identical
                             # IdentExpr-callee branch just above.
@@ -23396,7 +23197,22 @@ def gen_module_impl(self, stmts: list):
         parts.append("static MojoDict * _mojo_dispatch_asdict (void *);")
     parts.append("static int _mojo_dispatch_is_dataclass (void *);")
     parts.append("static int64_t _mojo_dispatch_shallow_copy (void *);")
-    _gmp_emit_str_pool_forward_decl(self, parts)
+    # Forward declaration for the string-pool registration the per-file
+    # toplevel constructor calls FIRST (see `_gmp_emit_toplevel_function`):
+    # the registration is DEFINED after func_parts (so the constructor, which
+    # is in func_parts, sees this declaration first) and must be declared
+    # before that use or GCC implicitly declares it `int()`. Emitted in this
+    # early decl block — NOT next to the definition — so a generated-C reader
+    # walking a prototype to the next `}` stops at a real function body here,
+    # never at the registration constructor's `}` (see
+    # `_gmp_emit_str_pool_registration`'s placement note). Only emitted for a
+    # per-file module that both calls it (non-empty pool, emits the pool) —
+    # the identical guard to the call site, so the declaration is never orphan
+    # and the output is byte-stable across the bootstrap stages.
+    if (not self.emit_entry_points and not self.do_imports
+            and hasattr(self, '_str_pool') and self._str_pool
+            and self.emit_str_pool):
+        parts.append("static void _mojo_register_str_pool (void);")
     # The ungated path needs all cluster declarations that may be called
     # directly. `_mojo_repr_set` is named directly by `repr(<set>)` call sites
     # (emit_infra/emit_resolve lower it to `_mojo_repr_set`), so without a
@@ -23619,7 +23435,7 @@ def gen_module_impl(self, stmts: list):
                         _wexpr = _wm
                     elif gimple_ctypes.TypeLattice.is_double(_wt):
                         _wexpr = f'mojo_box_from_double({_wm})'
-                    elif gimple_ctypes.TypeLattice.ends_with_star(_wt):
+                    elif _wt.endswith('*'):
                         _wexpr = f'(int64_t)(intptr_t){_wm}'
                     else:
                         continue
@@ -23745,7 +23561,25 @@ def gen_module_impl(self, stmts: list):
         raise
     if result is None:
         raise RuntimeError("module generation failed")
-    _gmp_publish_definer_pts(self)
+    # Publish this module's committed DEFINITION-side free-function signatures
+    # to the process-wide registry a SEPARATELY compiled importer (its own
+    # GimpleGen instance, do_imports=False — the `compile_module_to_c` per-file
+    # and `fire dylib` shapes) reads through `_published_def_pts`, because
+    # this instance's `_home_def_param_types` store dies with it and the
+    # importer's own view of an unannotated parameter hashes a different
+    # overload suffix than the definition emitted (the per-file `undefined
+    # symbol _helper_f_9f63a2` against the definition's `helper_f_815e8f`;
+    # see `funcs_shared._PUBLISHED_DEF_PTS` for the registry and the
+    # qualifier-spelling drift the path keying avoids). After `result` is
+    # known good, so a refused compile publishes nothing; the try/except keeps
+    # the cache from ever failing the artifact it caches for. In a do_imports
+    # compile this republishes what the shared instance store already holds
+    # (a strict subset — see the publisher's docstring), so the inline shape
+    # answers from tier 0 as before.
+    try:
+        funcs_shared.publish_definer_committed_pts(self)
+    except Exception:
+        pass
     return result
 
 def __getattr__(name):

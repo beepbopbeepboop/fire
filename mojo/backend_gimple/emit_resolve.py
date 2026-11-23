@@ -42,7 +42,6 @@ from fire_compiler import (
 import regex_compile
 import mlir
 import mojo.middle.types as gimple_ctypes
-from mojo.middle.module_parse import parse_module_source
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.float8_dtype as _float8_dtype
@@ -107,11 +106,6 @@ def _locally_bound_names(gen, body: list, params: list = None) -> set:
 
 
 def _module_candidate_paths(gen, module_name: str) -> list:
-    """`_module_candidate_paths_from` for the module the backend is compiling now."""
-    return _module_candidate_paths_from(gen, module_name, getattr(gen, '_current_filename', None))
-
-
-def _module_candidate_paths_from(gen, module_name: str, _importer) -> list:
     """Ordered candidate source-file paths for `module_name` (dotted or
     bare) — exactly the search-path/extension/dotted-package resolution
     logic `_compile_imported_module` uses to locate a `.py`/`.mojo`
@@ -160,6 +154,7 @@ def _module_candidate_paths_from(gen, module_name: str, _importer) -> list:
     # stale and use syntax the parser can't handle).
     extensions = ['.py', '.mojo']
     importer_dir = None
+    _importer = getattr(gen, '_current_filename', None)
     if _importer:
         importer_dir = gimple_ctypes.os.path.dirname(gimple_ctypes.os.path.abspath(_importer))
     # RELATIVE imports (`from . import sibling` / `from ..pkg import mod`):
@@ -908,7 +903,8 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 gen._record_sys_path_inserts(source, gimple_ctypes.os.path.dirname(gimple_ctypes.os.path.abspath(path)))
 
                 # Compile the module to get both code and type info
-                stmts = parse_module_source(source, path)
+                tokens = gimple_ctypes.py_tokenize(source)
+                stmts = gimple_ctypes.ast_rewriter.rewrite(gimple_ctypes.Parser(tokens).parse_module())
 
                 # Create a temporary codegen to extract types
                 # Use do_imports=True for transitive closure; share dedup sets and type information
@@ -1021,22 +1017,12 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 # mangled call-site suffix, so both halves of one mangled
                 # symbol always agree (log_match c52cbf-vs-7a6366 family).
                 temp_gen._home_def_param_types = gen._home_def_param_types
-                temp_gen._home_def_pts_committed = gen._home_def_pts_committed
-                temp_gen._stores_without_presence = gen._stores_without_presence
-                temp_gen._early_def_pts_used = gen._early_def_pts_used
                 # share: the RETURN-type twin of the store just shared, for the
                 # same reason and read by the same `_func_csym` mirror — a
                 # call site's emitted symbol carries the module qualifier, so
                 # only the defining unit's own answer for that qualifier can
                 # type that call.
                 temp_gen._home_def_return_types = gen._home_def_return_types
-                # The type solver's state, shared by reference (see GimpleGen.__init__).
-                temp_gen._tsolve = gen._tsolve
-                temp_gen._qualifier_paths = gen._qualifier_paths
-                temp_gen._analyzed_paths = gen._analyzed_paths
-                temp_gen._tsolve_frozen = gen._tsolve_frozen
-                temp_gen._tsolve_ledger = gen._tsolve_ledger
-                temp_gen._tsolve_logged = gen._tsolve_logged
                 # Once per TRANSLATION UNIT, not once per module: a
                 # single-TU closure carries ~160 modules and the GPU
                 # introspection definitions are program-wide. Shared by
@@ -1841,7 +1827,7 @@ def _register_link_imports(gen, stmts: list) -> list:
         params = rest.rstrip(') ').strip()
         toks = head.strip().rsplit(None, 1)        # split off the function name
         ret = toks[0] if len(toks) == 2 else 'int'
-        if not params or gimple_ctypes.TypeLattice.is_void(params):
+        if not params or params == 'void':
             ptypes = []
         else:
             ptypes = [p.strip() for p in params.split(',')]
@@ -2501,7 +2487,7 @@ def _bool_not(gen, ctype: str, val: str) -> str:
     `x.__class__ is not T`), so the shape could not drift from what raw
     GIMPLE accepts.
     """
-    if gimple_ctypes.TypeLattice.ends_in_star(ctype) or gimple_ctypes.TypeLattice.is_voidp(ctype):
+    if gimple_ctypes.TypeLattice.ends_in_star(ctype) or ctype == 'void *':
         iv = gen._cast('int64_t', val)
         zt = 'int64_t'
     elif gimple_ctypes.TypeLattice.is_bool(ctype):
@@ -2624,7 +2610,7 @@ def _widen_operand(gen, want: str, v: str) -> str:
         return v
     if rt_call.arg_needs_repr_cast(want, dts):
         return gen._cast(want, v)
-    if gimple_ctypes.TypeLattice.is_c_int(rt_call._SCALAR_CLASS.get(want)) and gimple_ctypes.TypeLattice.is_cpp_bool(rt_call._SCALAR_CLASS.get(dts)):
+    if rt_call._SCALAR_CLASS.get(want) == 'int' and rt_call._SCALAR_CLASS.get(dts) == 'bool':
         return gen._cast(want, v)
     return v
 
@@ -2652,12 +2638,12 @@ def _binop_operands(gen, ctype: str, a: str, op: str, b: str) -> list:
                 ac = rt_call._SCALAR_CLASS.get(ats)
                 bc = rt_call._SCALAR_CLASS.get(bts)
                 if ac is not None and bc is not None:
-                    a_up = (gimple_ctypes.TypeLattice.is_c_float(bc) and not gimple_ctypes.TypeLattice.is_c_float(ac)) or (
+                    a_up = (bc == 'float' and ac != 'float') or (
                         ac == bc and rt_call._SCALAR_BITS[ats] < rt_call._SCALAR_BITS[bts]) or (
-                        gimple_ctypes.TypeLattice.is_cpp_bool(ac) and gimple_ctypes.TypeLattice.is_c_int(bc))
-                    b_up = (gimple_ctypes.TypeLattice.is_c_float(ac) and not gimple_ctypes.TypeLattice.is_c_float(bc)) or (
+                        ac == 'bool' and bc == 'int')
+                    b_up = (ac == 'float' and bc != 'float') or (
                         ac == bc and rt_call._SCALAR_BITS[bts] < rt_call._SCALAR_BITS[ats]) or (
-                        gimple_ctypes.TypeLattice.is_cpp_bool(bc) and gimple_ctypes.TypeLattice.is_c_int(ac))
+                        bc == 'bool' and ac == 'int')
                     if a_up:
                         a = gen._cast(bts, a)
                     elif b_up:
@@ -2674,9 +2660,7 @@ def _binop_operands(gen, ctype: str, a: str, op: str, b: str) -> list:
 def _binop_text(gen, ctype: str, a: str, op: str, b: str) -> str:
     """`a op b` as text; see `_binop_operands`."""
     parts: list = _binop_operands(gen, ctype, a, op, b)
-    # `_as_str`: a list slot is a boxed word on the self-hosted path, and `+` on it
-    # concatenated nothing (every binary operation came out as `_t1 = ;`).
-    return _as_str(parts[0]) + ' ' + op + ' ' + _as_str(parts[1])
+    return parts[0] + ' ' + op + ' ' + parts[1]
 
 
 def _binop(gen, ctype: str, a: str, op: str, b: str) -> str:
@@ -2698,7 +2682,7 @@ def _binop_into(gen, dst: str, a: str, op: str, b: str) -> None:
     dt = gen.var_types.get(dst)
     dts: str = '' if dt is None else _as_str(dt)
     parts: list = _binop_operands(gen, dts, a, op, b)
-    build.binop_into(gen, dst, _as_str(parts[0]), op, _as_str(parts[1]))
+    build.binop_into(gen, dst, parts[0], op, parts[1])
 
 
 def _loop_head(gen, idx: str, n: str, bb_cond: str, bb_body: str,
@@ -2820,7 +2804,7 @@ def _strided_data_ptr(gen, pt: str, pv: str) -> str:
         addr = gen._new_val('int64_t', f"{pv}->address")
         vp = gen._cast('void *', addr)
         return gen._cast('int64_t *', vp)
-    if gimple_ctypes.TypeLattice.is_word_ptr(pt):
+    if pt == 'int64_t *':
         return gen._ensure_local(pt, pv)
     if gimple_ctypes.TypeLattice.ends_in_star(pt):
         return gen._cast('int64_t *', gen._ensure_local(pt, pv))
@@ -2963,10 +2947,10 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             # `_current_line` is rarely set; the statement the failing store
             # belongs to is named by the last `#line N "file"` directive
             # already emitted above it.
-            _bl = ginf.body_text(gen)
+            _bl = getattr(gen, 'body_lines', None) or []
             _k = len(_bl) - 1
             while _k >= 0 and _k > len(_bl) - 400:
-                _ln = _bl[_k]
+                _ln = _bl[_k].line()
                 if _ln.startswith('#line '):
                     _parts = _ln.split()
                     if len(_parts) >= 2 and _parts[1].isdigit():
@@ -2980,10 +2964,10 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         # The last few statements emitted for the failing store: the temps in
         # the message (`_t111`) only mean something next to the C that made them.
         _ctx = []
-        _bl2 = ginf.body_text(gen)
+        _bl2 = getattr(gen, 'body_lines', None) or []
         _k2 = len(_bl2) - 1
         while _k2 >= 0 and len(_ctx) < 6 and _k2 > len(_bl2) - 200:
-            _l2 = _bl2[_k2].strip()
+            _l2 = _bl2[_k2].line().strip()
             if _l2 and not _l2.startswith('#'):
                 _ctx.append(_l2)
             _k2 -= 1
@@ -3016,9 +3000,9 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             _i = int(_fn[1:])
             _fc = _tf[_fn]
             _idx = gen._cast('int64_t', f"{_i}")
-            if (gimple_ctypes.TypeLattice.is_double(_fc) or gimple_ctypes.TypeLattice.is_c_float(_fc)):
+            if _fc in ('double', 'float'):
                 _rv = gen._rt_call('double', 'mojo_list_get_double', [f"{_lp}", _idx])
-                if gimple_ctypes.TypeLattice.is_c_float(_fc):
+                if _fc == 'float':
                     _rv = gen._cast('float', _rv)
             elif gimple_ctypes.TypeLattice.is_cstr(_fc):
                 _rv = gen._rt_call('char *', 'mojo_list_get_str', [f"{_lp}", _idx])
@@ -3034,19 +3018,19 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
     if True:
         literal = v.lstrip('-').isdigit()
         if literal and s in gimple_ctypes._SCALAR_INT_TYPES and d in gimple_ctypes._SCALAR_INT_TYPES:
-            if gimple_ctypes.TypeLattice.is_u8(d):
+            if d == 'uint8_t':
                 gen._rt_into(dest, 'mojo_uint8_from_int64', [f"{v}LL"])
-            elif gimple_ctypes.TypeLattice.is_u16(d):
+            elif d == 'uint16_t':
                 gen._rt_into(dest, 'mojo_uint16_from_int64', [f"{v}LL"])
-            elif gimple_ctypes.TypeLattice.is_u32(d):
+            elif d == 'uint32_t':
                 gen._rt_into(dest, 'mojo_uint32_from_int64', [f"{v}LL"])
-            elif gimple_ctypes.TypeLattice.is_uword(d):
+            elif d == 'uint64_t':
                 build.assign(gen, dest, f'{v}ULL')
-            elif gimple_ctypes.TypeLattice.is_i8(d):
+            elif d == 'int8_t':
                 gen._rt_into(dest, 'mojo_int8_from_int64', [f"{v}LL"])
-            elif gimple_ctypes.TypeLattice.is_i16(d):
+            elif d == 'int16_t':
                 gen._rt_into(dest, 'mojo_int16_from_int64', [f"{v}LL"])
-            elif gimple_ctypes.TypeLattice.is_i32(d):
+            elif d == 'int32_t':
                 gen._rt_into(dest, 'mojo_int32_from_int64', [f"{v}LL"])
             elif gimple_ctypes.TypeLattice.is_word(d):
                 build.assign(gen, dest, f'{v}LL')
@@ -3075,7 +3059,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             # Load global into local before casting (GIMPLE restriction)
             v = gen._ensure_local(s, v)
             # GIMPLE: non-void pointer → int64_t requires void * intermediate
-            if not gimple_ctypes.TypeLattice.is_voidp(s):
+            if s != 'void *':
                 vp = gen._cast('void *', f"{v}")
                 v = vp
             ip = gen._cast('int64_t', f"{v}")
@@ -3083,7 +3067,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
                 gen._copy(dest, f"{ip}")
             else:
                 gen._cast_into(dest, 'int', ip)
-        elif gimple_ctypes.TypeLattice.is_cstr(d) and gimple_ctypes.TypeLattice.is_char(s):
+        elif gimple_ctypes.TypeLattice.is_cstr(d) and s == 'char':
             # A Python str of length 1 (a bare `char` in this codegen)
             # coerced into a `char *` STRING slot — e.g. the `char`
             # branch of a mixed-type ternary like `s[k-1] if k>0 else ''`
@@ -3113,7 +3097,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             v = gen._ensure_local(s, v)
             ip = gen._cast('int64_t', f"{v}")
             gen._cast_into(dest, d, ip)
-        elif gimple_ctypes.TypeLattice.ends_in_star(d) and (gimple_ctypes.TypeLattice.is_double(s) or gimple_ctypes.TypeLattice.is_c_float(s)):
+        elif gimple_ctypes.TypeLattice.ends_in_star(d) and s in ('double', 'float'):
             # A FLOAT returned from a function whose inferred return type is a
             # pointer. `comptime.py`'s `eval_const` is the live case: it
             # genuinely returns bool/int/float/str/tuple, so its return-type
@@ -3130,7 +3114,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             v = gen._ensure_local(s, v)
             ip = gen._cast('int64_t', f"{v}")
             gen._cast_into(dest, d, ip)
-        elif (gimple_ctypes.TypeLattice.is_double(d) or gimple_ctypes.TypeLattice.is_c_float(d)) and gimple_ctypes.TypeLattice.ends_in_star(s):
+        elif d in ('double', 'float') and gimple_ctypes.TypeLattice.ends_in_star(s):
             # The mirror of the branch above, and the same C rule: a pointer
             # converts only to an INTEGER type. `(double)<ptr>` is rejected
             # outright ("pointer value used where a floating-point was
@@ -3145,7 +3129,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             # and b0910af72 made that arm actually fire for a comptime width,
             # exposing this cast as gcc errors on every appended element.
             v = gen._ensure_local(s, v)
-            if not gimple_ctypes.TypeLattice.is_voidp(s):
+            if s != 'void *':
                 v = gen._cast('void *', f"{v}")
             ip = gen._cast('int64_t', f"{v}")
             gen._cast_into(dest, d, ip)
@@ -3312,7 +3296,7 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     # The container arms below are the same ones `_stringify_value` uses.
     if gimple_ctypes.TypeLattice.is_int_word_or_voidp(rat):
         _real = gen._get_actual_type(rat, rav)
-        if (gimple_ctypes.TypeLattice.is_set(_real) or gimple_ctypes.TypeLattice.is_dict(_real) or gimple_ctypes.TypeLattice.is_list(_real)):
+        if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
             rat = _real
             rav = gen._cast(_real, rav)
     # A `d[k]` read whose value type was unknown at compile time: the slot's
@@ -3344,15 +3328,15 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         # self-hosted (the whole `(fn, args)` pair printed as the callee).
         _lfn, _largs = gen._list_repr_call(rav)
         return gen._call_expr('char *', _lfn, _largs)
-    if gimple_ctypes.TypeLattice.is_set(rat):
+    if rat == 'MojoSet *':
         return gen._call_expr('char *', '_mojo_repr_set', [('MojoSet *', rav)])
-    if gimple_ctypes.TypeLattice.is_dict(rat):
+    if rat == 'MojoDict *':
         return gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', rav)])
-    if gimple_ctypes.TypeLattice.is_bytes(rat):
+    if rat == 'MojoBytes *':
         return gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', rav)])
-    if gimple_ctypes.TypeLattice.is_memoryview(rat):
+    if rat == 'MojoMemoryView *':
         return gen._call_expr('char *', 'mojo_memoryview_repr', [('MojoMemoryView *', rav)])
-    if gimple_ctypes.TypeLattice.ends_in_star(rat) or gimple_ctypes.TypeLattice.is_voidp(rat):
+    if gimple_ctypes.TypeLattice.ends_in_star(rat) or rat == 'void *':
         rav_local = gen._ensure_local(rat, rav)
         # A user-defined `__repr__` WINS over the generated field dump.
         # CPython calls it, and this compiler already emits the real method
@@ -3391,7 +3375,7 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         # since only mojo_repr_obj (no field-metadata table) existed.
         vp = gen._cast('void *', rav_local)
         return gen._call_expr('char *', '_mojo_dispatch_repr', [('void *', vp)])
-    if (gimple_ctypes.TypeLattice.is_double(rat) or gimple_ctypes.TypeLattice.is_c_float(rat)):
+    if rat in ('double', 'float'):
         rav_d = rav if gimple_ctypes.TypeLattice.is_double(rat) else gen._cast('double', rav)
         return gen._call_expr('char *', 'mojo_repr_float', [('double', rav_d)])
     rav64 = rav if gimple_ctypes.TypeLattice.is_word(rat) else gen._cast('int64_t', rav)
@@ -3504,7 +3488,7 @@ def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
 
 def _cast_for_list(gen, elem_type: str, val: str, suf: str) -> str:
     """Coerce a value to the API's expected type; always returns an lvalue (temp if cast needed)."""
-    if gimple_ctypes.TypeLattice.is_c_int(suf):
+    if suf == 'int':
         return gen._to_int64(elem_type, val)
     if gimple_ctypes.TypeLattice.is_double(suf):
         if gimple_ctypes.TypeLattice.is_double(elem_type):
@@ -3532,8 +3516,8 @@ def _cast_for_list(gen, elem_type: str, val: str, suf: str) -> str:
     # storage convention) — the old "no pointer record → char byte" check
     # truncated it, appending the low byte of the pointer as a 1-char
     # string instead of the boxed string it points to.
-    if suf == 'str' and (gimple_ctypes.TypeLattice.is_char(elem_type) or gimple_ctypes.TypeLattice.is_char(actual)):
-        cval = val if gimple_ctypes.TypeLattice.is_char(elem_type) else gen._cast('char', val)
+    if suf == 'str' and (elem_type == 'char' or actual == 'char'):
+        cval = val if elem_type == 'char' else gen._cast('char', val)
         return gen._call_expr('char *', 'mojo_char_to_str', [('char', cval)])
     # str: cast int-cast strings (boxed pointers stored as int64_t) to char*
     if suf == 'str' and gimple_ctypes.TypeLattice.is_int_word(elem_type):
@@ -3590,7 +3574,7 @@ def _static_generic_return_ctype(gen, func_name: str) -> str | None:
     if not rm:
         return None
     ctype = gimple_ctypes._mojo_type(rm.group(1).strip())
-    return ctype if (gimple_ctypes.TypeLattice.is_set(ctype) or gimple_ctypes.TypeLattice.is_dict(ctype) or gimple_ctypes.TypeLattice.is_span(ctype) or gimple_ctypes.TypeLattice.is_list(ctype)) else None
+    return ctype if ctype in ('MojoList *', 'MojoDict *', 'MojoSet *', 'Span *') else None
 
 
 def _literal_mojo_type(arg):
@@ -3634,14 +3618,14 @@ def _proven_arg_mojo_type(gen, arg, ctype):
         ann = _param_ann_mojo_type(gen, arg)
         if ann is not None:
             return ann
-        if gimple_ctypes.TypeLattice.is_span(ctype):
+        if ctype == 'Span *':
             return _proven_span_arg_mojo_type(gen, arg)
         return _list_arg_mojo_type(gen, arg, ctype)
     if gimple_ctypes.TypeLattice.is_list(ctype):
         lst = _list_arg_mojo_type(gen, arg, ctype)
         if lst is not None:
             return lst
-    if gimple_ctypes.TypeLattice.is_span(ctype):
+    if ctype == 'Span *':
         return _proven_span_arg_mojo_type(gen, arg)
     return _constructed_struct_type(gen, arg, ctype)
 
@@ -3895,7 +3879,7 @@ def _list_arg_mojo_type(gen, arg, ctype):
     itself, or a local whose one binding proves its type
     (`_proven_local_types`). Anything else is unprovable, and the caller
     declines the shape exactly as every other unprovable argument does
-    (bugs/hard/CODEGEN_prelude_sort_is_not_resolved.md: the stdlib's `sort[T,
+    (bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md: the stdlib's `sort[T,
     origin](span: Span[T, origin])` is the template this proof exists for)."""
     if not gimple_ctypes.TypeLattice.is_list(ctype):
         return None
@@ -4822,12 +4806,12 @@ def _coerce_span_args(gen, params, arg_pairs, span_proofs=None):
 
     ONE helper for every `Span *` parameter, not a `sort`-only branch: any
     future generic that takes a `Span` from a `List` (or a boxed Span)
-    argument converts here (bugs/hard/CODEGEN_prelude_sort_is_not_resolved.md,
+    argument converts here (bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md,
     planning decision 1a). `params` is the instance's C param types
     (elaborate's erased view), so the check is on the parameter, not the
     annotation text."""
     for i, (ctype, val) in enumerate(arg_pairs):
-        if i >= len(params) or not gimple_ctypes.TypeLattice.is_span(params[i]):
+        if i >= len(params) or params[i] != 'Span *':
             continue
         if gimple_ctypes.TypeLattice.is_list(ctype):
             gen._struct_allocs_needed.add('Span')
@@ -4920,7 +4904,7 @@ def _emit_generic_instantiation(gen, info, arg_pairs, span_proofs=None):
     _decl = f"extern {info['ret']} {sym} ({', '.join(info['params']) or 'void'});"
     if _decl not in gen._elaborated_externs:
         gen._elaborated_externs.append(_decl)
-    if gimple_ctypes.TypeLattice.is_void(info['ret']):
+    if info['ret'] == 'void':
         gen._emit_call('', '', sym, arg_pairs)
         t = gen._new_temp('int')
         build.assign(gen, t, "0", "  /* void generic call */")
@@ -5249,7 +5233,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         _ir = gen.lower_expr(_inner)
         _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
         _iv = _iv_raw
-        if gimple_ctypes.TypeLattice.ends_in_star(_it) and not gimple_ctypes.TypeLattice.is_set(_it):
+        if gimple_ctypes.TypeLattice.ends_in_star(_it) and _it != 'MojoSet *':
             _iv = gen._cast('MojoSet *', _iv_raw)
         gen._emit_call('void', '', 'mojo_set_update',
                        [('MojoSet *', res), ('MojoSet *', _iv)])
@@ -5279,7 +5263,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         _ir = gen.lower_expr(_inner)
         _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
         _iv = _iv_raw
-        if gimple_ctypes.TypeLattice.ends_in_star(_it) and not gimple_ctypes.TypeLattice.is_dict(_it):
+        if gimple_ctypes.TypeLattice.ends_in_star(_it) and _it != 'MojoDict *':
             _iv = gen._cast('MojoDict *', _iv_raw)
         gen._emit_call('void', '', 'mojo_dict_update',
                        [('MojoDict *', res), ('MojoDict *', _iv)])

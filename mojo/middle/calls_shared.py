@@ -305,7 +305,7 @@ def _callable_param_ret_types(gen, fn_node) -> dict:
         if not isinstance(_d, gimple_ctypes.IdentExpr):
             continue
         _rt = gen.func_return_types.get(_as_str(_d.name))
-        if _rt and not gimple_ctypes.TypeLattice.is_void(_rt):
+        if _rt and _rt != 'void':
             _out[_pn] = _rt
     return _out
 
@@ -340,7 +340,7 @@ def _is_pointer_ctype(param_ctype) -> bool:
     if not param_ctype:
         return False
     _t = param_ctype if isinstance(param_ctype, str) else str(param_ctype)
-    return gimple_ctypes.TypeLattice.ends_with_star(_t)
+    return _t.endswith('*')
 
 
 def _null_default_pair(param_ctype, int_ctype: str = 'int') -> tuple:
@@ -511,7 +511,7 @@ def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) ->
 
     Mirrors real Mojo's observed overload resolution closely enough for
     already-valid, already-typechecked source (which is all this compiler
-    ever compiles — genuine ambiguity is a hard error in real Mojo, so a
+    ever transpiles — genuine ambiguity is a hard error in real Mojo, so a
     real call site should never present one): filter by arity range
     (accounting for default parameters), then by keyword-argument names,
     then score remaining candidates by per-position exact C-type match.
@@ -1031,7 +1031,7 @@ def _struct_operator_receiver(gen, op: str, left_node, aug: bool) -> str | None:
     if aug:
         dunder = '__i' + dunder[2:]
     qt = _as_str(gen._quick_type(left_node))
-    if not gimple_ctypes.TypeLattice.ends_in_star(qt) or (gimple_ctypes.TypeLattice.is_voidp(qt) or gimple_ctypes.TypeLattice.is_list(qt) or gimple_ctypes.TypeLattice.is_cstr(qt) or gimple_ctypes.TypeLattice.is_dict(qt) or gimple_ctypes.TypeLattice.is_str(qt) or gimple_ctypes.TypeLattice.is_set(qt)):
+    if not gimple_ctypes.TypeLattice.ends_in_star(qt) or qt in ('char *', 'void *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
         return None
     sname = gimple_exprtypes._struct_name_of(qt)
     if sname not in gen.struct_field_types:

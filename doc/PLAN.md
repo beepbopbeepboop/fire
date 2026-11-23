@@ -2,7 +2,7 @@
 
 This document tracks verified, still-open defects and deferred feature work.
 See `IMPL.md` for what's already implemented and working, and `STDLIB.md` for
-stdlib compilation status. Historically this file also tracked the GIMPLE
+stdlib transpilation status. Historically this file also tracked the GIMPLE
 bootstrap error-fixing plan from the project's early phase (May 2026) and
 `BACKLOG-CODEGEN.md` tracked defects deferred from the 2026-07-03 hardening
 pass — both are long since resolved or superseded and have been folded in

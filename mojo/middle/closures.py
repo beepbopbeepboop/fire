@@ -27,7 +27,7 @@ from fire_compiler import (
     WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list, _as_dict,
     for_target_names,
 )
-from mojo.middle.types import TypeLattice, _declared_vars_body, _mojo_type, _used_idents_node
+from mojo.middle.types import _declared_vars_body, _mojo_type, _used_idents_node
 from mojo.middle.exprtypes import _walk_ast, is_bound_method_value
 from mojo.middle.solvers import ClosureInfo
 
@@ -267,7 +267,7 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
     # in `GimpleGen.__init__`, not created here: a lazy `hasattr` initialiser
     # never runs in the compiled compiler (the field exists and is NULL there).
 
-    def _scan_for_closures(ctx: 'GimpleGen', outer_name: str, outer_scope: dict, body: list):
+    def _scan_for_closures(ctx, outer_name: str, outer_scope: dict, body: list):
         """Scan a function/method body for nested FunctionDefs and register them as closures."""
         enriched_scope = dict(outer_scope)
         _saved_vt2 = dict(ctx.var_types)
@@ -290,14 +290,14 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                                 ctx, bstmt.value,
                                 ctx.var_types.get(bstmt.value.obj.name, ''))):
                         t = 'MojoBoundMethod *'
-                    if TypeLattice.is_void(t):
+                    if t == 'void':
                         t = 'int64_t'
                     enriched_scope[name] = t
                     ctx.var_types[name] = t
             elif isinstance(bstmt, VarDecl):
                 if bstmt.name not in enriched_scope:
                     t = ctx._quick_type(bstmt.value) if bstmt.value else 'int64_t'
-                    if TypeLattice.is_void(t):
+                    if t == 'void':
                         t = 'int64_t'
                     enriched_scope[bstmt.name] = t
                     ctx.var_types[bstmt.name] = t
@@ -362,7 +362,7 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                 _wname = _as_str(_wn.name)
                 if _wname not in enriched_scope:
                     _wt = ctx._quick_type(_wn.value)
-                    if TypeLattice.is_void(_wt):
+                    if _wt == 'void':
                         _wt = 'int64_t'
                     enriched_scope[_wname] = _wt
                     ctx.var_types[_wname] = _wt
@@ -389,7 +389,7 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                     _crt = 'int64_t'
                     if _crn in enriched_scope:
                         _crt = _as_str(enriched_scope[_crn])
-                    if (TypeLattice.is_no_type(_crt) or TypeLattice.is_void(_crt) or TypeLattice.is_none_type(_crt) or TypeLattice.is_unsolved(_crt)):
+                    if _crt in ('', 'None', 'void', 'unknown'):
                         _crt = 'int64_t'
                     _typed[_crn] = _crt
                 _class_locals[outer_name] = _typed
@@ -884,16 +884,9 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                     # use/call-site inference settled on, not the bare
                     # `int64_t` default: a closure capturing `p` stores it in
                     # its env under THIS type.
-                    # Presence tests and typed views, not `.get(...)` chains: a
-                    # miss is the boxed None word on the self-hosted path, and
-                    # `_ip[pname]` on an untyped value indexed a LIST with the
-                    # name (`mojo_list_get_int` crash on any program with a `def`).
-                    _ipt = _as_dict(getattr(ctx, '_inferred_param_types', None) or {})
-                    _sname = _as_str(s.name)
-                    if _sname in _ipt:
-                        _ipd = _as_dict(_ipt[_sname])
-                        if pname in _ipd and _as_str(_ipd[pname]) != '':
-                            outer_scope[pname] = _as_str(_ipd[pname])
+                    _ip = (getattr(ctx, '_inferred_param_types', None) or {}).get(s.name)
+                    if _ip and _ip.get(pname):
+                        outer_scope[pname] = _ip[pname]
             _saved_vt = dict(ctx.var_types)
             ctx.var_types.update(outer_scope)
             for stmt in s.body:

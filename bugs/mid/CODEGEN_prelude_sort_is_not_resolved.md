@@ -1,5 +1,3 @@
-SPLIT: CODEGEN_prelude_sort_is_not_resolved-part1, CODEGEN_prelude_sort_is_not_resolved-part2, CODEGEN_prelude_sort_is_not_resolved-part3, CODEGEN_prelude_sort_is_not_resolved-part4, CODEGEN_prelude_sort_is_not_resolved-part5, CODEGEN_prelude_sort_is_not_resolved-part6, CODEGEN_prelude_sort_is_not_resolved-part7
-
 # CODEGEN: the prelude `sort` is not resolved without an explicit import
 
 `sort` is a prelude name (`std/prelude/__init__.mojo:127`, `from std.builtin.sort import partition, sort`),

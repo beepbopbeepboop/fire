@@ -1,5 +1,3 @@
-SPLIT: FORMAL_x86_endtoend_memory_ceiling-part1, FORMAL_x86_endtoend_memory_ceiling-part3. Part 2 (the peak-measurement harness `tools/measure_proof_peaks.py` and its schema test) has landed; its doc is deleted.
-
 # FORMAL: three generated proofs exceed the per-process `-M 6144` memory ceiling
 
 ## Symptom, measured

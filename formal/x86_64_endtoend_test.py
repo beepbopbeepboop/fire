@@ -1479,7 +1479,7 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         disp = int.from_bytes(raw[3:7], "little", signed=True)
         extra_args = " %d %d %d %d (%d)" % (rex, modrm, reg, dst, disp)
         extra_succ = {"$rex": str(rex), "$reg": str(reg), "$dst": str(dst),
-                      "$disp": str(disp), "$next": "%d + 7" % addr}
+                      "$disp": str(disp)}
     elif form in _SIB_STORE_WITH_DISP_FORMS:
         # `mov qword [rsp + disp], r64`: ModRM `4_` (mod=1 or 2, rm=4), the SIB
         # byte at `m + 3`, and the DISPLACEMENT at `m + 4` -- one byte further
@@ -1580,10 +1580,8 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     # `4294967868 + 4` to `4294967872` -- large Nat literals are not folded by
     # the simplifier -- so a successor stated as an addition leaves every
     # subsequent `rip` comparison unprovable, and the failure reads as a bare
-    # `False` from the `simp` that was trying.  A form may override this when
-    # the lemma states the next address symbolically (e.g. `m + 7`); the
-    # successor must match the lemma's conclusion term-for-term.
-    subs.setdefault("$next", str(addr + length))
+    # `False` from the `simp` that was trying.
+    subs["$next"] = str(addr + length)
     # `setdefault`, not `[...]`: `$imm` is ALSO a placeholder the `_resolve`
     # branch for the digit-immediate ALU forms fills in, with the MODEL's
     # expression for the immediate (`UInt64.ofInt (read_i32_le rc (m+3))`) rather
@@ -3656,7 +3654,7 @@ def _header(code, insns, base, steps):
     # so the image's size buys depth too, with the same floor for the short ones.
     depth = max(1000, 40 * max(steps, 1), 2 * (len(code) + 1))
     out = ["import X86\n",
-           "set_option maxHeartbeats 20000000\n",
+           "set_option maxHeartbeats 4000000\n",
            "set_option maxRecDepth %d\n" % depth,
            # The closing read's `simp only` set names every REX decoding the
            # body's bytes can call for and every wrapper the successor table
@@ -4169,11 +4167,10 @@ def emit_terminates(path):
             for line in _concrete_read(hs_path + ("hs%d" % (k + 1),), rex, hmem_path=hmem_for_read, mem_path=mem_for_read):
                 emit(line)
             emit("  all_goals sorry")
-        if ret_to is not None:
-            emit("have hstep%d : x86_step %s rc = some %s := by"
-                 % (k, state, succ))
-        else:
-            emit("have hstep%d := " % k + call)
+        emit("have hstep%d : x86_step %s rc = some %s := by"
+             % (k, state, succ) if ret_to is not None
+             else "have hstep%d : x86_step %s rc = some %s :="
+             % (k, state, succ))
         if ret_to is not None:
             # An explicit `by`, and the rewrite in the direction that makes the
             # lemma apply. Two things, both found by running it:
@@ -4190,13 +4187,11 @@ def emit_terminates(path):
             #    still proved by the model, and the tree's knowledge enters as the
             #    one rewrite that says the two are the same word.
             emit("  rw [← hpop%d]" % k)
-            emit("  exact " + call)
+        emit("  " + ("exact " if ret_to is not None else "") + call)
         emit("obtain \u27e8%s, h%d\u27e9 : \u2203 t, x86_step %s rc = some t :="
              % (nxt, k, state))
         emit("  \u27e8_, hstep%d\u27e9" % k)
-        # The RHS is inferred from `hstep{k}` so it is the lemma's successor,
-        # not our `succ` string — for the same reason `hstep`'s type is.
-        emit("have hs%d := by" % (k + 1))
+        emit("have hs%d : %s = %s := by" % (k + 1, nxt, succ))
         emit("  rw [h%d] at hstep%d" % (k, k))
         emit("  exact Option.some.inj hstep%d" % k)
         # If this FORM writes only registers -- read off `_STORE_FORMS`, not off
@@ -4206,9 +4201,8 @@ def emit_terminates(path):
         if not node.stores and node.kind not in ("leaves",):
             emit("have hmem%d : %s.mem = %s.mem := by" % (k + 1, nxt, state))
             hmem_fact = "hmem%d" % (k + 1)
-            hmem_simp = ", ".join(_MEM_LEMMAS)
-            emit("  rw [hs%d]" % (k + 1))
-            emit("  all_goals first | rfl | simp only [%s]" % hmem_simp)
+            hmem_simp = ", ".join(_MEM_LEMMAS + _WRAPPER_DEFS + _WRAPPER_PROJECTIONS)
+            emit("  rw [hs%d]; try simp [%s]" % (k + 1, hmem_simp))
         emit_value_facts(node, nxt, k + 1, fs_path + (node.form,), hval_base,
                          hmem_fact)
         # `x86_exec_go_exit_step`'s second argument is `h_not_exit : s_k.rip ≠

@@ -8,10 +8,10 @@
 > that failure mode is worse than an obviously stale one, because it stops
 > being obvious.
 >
-> What it describes: `make compile` running `apex py2mojo` to write a Mojo
+> What it describes: `make transpile` running `apex py2mojo` to write a Mojo
 > compiler into `mojo/*.mojo`, compiled from there by a `build/mojo` binary
 > into `stage1/mojo` and `stage2/mojo`. None of that exists: there is no
-> `compile:` rule in the Makefile, no `mojo/mojo_main.mojo`, no
+> `transpile:` rule in the Makefile, no `mojo/mojo_main.mojo`, no
 > `mojo_compiler.mojo`, and `build/mojo` is written by `build_mojo_cli.py`,
 > which nothing runs (see the note in `doc/IMPL.md`).
 >
