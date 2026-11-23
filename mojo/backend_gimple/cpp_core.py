@@ -9758,10 +9758,10 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     _al = item.alias
                     if _al is not None and isinstance(_al, str) and _al not in declared:
                         declared[_al] = 'int64_t'
-                        _alias_decl_lines.append(f"{indent}int64_t {_al};")
+                        _alias_decl_lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {_al}"))
                     elif _al is not None and isinstance(_al, gimple_ctypes.IdentExpr) and _al.name not in declared:
                         declared[_al.name] = 'int64_t'
-                        _alias_decl_lines.append(f"{indent}int64_t {_al.name};")
+                        _alias_decl_lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {_al.name}"))
                     break
         if _intrinsic and item.alias is not None:
             if isinstance(item.alias, str) and item.alias not in declared:
@@ -9775,7 +9775,7 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 if gen._cpp_func_scope_decls is not None:
                     gen._cpp_func_scope_decls.append(f"int64_t {_alias_cname};")
                 else:
-                    _alias_decl_lines.append(f"{indent}int64_t {_alias_cname};")
+                    _alias_decl_lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {_alias_cname}"))
             if _open_alias_name:
                 # The alias holds an OPEN FILE WORD, so it is an unsolved
                 # word like any callable/opaque value. Recording it is what
@@ -9822,13 +9822,11 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 break
         guard_var = gen._cpp_fresh_name('mojo_td')
         declare = [
-            f"{indent}mojo_tempdir_guard_t {guard_var};",
-            f"{indent}int __init_ok_ = mojo_tempdir_guard_init(&{guard_var});",
+            _cpp_ir_line(indent, 'decl', f"mojo_tempdir_guard_t {guard_var}"),
+            _cpp_assign_line("int __init_ok_", f"mojo_tempdir_guard_init(&{guard_var})", indent),
         ]
         if target_alias_name is not None:
-            declare.append(
-                f"{indent}const char* {target_alias_name} = "
-                f"mojo_tempdir_guard_path(&{guard_var});")
+            declare.append(_cpp_assign_line(f"const char* {target_alias_name}", f"mojo_tempdir_guard_path(&{guard_var})", indent))
         lines.extend(declare)
     elif _open_manager and _open_alias_name is not None:
         # Evaluate manager once and bind handle. Close on normal path.
@@ -9842,19 +9840,18 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         else:
             _nl_c = '(char *)0'
         _alias_cname = gen._cpp_kw_param_renames.get(_open_alias_name, _open_alias_name)
-        lines.append(f"{indent}{{")
+        lines.append(_cpp_ir_line(indent, 'block'))
         body_indent = indent + '    '
         open_scope = True
-        lines.append(
-            f"{body_indent}{_alias_cname} = (int64_t)mojo_open_file_ex((char *)({_path_c}), (char *)({_mode_c}), (char *)({_nl_c}));")
+        lines.append(_cpp_assign_line(_alias_cname, f"(int64_t)mojo_open_file_ex((char *)({_path_c}), (char *)({_mode_c}), (char *)({_nl_c}))", body_indent))
     for st in s.body:
         lines.extend(gen._cpp_stmt(st, declared, body_indent))
     if _intrinsic and guard_var:
-        lines.append(f"{indent}mojo_tempdir_guard_fini(&{guard_var});")
+        lines.append(_cpp_call_line(indent, 'mojo_tempdir_guard_fini', [f"&{guard_var}"]))
     elif open_scope and _open_alias_name is not None:
         _alias_cname = gen._cpp_kw_param_renames.get(_open_alias_name, _open_alias_name)
-        lines.append(f"{body_indent}mojo_close((void *)(intptr_t)({_alias_cname}));")
-        lines.append(f"{indent}}}")
+        lines.append(_cpp_call_line(body_indent, 'mojo_close', [f"(void *)(intptr_t)({_alias_cname})"]))
+        lines.append(_cpp_ir_line(indent, 'end'))
     return lines
 
 
