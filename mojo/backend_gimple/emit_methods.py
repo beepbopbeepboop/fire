@@ -4982,9 +4982,22 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and func.obj.name in gen.imported_symbols
             and func.obj.name not in gen.struct_field_types
             and (module_member_is_struct(gen, func.obj.name, func.member)
+                 and func.member in gen.struct_field_types
                  if func.obj.name in getattr(gen, '_module_alias_names', ())
                  else func.member in gen.struct_field_types)
             and func.member not in gen.var_types):
+        # The member names a real, already-inlined STRUCT (the from-import
+        # registration registers the layout in `struct_field_types`, and
+        # the typedef rides the same registration). A struct that merely
+        # EXISTS in the aliased module but is not inlined here (a generic
+        # one the elaboration pass would have to monomorphize, or a plain
+        # one the module-alias spelling cannot carry) falls through to the
+        # generic module-qualified path, which emits the honest extern
+        # stub -- the same disposition the `from M import S` spelling gives
+        # it. Without the `struct_field_types` gate this branch emitted a
+        # `_alloc_`/`_init_`/`sizeof` trio for a type nothing defines,
+        # which is what broke the stdlib sweep's `fmt.FormatStruct(...)` /
+        # `fmt.Repr(...)` / `testing.assert_raises(...)` call sites.
         return gen._lower_struct_constructor(
             _ctor_cname_via_module(gen, func.obj.name, func.member),
             node.args, node.kwargs)
