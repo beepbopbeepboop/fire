@@ -155,6 +155,9 @@ class Instr:
             return 'return ' + self.rhs.show() + ';'
         if k == 'while':
             return 'while (' + self.rhs.show() + ') {'
+        if k == 'decl':
+            # A declaration `<type> <name>;` with no initialiser.
+            return self.rhs.show() + ';'
         if k == 'block':
             # A bare `{` opening a C block with no header of its own.
             return '{'

@@ -10295,6 +10295,39 @@ def _cpp_refuse_unpacking_target(target) -> None:
             "dict .items(), or a container global unpacks per slot")
 
 
+def _cpp_counted_list_loop(gen, s, declared: dict, indent: str, wi: str, elem_ctype) -> list[str]:
+    """`for <target> in <wi>:` over a MojoList of word values, as a counted C loop.
+
+    The shared body of the three iteration arms (`_cpf_word_iterable`,
+    `_cpf_param_call`, `_cpf_call_iterable`): the target is declared on first
+    use, read from the list each pass, and the body is emitted one level deeper."""
+    ctr = gen._cpp_fresh_name("_mg_i")
+    tname = s.target
+    lines = []
+    if tname not in declared:
+        declared[tname] = elem_ctype
+        ctype = elem_ctype
+        lines.append(_cpp_ir_line(indent, 'decl', f"{ctype} {tname}"))
+    else:
+        ctype = declared[tname] or elem_ctype
+    lines.append(_cpp_ir_line(indent, 'for',
+                              f"int64_t {ctr} = 0; {ctr} < mojo_list_len({wi}); {ctr}++"))
+    if gimple_ctypes.TypeLattice.is_double(ctype):
+        get = f"mojo_list_get_double({wi}, {ctr})"
+    elif ctype in ('char *', 'const char *'):
+        get = f"mojo_list_get_str({wi}, {ctr})"
+    else:
+        # MojoList*/containers and word-typed values travel as int64_t slots.
+        get = f"mojo_list_get_int({wi}, {ctr})"
+        if ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+            get = f"({ctype })(intptr_t){get}"
+    lines.append(_cpp_assign_line(tname, get, indent + '    '))
+    for inner in s.body:
+        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+    lines.append(_cpp_ir_line(indent, 'end'))
+    return lines
+
+
 def _cpf_word_iterable(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
     """`for` over a callable-as-word parameter or a word local in `_cpp_for_stmt`.
 
@@ -10389,29 +10422,7 @@ def _cpf_word_iterable(gen, s: 'ForStmt', declared: dict, indent: str) -> list[s
             f"'{s.iterable.func.name}(...)' is not supported in a compiled "
             f"generator/coroutine body")
     if _elem_ctype and isinstance(s.target, str) and not for_target_is_tuple(s.target) and not s.else_body:
-        _ctr = gen._cpp_fresh_name("_mg_i")
-        _tname = s.target
-        _lines = []
-        if _tname not in declared:
-            declared[_tname] = _elem_ctype
-            _ctype = _elem_ctype
-            _lines.append(f"{indent}{_ctype} {_tname};")
-        else:
-            _ctype = declared[_tname] or _elem_ctype
-        _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
-        if gimple_ctypes.TypeLattice.is_double(_ctype):
-            _get = f"mojo_list_get_double({_wi}, {_ctr})"
-        elif _ctype in ('char *', 'const char *'):
-            _get = f"mojo_list_get_str({_wi}, {_ctr})"
-        else:
-            _get = f"mojo_list_get_int({_wi}, {_ctr})"
-            if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
-                _get = f"({ _ctype })(intptr_t){_get}"
-        _lines.append(f"{indent}    {_tname} = {_get};")
-        for inner in s.body:
-            _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-        _lines.append(f"{indent}}}")
-        return _pre + _lines
+        return _pre + _cpp_counted_list_loop(gen, s, declared, indent, _wi, _elem_ctype)
     _inner_for = gimple_ctypes.ForStmt(
         target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
         body=s.body, else_body=s.else_body)
@@ -10489,29 +10500,7 @@ def _cpf_param_call(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]
             _call_txt = gen._cpp_expr(s.iterable)
         _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
         if _elem_ctype and isinstance(s.target, str) and not for_target_is_tuple(s.target) and not s.else_body:
-            _ctr = gen._cpp_fresh_name("_mg_i")
-            _tname = s.target
-            _lines = []
-            if _tname not in declared:
-                declared[_tname] = _elem_ctype
-                _ctype = _elem_ctype
-                _lines.append(f"{indent}{_ctype} {_tname};")
-            else:
-                _ctype = declared[_tname] or _elem_ctype
-            _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
-            if gimple_ctypes.TypeLattice.is_double(_ctype):
-                _get = f"mojo_list_get_double({_wi}, {_ctr})"
-            elif _ctype in ('char *', 'const char *'):
-                _get = f"mojo_list_get_str({_wi}, {_ctr})"
-            else:
-                _get = f"mojo_list_get_int({_wi}, {_ctr})"
-                if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
-                    _get = f"({ _ctype })(intptr_t){_get}"
-            _lines.append(f"{indent}    {_tname} = {_get};")
-            for inner in s.body:
-                _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            _lines.append(f"{indent}}}")
-            return _pre + _lines
+            return _pre + _cpp_counted_list_loop(gen, s, declared, indent, _wi, _elem_ctype)
         _inner_for = gimple_ctypes.ForStmt(
             target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
             body=s.body, else_body=s.else_body)
@@ -10765,30 +10754,7 @@ def _cpf_call_iterable(gen, s: 'ForStmt', declared: dict, indent: str, target) -
             return _pre + _lines
         # Single-target iteration: bind element using table's element ctype.
         if isinstance(s.target, str):
-            _ctr = gen._cpp_fresh_name("_mg_i")
-            _tname = s.target
-            _lines = []
-            if _tname not in declared:
-                declared[_tname] = _elem_ctype
-                _ctype = _elem_ctype
-                _lines.append(f"{indent}{_ctype} {_tname};")
-            else:
-                _ctype = declared[_tname] or _elem_ctype
-            _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
-            if gimple_ctypes.TypeLattice.is_double(_ctype):
-                _get = f"mojo_list_get_double({_wi}, {_ctr})"
-            elif _ctype in ('char *', 'const char *'):
-                _get = f"mojo_list_get_str({_wi}, {_ctr})"
-            else:
-                # MojoList*/containers and word-typed values travel as int64_t slots.
-                _get = f"mojo_list_get_int({_wi}, {_ctr})"
-                if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
-                    _get = f"({ _ctype })(intptr_t){_get}"
-            _lines.append(f"{indent}    {_tname} = {_get};")
-            for inner in s.body:
-                _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            _lines.append(f"{indent}}}")
-            return _pre + _lines
+            return _pre + _cpp_counted_list_loop(gen, s, declared, indent, _wi, _elem_ctype)
         _inner_for = gimple_ctypes.ForStmt(
             target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
             body=s.body, else_body=s.else_body)
