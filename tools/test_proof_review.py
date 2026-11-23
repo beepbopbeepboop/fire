@@ -66,10 +66,17 @@ def main():
                 assert queued[0].claim == ["bug:DOC_a"] and "NOTESTCASE" in queued[0].task and "TEST" in queued[0].task
                 assert "Both TEST and NOTESTCASE are legitimate" in queued[0].task, "NOTESTCASE must be a legitimate outcome, not a last resort"
                 assert reg["bug-a"]["state"] == "superseded" and reg["bug-a"]["fixer"] == "fix-proof-bug-a"
+                assert "REPEAT REVIEW" not in queued[0].task, "the first review carries no repeat feedback"
+                reg["fix-proof-bug-a"] = dict(reg["bug-a"], state="exited-ok", branch="work/fix-proof-c")
+                with mock.patch.object(C, "retire_task", lambda n: True):
+                    I.enqueue_proof_review("fix-proof-bug-a", reg["fix-proof-bug-a"], ["bugs/DOC_a.md"])
+                rep = queued.pop().task
+                assert "REPEAT REVIEW" in rep and "NOTESTCASE: obsolete" in rep, "a repeat review is shown the commits it must fix"
+                del reg["fix-proof-bug-a"]
                 reg["fix-proof-fix-proof-bug-a"] = dict(reg["bug-a"], state="exited-ok")
                 orch = []
                 with mock.patch.object(C, "enqueue_orch_review", lambda n, kind, why: orch.append((n, kind))):
-                    I.enqueue_proof_review("fix-proof-fix-proof-bug-a", reg["fix-proof-fix-proof-bug-a"], ["bugs/DOC_a.md"])
+                    I.enqueue_proof_review("fix-proof-fix-proof-bug-a", reg["fix-proof-fix-proof-bug-a"], ["bug-a"])
                 assert len(queued) == 1, "past PROOF_DEPTH no further proof reviewer is queued"
                 assert orch == [("fix-proof-fix-proof-bug-a", "proof review depth")], "the cap goes to an orchestration reviewer"
                 assert reg["fix-proof-fix-proof-bug-a"].get("merge_capped"), "and the branch is capped, not looped"
