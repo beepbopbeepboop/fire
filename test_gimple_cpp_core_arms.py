@@ -185,6 +185,9 @@ def main() -> int:
         (_C._cpp_ir_line('  ', 'decl', 'int64_t x'), '  int64_t x;'),
         (_C._cpp_ir_line('  ', 'block'), '  {'),
         (_C._cpp_ir_line('  ', 'coyield', '(0)'), '  co_yield (0);'),
+        (_C._cpp_ir_line('  ', 'throw', 'x'), '  throw x;'),
+        (_C._cpp_ir_line('  ', 'if', 'c'), '  if (c) {'),
+        (_C._cpp_call_line('  ', 'mojo_exc_pending_set', ['0']), '  mojo_exc_pending_set(0);'),
     ]
     for got, want in text_cases:
         if got != want:

@@ -10155,18 +10155,18 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                   or _i >= len(sub_params) else f"_mj_w({_ae})")
                  for _i, _ae in enumerate(arg_exprs)]
     args_text = ', '.join(arg_exprs)
-    lines = [f"{indent}{{"]
+    lines = [_cpp_ir_line(indent, 'block')]
     if index_var is not None:
         if index_var not in declared:
             declared[index_var] = 'int64_t'
-        lines.append(f"{indent}    int64_t {index_var} = ({index_start_expr});")
+        lines.append(_cpp_assign_line(f"int64_t {index_var}", f"({index_start_expr})", indent + '    '))
     lines.append(f"{indent}    _mojogen_sub_guard {guard}"
         f"{{ {base}_start({args_text}), &{base}_destroy }};")
-    lines.append(f"{indent}    while ({base}_resume({guard}.g)) {{")
+    lines.append(_cpp_ir_line(indent + '    ', 'while', f"{base}_resume({guard}.g)"))
     body_indent = indent + '        '
     if is_tuple:
         val_var = gen._cpp_fresh_name("_mg_forgen_val")
-        lines.append(f"{body_indent}MojoList * {val_var} = {base}_value({guard}.g);")
+        lines.append(_cpp_assign_line(f"MojoList * {val_var}", f"{base}_value({guard}.g)", body_indent))
         for i, nm in enumerate(target):
             slot_ct = tuple_slot_ctypes[i] if tuple_slot_ctypes and i < len(tuple_slot_ctypes) else 'int64_t'
             if gimple_ctypes.TypeLattice.is_word(slot_ct):
@@ -10237,8 +10237,8 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     for inner in body:
         lines.extend(gen._cpp_stmt(inner, declared, body_indent))
     if index_var is not None:
-        lines.append(f"{body_indent}{index_var}++;")
-    lines.append(f"{indent}    }}")
+        lines.append(_cpp_ir_line(body_indent, 'expr', f"{index_var}++"))
+    lines.append(_cpp_ir_line(indent + '    ', 'end'))
     # Same Milestone-D pending-exception disambiguation _cpp_yield_from
     # already does at its own `_resume`-driven while-loop boundary (see
     # that method's docstring for the full reasoning) — `_resume`
@@ -10248,12 +10248,12 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     # mojo_raise()/longjmp from inside a coroutine frame) so `{guard}`'s
     # destructor still runs correctly during the throw's normal stack
     # unwind.
-    lines.append(f"{indent}    if (mojo_exc_pending_get()) {{")
-    lines.append(f"{indent}        mojo_exc_pending_set(0);")
+    lines.append(_cpp_ir_line(indent + '    ', 'if', 'mojo_exc_pending_get()'))
+    lines.append(_cpp_call_line(indent + '        ', 'mojo_exc_pending_set', ['0']))
     lines.append(f"{indent}        throw _MojoCppExc{{ mojo_exc_type_get(), "
                  f"mojo_exc_msg_get(), mojo_exc_obj_get() }};")
-    lines.append(f"{indent}    }}")
-    lines.append(f"{indent}}}")
+    lines.append(_cpp_ir_line(indent + '    ', 'end'))
+    lines.append(_cpp_ir_line(indent, 'end'))
     return lines
 
 
@@ -12391,7 +12391,7 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
         # refuse honestly rather than guess.
         stack = gen._cpp_reraise_stack
         if stack:
-            return [f"{indent}throw {stack[-1]};"]
+            return [_cpp_ir_line(indent, 'throw', stack[-1])]
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             "bare `raise` (re-raise) outside an except handler is not "
             "supported in a generator body")
