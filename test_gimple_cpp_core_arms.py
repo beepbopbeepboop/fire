@@ -410,6 +410,10 @@ def main() -> int:
     text_cases.append((_p.show(), '(a + b)'))
     _u = _Ex('un'); _u.op = '!'; _u.a = _ex('x')
     text_cases.append((_u.show(), '!x'))
+    # Cast spellings: a name the type table canonicalises (intptr_t is int64_t there) must keep its own spelling.
+    text_cases.append((_C._cpp_cast_ex('intptr_t', _ex('x')), '(intptr_t)x'))
+    text_cases.append((_C._cpp_cast_ex('char *', _ex('x')), '(char *)x'))
+    text_cases.append((_C._cpp_cast_ex('int64_t', _ex('x')), '(int64_t)x'))
     # A lambda with no return type, and an empty statement in a lambda body, which takes no separator.
     from mojo.ir.instr import Instr as _Instr
     _nol = _Ex('lambda'); _nol.body = [_Instr('decl')]

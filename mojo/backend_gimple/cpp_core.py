@@ -44,7 +44,7 @@ import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.coro as coro_mod
 from mojo.ir.instr import Ex, Instr, ex_bin, ex_text, ex_var
-from mojo.ir.types import type_named
+from mojo.ir.types import Type, type_named
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -5164,21 +5164,23 @@ def _cpx_call_ident(gen, e) -> Ex:
         # type, so it can be bound to whichever variable (a `char *`
         # or `int64_t` parameter slot that held the original) it is
         # assigned to.
-        return (_as_ex("[&]() { struct _W { int64_t w; "
-                "operator int64_t() const { return w; } "
-                "operator char *() const { return (char *)w; } "
-                + gen._cpp_word_container_operator('MojoList', False)
-                + " }; "
-                "MojoList *_mg_cp = mojo_list_copy("
-                f"mojo_iter_word((int64_t)(intptr_t)({args[0]}))); "
+        _wcp = Ex('lambda')
+        _wcp.body = [
+            _cpp_opaque("struct _W { int64_t w; operator int64_t() const { return w; } "
+                        "operator char *() const { return (char *)w; } "
+                        + gen._cpp_word_container_operator('MojoList', False) + " };"),
+            _cpp_instr('decl', "MojoList *_mg_cp = mojo_list_copy("
+                               f"mojo_iter_word((int64_t)(intptr_t)({args[0]})))"),
                 # `tuple(x)` IS a tuple in Python (a `list(x)` copy is
                 # not): mark the copy so a later repr uses parens and
                 # a tuple-specific consumer sees the same kind. The
                 # copy helper deliberately does not propagate the
                 # marker (see its own comment), so the constructor
                 # that means tuple has to say so.
-                + ("mojo_mark_as_tuple(_mg_cp); " if fname == 'tuple' else "")
-                + "return _W{(int64_t)(intptr_t)_mg_cp}; }()"))
+            _cpp_opaque("mojo_mark_as_tuple(_mg_cp);" if fname == 'tuple' else ''),
+            _cpp_instr('return', ex_text("_W{(int64_t)(intptr_t)_mg_cp}")),
+        ]
+        return _wcp
     if fname == 'enumerate' and not gen._locally_binds_name('enumerate'):
         # enumerate(iterable) → pair each element with its index.
         # Emit the underlying iterable; the consumer's loop
@@ -5583,21 +5585,22 @@ def _cpx_call_ident(gen, e) -> Ex:
         gen._cpp_pending_lambda_param_ctype = None
         _cmp = (f"_mg_key(_mg_b) < _mg_key(_mg_a)" if _reverse
                 else f"_mg_key(_mg_a) < _mg_key(_mg_b)")
-        return (
-            _as_ex(f"[&]() -> MojoList * {{ "
-            f"MojoList *_mg_in = {_cpp_as('MojoList *', args[0])}; "
-            f"int64_t _mg_n = mojo_list_len(_mg_in); "
-            f"std::vector<int64_t> _mg_v(_mg_n); "
-            f"for (int64_t _mg_i = 0; _mg_i < _mg_n; _mg_i++) "
-            f"_mg_v[_mg_i] = mojo_list_get_int(_mg_in, _mg_i); "
-            f"{gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG} _mg_key = {_key_val}; "
-            f"std::stable_sort(_mg_v.begin(), _mg_v.end(), "
-            f"[&](int64_t _mg_a, int64_t _mg_b) {{ "
-            f"return {_cmp}; }}); "
-            f"MojoList *_mg_out = mojo_list_new(); "
-            f"for (int64_t _mg_e : _mg_v) "
-            f"mojo_list_append_int(_mg_out, _mg_e); "
-            f"return _mg_out; }}()"))
+        _srt = Ex('lambda')
+        _srt.text = 'MojoList *'
+        _srt.body = [
+            _cpp_instr('decl', f"MojoList *_mg_in = {_cpp_as('MojoList *', args[0])}"),
+            _cpp_instr('decl', "int64_t _mg_n = mojo_list_len(_mg_in)"),
+            _cpp_instr('decl', "std::vector<int64_t> _mg_v(_mg_n)"),
+            _cpp_opaque("for (int64_t _mg_i = 0; _mg_i < _mg_n; _mg_i++) "
+                        "_mg_v[_mg_i] = mojo_list_get_int(_mg_in, _mg_i);"),
+            _cpp_instr('decl', f"{gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG} _mg_key = {_key_val}"),
+            _cpp_instr('expr', ex_text("std::stable_sort(_mg_v.begin(), _mg_v.end(), "
+                                       f"[&](int64_t _mg_a, int64_t _mg_b) {{ return {_cmp}; }})")),
+            _cpp_instr('decl', "MojoList *_mg_out = mojo_list_new()"),
+            _cpp_opaque("for (int64_t _mg_e : _mg_v) mojo_list_append_int(_mg_out, _mg_e);"),
+            _cpp_instr('return', ex_text("_mg_out")),
+        ]
+        return _srt
     if (fname == 'callable' and len(e.args) == 1
             and isinstance(e.args[0], gimple_ctypes.IdentExpr)
             and gen._cpp_declared is not None
@@ -5712,11 +5715,16 @@ def _cpx_call_ident(gen, e) -> Ex:
             init_stmt = f" {init_sym}({init_args});"
         else:
             init_stmt = ''
-        return (_as_ex(f"[&]() -> {fname} * {{ {fname} * _t = "
-                f"({fname} *)calloc(1, sizeof({fname})); "
-                f"_t->__mojo_type_id = {gimple_exprtypes._struct_type_id(fname)};"
-                f"{attr_inits}{init_stmt} "
-                f"return _t; }}()"))
+        _ctr = Ex('lambda')
+        _ctr.text = f"{fname} *"
+        _ctr.body = [
+            _cpp_instr('decl', f"{fname} * _t = ({fname} *)calloc(1, sizeof({fname}))"),
+            # The stamp runs straight into the attribute initialisers (no separator between them).
+            _cpp_opaque(f"_t->__mojo_type_id = {gimple_exprtypes._struct_type_id(fname)};"
+                        f"{attr_inits}{init_stmt}"),
+            _cpp_instr('return', ex_text("_t")),
+        ]
+        return _ctr
     # A call to a module-level function (tokenize.py's
     # `detect_encoding(readline)`, codecs.py's
     # `getincrementalencoder(encoding)`, os.py's `fspath(top)`)
@@ -5927,10 +5935,14 @@ def _cpx_call_ident(gen, e) -> Ex:
                         "tracked for a lambda's **kwargs)")
             _call_args.append(_dictvar)
         cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
-        return (_as_ex(f"[&]() -> int64_t {{ "
-                + ' '.join(_pack_stmts)
-                + f" return (int64_t)(intptr_t)({cpp_fname}"
-                  f"({', '.join(_call_args)})); }}()"))
+        _pck = Ex('lambda')
+        _pck.text = 'int64_t'
+        _pck.body = [
+            _cpp_opaque(' '.join(_pack_stmts)),
+            _cpp_instr('return', _cpp_cast_ex('int64_t', _cpp_cast_ex(
+                'intptr_t', _paren_ex(_cpp_call_ex(cpp_fname, _call_args))))),
+        ]
+        return _pck
     # A call to a nested NON-CAPTURING sync helper `def` that
     # `_cpp_compile_nested_sync_helpers` (gimple_cpp_async.py)
     # already compiled into a `static` C++ function ahead of this
@@ -6320,9 +6332,16 @@ def _cpp_comma_ex(first, second) -> Ex:
 
 
 def _cpp_cast_ex(ctype: str, inner) -> Ex:
-    """`(ctype) inner` as a `cast` Ex; `ctype` is the C spelling, `inner` an Ex or text."""
+    """`(ctype) inner` as a `cast` Ex; `ctype` is the C spelling, `inner` an Ex or text.
+
+    The type table canonicalises some spellings (`intptr_t` is the `int64_t` type there), which
+    would change the printed cast. A spelling the table does not carry exactly is kept verbatim:
+    a cast renders only its type's spelling, so the name is all the printer needs."""
+    t = type_named(ctype)
+    if t.name != ctype:
+        t = Type('struct', ctype, 0, False)
     e = Ex('cast')
-    e.ty = type_named(ctype)
+    e.ty = t
     e.a = _as_ex(inner)
     return e
 

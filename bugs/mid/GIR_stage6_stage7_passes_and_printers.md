@@ -737,3 +737,27 @@ callable body, the struct constructor (`calloc` plus `attr_inits`), and the pack
 
 Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine
 programs; `test_gimple_cpp_core_arms.py` 30 arms, 0 failures, with the new rules pinned.
+
+## Status 2026-11-23 (step 21): the identifier arm's lambdas are on the lambda shape
+
+Four more `_cpx_call_ident` lambdas are `Ex('lambda')` now, each with an exact body:
+
+- the `tuple()`/`list()` copy, with its `_W` word container: the struct definition as one opaque
+  statement, the `mojo_list_copy` declaration, the optional tuple marker, and the `_W{...}` return;
+- the `sorted()` copy over a list: its declarations, the element-copy loop and the sort (the loops are
+  brace-less, so they stay opaque statements), the `mojo_list_append_int` loop, and the return;
+- the struct constructor: the `calloc` declaration, then the `__mojo_type_id` stamp and the attribute
+  initialisers as one opaque statement (they have no separator between them in the output), then `return _t`;
+- the `*args`/`**kwargs` call: the pack statements, then `return (int64_t)(intptr_t)(f(args))` built as casts
+  and a call.
+
+`_cpp_cast_ex` now keeps a spelling the type table does not carry exactly (`intptr_t` is `int64_t`
+there, which would have printed the wrong cast in the `*args` lambda). Pinned in the arm test.
+
+Remaining text lambdas on the call paths: `_cpx_call_member`'s `str.format_words` lambda, and the
+comparator lambda inside the `sorted()` lambda (a leaf: the comparator is a lambda with its own
+parameters). Helpers outside the arms that still print lambdas: `_cpp_dyn_call_expr`,
+`_cpp_generator_start_kwargs_expr`, `_cpp_boxed_list_literal_expr`, `_cpp_list_literal_arg_expr`.
+
+Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine
+programs; `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
