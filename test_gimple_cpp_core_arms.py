@@ -57,7 +57,7 @@ TOOL = os.path.join(ROOT, 'tools', 'extract_arm.py')
 # line that could move, so the parent may only get shorter.
 # The expression arms still building C++ text (plan step 4 in the stage 6/7 doc).
 EXPR_ARMS_STILL_TEXT = {
-    '_cpx_subscript_expr', '_cpx_lambda_expr', '_cpx_binary_op',
+    '_cpx_lambda_expr', '_cpx_binary_op',
     '_cpx_member_expr', '_cpx_await_expr', '_cpx_call_expr',
 }
 PARENTS = [
@@ -289,6 +289,35 @@ def main() -> int:
     for _nm, _want in (('None', '0'), ('True', 'true'), ('False', 'false'), ('x', '(*x)'),
                        ('default', 'default_'), ('y', 'y'), ('zz', '_mm_globals.zz')):
         text_cases.append((_C._cpx_ident_expr(_IGen(), _N.IdentExpr(name=_nm)).show(), _want))
+    # The subscript arm, through a stub. Expected strings are HEAD's arm output.
+    class _SGen(_StubGen):
+        def __init__(self, decl, **kw):
+            super().__init__(decl)
+            self._cpp_gen_self_struct = None
+            self._async_api = None
+            self._cpp_gen_self_fields = None
+            self._cpp_list_local_elem_types = kw.get('elem', {})
+            self._cpp_local_container_shapes = kw.get('shapes', {})
+            self._cpp_local_dict_val_types = kw.get('dictval', {})
+            self.func_return_types = {}
+            self._cpp_object_params = kw.get('objp', ())
+            self._cpp_none_guards = {}
+            self._cpp_param_names = ()
+        def _cpp_expr_ex(self, n):
+            return _C._cpp_expr_ex(self, n)
+        def _cpp_refuse_str_key_subscript(self, e):
+            pass
+        def _cpp_struct_ptr_local(self, n):
+            return False
+        def _cpp_dict_key_expr(self, idx_node, idx):
+            return f'"{idx}"'
+
+    _sub = lambda decl, **kw: _C._cpx_subscript_expr(_SGen(decl, **kw), _N.SubscriptExpr(obj=_N.IdentExpr(name='xs'), index=_N.IntLiteral(value=1))).show()
+    text_cases.append((_sub({'xs': 'MojoList *'}), 'mojo_list_get_int((MojoList *)(xs), (int64_t)(1))'))
+    text_cases.append((_sub({'xs': 'MojoList *'}, elem={'xs': 'char *'}), 'mojo_list_get_str((MojoList *)(xs), (int64_t)(1))'))
+    text_cases.append((_sub({'xs': 'MojoDict *'}, dictval={'xs': 'Node *'}), '(Node *)mojo_dict_get_int((MojoDict *)(xs), "1")'))
+    text_cases.append((_sub({'xs': 'int64_t'}, objp=('xs',)), 'mojo_getitem_word((int64_t)(xs), (int64_t)(1))'))
+    text_cases.append((_sub({'xs': 'char *'}), 'mojo_char_at_str_cp((char *)(xs), 1)'))
     _xs = _N.IdentExpr(name='xs')
     _ints = lambda v: _N.IntLiteral(value=v)
     _lst = _slice({'xs': 'MojoList *'}, _xs, _ints(1), _ints(4), _ints(2))

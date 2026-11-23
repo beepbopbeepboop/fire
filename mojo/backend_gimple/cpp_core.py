@@ -6276,7 +6276,7 @@ def _cpx_slice_expr(gen, e) -> Ex:
     return _cpp_call_ex('mojo_cstr_slice', [f"(char *)({gen._cpp_expr(e.obj)})", start, stop])
 
 
-def _cpx_subscript_expr(gen, e) -> str:
+def _cpx_subscript_expr(gen, e) -> Ex:
     """`SubscriptExpr` in `_cpp_expr`.
 
     One arm of `_cpp_expr`, which tests the condition and calls this."""
@@ -6300,7 +6300,7 @@ def _cpx_subscript_expr(gen, e) -> str:
                 gen, _sym,
                 f"{_getitem_struct}_{gimple_ctypes._safe_name('__getitem__')}",
                 [idx])
-            return f"{_sym}({obj}, {', '.join(_gi_args)})"
+            return _cpp_call_ex(_sym, [obj, ', '.join(_gi_args)])
     # Python `s[i]` on a string → a 1-char string (not a C++ char).
     # Subscripting a char* expression (a local, another subscript's
     # result, or a string literal) is the common generator-body
@@ -6344,17 +6344,17 @@ def _cpx_subscript_expr(gen, e) -> str:
             # as char* rather than being reinterpreted as an integer.
             _leet = getattr(gen, '_cpp_list_local_elem_types', {}).get(e.obj.name)
             if gimple_ctypes.TypeLattice.is_cstr(_leet):
-                return f"mojo_list_get_str({_cpp_as('MojoList *', obj)}, (int64_t)({idx}))"
+                return _cpp_call_ex('mojo_list_get_str', [_cpp_as('MojoList *', obj), f"(int64_t)({idx})"])
             if gimple_ctypes.TypeLattice.is_double(_leet):
-                return f"mojo_list_get_double({_cpp_as('MojoList *', obj)}, (int64_t)({idx}))"
-            return f"mojo_list_get_int({_cpp_as('MojoList *', obj)}, (int64_t)({idx}))"
+                return _cpp_call_ex('mojo_list_get_double', [_cpp_as('MojoList *', obj), f"(int64_t)({idx})"])
+            return _cpp_call_ex('mojo_list_get_int', [_cpp_as('MojoList *', obj), f"(int64_t)({idx})"])
         if gen._cpp_declared is not None and isinstance(e.obj, gimple_ctypes.IdentExpr):
             _local_shape = getattr(gen, '_cpp_local_container_shapes', {}).get(e.obj.name)
             if _local_shape == 'list':
-                return f"mojo_list_get_int({_cpp_as('MojoList *', obj)}, (int64_t)({idx}))"
+                return _cpp_call_ex('mojo_list_get_int', [_cpp_as('MojoList *', obj), f"(int64_t)({idx})"])
             if _local_shape == 'dict':
                 key_expr = gen._cpp_dict_key_expr(e.index, idx)
-                return f"mojo_dict_get_int({_cpp_as('MojoDict *', obj)}, {key_expr})"
+                return _cpp_call_ex('mojo_dict_get_int', [_cpp_as('MojoDict *', obj), key_expr])
         if gen._cpp_declared is not None and isinstance(e.obj, gimple_ctypes.IdentExpr) \
                 and gen._cpp_declared.get(e.obj.name) == 'MojoDict *':
             key_expr = gen._cpp_dict_key_expr(e.index, idx)
@@ -6363,8 +6363,8 @@ def _cpx_subscript_expr(gen, e) -> str:
             # pointer the reader is typed as (see the prescan above).
             _vct = getattr(gen, '_cpp_local_dict_val_types', {}).get(e.obj.name)
             if _vct is not None:
-                return f"({_vct})mojo_dict_get_int({_cpp_as('MojoDict *', obj)}, {key_expr})"
-            return f"mojo_dict_get_int({_cpp_as('MojoDict *', obj)}, {key_expr})"
+                return ex_text(f"({_vct})mojo_dict_get_int({_cpp_as('MojoDict *', obj)}, {key_expr})")
+            return _cpp_call_ex('mojo_dict_get_int', [_cpp_as('MojoDict *', obj), key_expr])
         # A bare identifier that names a real module-level FUNCTION
         # is never a string/container: `Unpack[self]` (typing.py's
         # `_BaseGenericAlias.__iter__`, `Unpack` being an
@@ -6390,9 +6390,9 @@ def _cpx_subscript_expr(gen, e) -> str:
                 and not isinstance(e.index, gimple_ctypes.SliceExpr)):
             # A dynamic word (a parameter declared `object`) is a list or a
             # string; which one is only known now.
-            return f"mojo_getitem_word((int64_t)({obj}), (int64_t)({idx}))"
+            return _cpp_call_ex('mojo_getitem_word', [f'(int64_t)({obj})', f'(int64_t)({idx})'])
         _cpp_refuse_str_key_subscript(gen, e)
-        return f"mojo_char_at_str_cp((char *)({obj}), {idx})"
+        return _cpp_call_ex('mojo_char_at_str_cp', [f'(char *)({obj})', idx])
     # Subscripting a CALL RESULT whose declared return type is a
     # container pointer: `detect_encoding(readline)[0]` where
     # detect_encoding returns MojoList * (tokenize.py's exact shape —
@@ -6405,7 +6405,7 @@ def _cpx_subscript_expr(gen, e) -> str:
             and isinstance(e.obj.func, gimple_ctypes.IdentExpr)
             and e.obj.func.name in gen.func_return_types
             and gimple_ctypes.TypeLattice.is_list(gen.func_return_types[e.obj.func.name])):
-        return f"mojo_list_get_int({_cpp_as('MojoList *', obj)}, (int64_t)({idx}))"
+        return _cpp_call_ex('mojo_list_get_int', [_cpp_as('MojoList *', obj), f"(int64_t)({idx})"])
     # Subscripting a str.partition/rpartition RESULT (`line.partition('#')
     # [0]`, strutil.py's significant-line filter inside a compiled
     # generator): the partition call above yields the real 3-element
@@ -6416,9 +6416,12 @@ def _cpx_subscript_expr(gen, e) -> str:
     if (isinstance(e.obj, gimple_ctypes.CallExpr)
             and isinstance(e.obj.func, gimple_ctypes.MemberExpr)
             and e.obj.func.member in ('partition', 'rpartition')):
-        return f"mojo_list_get_str({_cpp_as('MojoList *', obj)}, (int64_t)({idx}))"
+        return _cpp_call_ex('mojo_list_get_str', [_cpp_as('MojoList *', obj), f"(int64_t)({idx})"])
     _cpp_refuse_str_key_subscript(gen, e)
-    return f"({obj})[{idx}]"
+    e_ix = Ex('index')
+    e_ix.a = _paren_ex(ex_text(obj))
+    e_ix.b = ex_text(idx)
+    return ex_text(e_ix)
 
 
 def _cpx_await_expr(gen, e) -> str:
@@ -6765,7 +6768,7 @@ def _cpp_expr_ex(gen, e):
     if isinstance(e, gimple_ctypes.SliceExpr):
         return _cpx_slice_expr(gen, e)
     if isinstance(e, gimple_ctypes.SubscriptExpr):
-        return ex_text(_cpx_subscript_expr(gen, e))
+        return _cpx_subscript_expr(gen, e)
     if isinstance(e, gimple_ctypes.AwaitExpr):
         return ex_text(_cpx_await_expr(gen, e))
     raise gimple_exprtypes._UnsupportedGeneratorShape(
