@@ -320,7 +320,7 @@ def _cpp_container_literal_init(gen, name: str, value_node, indent: str) -> list
             boxed = _cpp_boxed_list_literal_expr(gen, value_node)
             if elem_reg is not None:
                 elem_reg[name] = 'int64_t'
-            return [f"{indent}{name} = {boxed};"]
+            return [_cpp_assign_line(name, boxed, indent)]
         etype = None
         for el in value_node.elements:
             if isinstance(el, (gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
@@ -331,26 +331,23 @@ def _cpp_container_literal_init(gen, name: str, value_node, indent: str) -> list
                 el, gen._cpp_declared, getattr(gen, '_cpp_gen_self_fields', None),
                 gen._async_api) or 'int64_t'
             etype = ect if etype is None else (gimple_ctypes.TypeLattice.join(etype, ect) or 'int64_t')
-        lines = [f"{indent}{name} = mojo_list_new();"]
+        lines = [_cpp_assign_line(name, "mojo_list_new()", indent)]
         for el in value_node.elements:
             ev = gen._cpp_expr(el)
             ect = gimple_exprtypes._infer_simple_expr_ctype(
                 el, gen._cpp_declared, getattr(gen, '_cpp_gen_self_fields', None),
                 gen._async_api) or 'int64_t'
             if gimple_ctypes.TypeLattice.is_cstr(etype):
-                lines.append(f"{indent}mojo_list_append_str({name}, "
-                             f"(char *)({ev}));")
+                lines.append(_cpp_call_line(indent, 'mojo_list_append_str', [name, f"(char *)({ev})"]))
             elif gimple_ctypes.TypeLattice.is_double(etype):
-                lines.append(f"{indent}mojo_list_append_double({name}, "
-                             f"(double)({ev}));")
+                lines.append(_cpp_call_line(indent, 'mojo_list_append_double', [name, f"(double)({ev})"]))
             else:
-                lines.append(f"{indent}mojo_list_append_int({name}, "
-                             f"(int64_t)({ev}));")
+                lines.append(_cpp_call_line(indent, 'mojo_list_append_int', [name, f"(int64_t)({ev})"]))
         if elem_reg is not None:
             elem_reg[name] = etype or 'int64_t'
         return lines
     if isinstance(value_node, gimple_ctypes.DictExpr):
-        lines = [f"{indent}{name} = mojo_dict_new();"]
+        lines = [_cpp_assign_line(name, "mojo_dict_new()", indent)]
         vtype = None
         for k_node, v_node in value_node.pairs:
             if not isinstance(k_node, gimple_ctypes.StringLiteral):
@@ -365,26 +362,23 @@ def _cpp_container_literal_init(gen, name: str, value_node, indent: str) -> list
             vv = gen._cpp_expr(v_node)
             key = f'"{gimple_ctypes._c_escape(k_node.value)}"'
             if gimple_ctypes.TypeLattice.is_cstr(vtype):
-                lines.append(f"{indent}mojo_dict_set_str({name}, {key}, "
-                             f"(char *)({vv}));")
+                lines.append(_cpp_call_line(indent, 'mojo_dict_set_str', [name, key, f"(char *)({vv})"]))
             elif gimple_ctypes.TypeLattice.is_double(vtype):
-                lines.append(f"{indent}mojo_dict_set_double({name}, {key}, "
-                             f"(double)({vv}));")
+                lines.append(_cpp_call_line(indent, 'mojo_dict_set_double', [name, key, f"(double)({vv})"]))
             else:
-                lines.append(f"{indent}mojo_dict_set_int({name}, {key}, "
-                             f"(int64_t)({vv}));")
+                lines.append(_cpp_call_line(indent, 'mojo_dict_set_int', [name, key, f"(int64_t)({vv})"]))
         return lines
     if isinstance(value_node, gimple_ctypes.SetExpr):
-        lines = [f"{indent}{name} = mojo_set_new();"]
+        lines = [_cpp_assign_line(name, "mojo_set_new()", indent)]
         for el in value_node.elements:
             ev = gen._cpp_expr(el)
             ect = gimple_exprtypes._infer_simple_expr_ctype(
                 el, gen._cpp_declared, getattr(gen, '_cpp_gen_self_fields', None),
                 gen._async_api) or 'int64_t'
             if gimple_ctypes.TypeLattice.is_cstr(ect):
-                lines.append(f"{indent}mojo_set_add_str({name}, (char *)({ev}));")
+                lines.append(_cpp_call_line(indent, 'mojo_set_add_str', [name, f"(char *)({ev})"]))
             else:
-                lines.append(f"{indent}mojo_set_add_int({name}, (int64_t)({ev}));")
+                lines.append(_cpp_call_line(indent, 'mojo_set_add_int', [name, f"(int64_t)({ev})"]))
         return lines
     return None
 
