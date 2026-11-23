@@ -57,7 +57,6 @@ TOOL = os.path.join(ROOT, 'tools', 'extract_arm.py')
 # line that could move, so the parent may only get shorter.
 # The expression arms still building C++ text (plan step 4 in the stage 6/7 doc).
 EXPR_ARMS_STILL_TEXT = {
-    '_cpx_walrus', '_cpx_compare_chain',
     '_cpx_ident_expr', '_cpx_subscript_expr', '_cpx_lambda_expr', '_cpx_binary_op',
     '_cpx_member_expr', '_cpx_await_expr', '_cpx_call_expr',
 }
@@ -238,6 +237,31 @@ def main() -> int:
     text_cases.append((_unary('not', {'x': 'int64_t'}), '(!x)'))
     text_cases.append((_unary('~', {'x': 'int64_t'}), '(~x)'))
     text_cases.append((_unary('-', {'x': 'MojoList *'}), '(-x)'))
+    # The walrus and compare-chain arms, through a stub. Expected strings are HEAD's output.
+    class _EGen(_StubGen):
+        def __init__(self, decl):
+            super().__init__(decl)
+            self._cpp_param_names = ()
+            self._cpp_none_guards = {}
+            self._cpp_gen_self_struct = None
+            self._async_api = None
+            self._cpp_gen_self_fields = None
+        def _cpp_expr_ex(self, n):
+            return _C._cpp_expr_ex(self, n)
+        def _cpp_struct_ptr_local(self, name):
+            return False
+        def _cpp_in_link(self, a, an, b, bn, negate=False):
+            return f"in({a},{b})"
+
+    _iv = lambda v: _N.IntLiteral(value=v)
+    _walrus_name = _N.BinaryOp(op=':=', left=_N.IdentExpr(name='q'), right=_iv(3))
+    text_cases.append((_C._cpx_walrus(_EGen({}), _walrus_name).show(), '(q = 3)'))
+    _walrus_sub = _N.BinaryOp(op=':=', left=_N.SubscriptExpr(obj=_N.IdentExpr(name='xs'), index=_iv(1)), right=_iv(4))
+    text_cases.append((_C._cpx_walrus(_EGen({'xs': 'MojoList *'}), _walrus_sub).show(),
+                       '(mojo_list_set_int(xs, (int64_t)(1), (int64_t)(4)))'))
+    _chain = _N.CompareChain(operands=[_N.IdentExpr(name='x'), _N.IdentExpr(name='y'), _N.IdentExpr(name='z')], ops=['<', '<='])
+    text_cases.append((_C._cpx_compare_chain(_EGen({'x': 'int64_t', 'y': 'int64_t', 'z': 'int64_t'}), _chain).show(),
+                       '((x < y) && (y <= z))'))
     _xs = _N.IdentExpr(name='xs')
     _ints = lambda v: _N.IntLiteral(value=v)
     _lst = _slice({'xs': 'MojoList *'}, _xs, _ints(1), _ints(4), _ints(2))

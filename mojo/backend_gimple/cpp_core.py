@@ -3907,7 +3907,7 @@ def _cpx_binary_op(gen, e) -> str:
     return f"({_bl} {op} {_br})"
 
 
-def _cpx_compare_chain(gen, e) -> str:
+def _cpx_compare_chain(gen, e) -> Ex:
     """`CompareChain` in `_cpp_expr`: a chained comparison.
 
     One arm of `_cpp_expr`, which tests the condition and calls this."""
@@ -3918,12 +3918,12 @@ def _cpx_compare_chain(gen, e) -> str:
         a = gen._cpp_expr(a_node)
         b = gen._cpp_expr(b_node)
         if op in ('in', 'not in'):
-            links.append(gen._cpp_in_link(a, a_node, b, b_node,
-                                           negate=(op == 'not in')))
+            links.append(ex_text(gen._cpp_in_link(a, a_node, b, b_node,
+                                                  negate=(op == 'not in'))))
         else:
             _scmp = _cpp_str_compare(gen, op, a_node, b_node, a, b)
             if _scmp is not None:
-                links.append(_scmp)
+                links.append(ex_text(_scmp))
                 continue
             # Mixed pointerness guard: exactly one side is a
             # statically-known `char *` (a string slice/subscript,
@@ -3950,29 +3950,44 @@ def _cpx_compare_chain(gen, e) -> str:
                     a = f"((char *)({a}))"
             else:
                 a, b = _cpp_word_vs_object_pointer(_a_ct, _b_ct, a, b)
-            links.append(f"({a} {gimple_ctypes._GD_BIN_OPS.get(op, op)} {b})")
-    return '(' + ' && '.join(links) + ')'
+            links.append(_paren_ex(ex_bin(ex_text(a), gimple_ctypes._GD_BIN_OPS.get(op, op), ex_text(b))))
+    return _paren_ex(_and_chain(links))
 
 
-def _cpx_walrus(gen, e) -> str:
+def _assign_ex(lhs, rhs) -> Ex:
+    """`(lhs = rhs)` as a parenthesised assignment Ex; lhs and rhs are C text."""
+    return _paren_ex(ex_bin(ex_text(lhs), '=', ex_text(rhs)))
+
+
+def _and_chain(links: list) -> Ex:
+    """`a && b && c` as left-folded `&&` Ex nodes (empty: an empty leaf)."""
+    if not links:
+        return ex_text('')
+    out = links[0]
+    for x in links[1:]:
+        out = ex_bin(out, '&&', x)
+    return out
+
+
+def _cpx_walrus(gen, e) -> Ex:
     """`a := b` (an assignment expression) in `_cpp_expr`.
 
     One arm of `_cpp_expr`, which tests the condition and calls this."""
     val = gen._cpp_expr(e.right)
     if isinstance(e.left, gimple_ctypes.IdentExpr):
         name = e.left.name
-        return f"({name} = {val})"
+        return _assign_ex(name, val)
     if isinstance(e.left, gimple_ctypes.MemberExpr):
         # struct field assignment
         struct_name = getattr(gen, '_cpp_gen_self_struct', None)
         if struct_name and isinstance(e.left.obj, gimple_ctypes.IdentExpr) and e.left.obj.name == 'self':
-            return f"(self->{gimple_ctypes._safe_field(e.left.member)} = {val})"
+            return _assign_ex(f"self->{gimple_ctypes._safe_field(e.left.member)}", val)
         obj_expr = gen._cpp_expr(e.left.obj) if not isinstance(e.left.obj, gimple_ctypes.IdentExpr) else e.left.obj.name
         if isinstance(e.left.obj, gimple_ctypes.IdentExpr):
             _ptr_struct = gen._cpp_struct_ptr_local(e.left.obj.name)
             if _ptr_struct:
-                return f"({obj_expr}->{gimple_ctypes._safe_field(e.left.member)} = {val})"
-        return f"({obj_expr}.{gimple_ctypes._safe_field(e.left.member)} = {val})"
+                return _assign_ex(f"{obj_expr}->{gimple_ctypes._safe_field(e.left.member)}", val)
+        return _assign_ex(f"{obj_expr}.{gimple_ctypes._safe_field(e.left.member)}", val)
     if isinstance(e.left, gimple_ctypes.SubscriptExpr):
         obj = gen._cpp_expr(e.left.obj)
         idx = gen._cpp_expr(e.left.index)
@@ -3987,15 +4002,15 @@ def _cpx_walrus(gen, e) -> str:
             suf = gimple_ctypes.TypeLattice.list_suffix(vctype) if vctype else 'int'
             idx64 = f"(int64_t)({idx})"
             if suf == 'str' or gimple_ctypes.TypeLattice.is_cstr(vctype):
-                return f"(mojo_list_set_str({obj}, {idx64}, (char *)({val})))"
+                return _paren_ex(_cpp_call_ex('mojo_list_set_str', [obj, idx64, f"(char *)({val})"]))
             elif gimple_ctypes.TypeLattice.is_double(suf):
-                return f"(mojo_list_set_double({obj}, {idx64}, (double)({val})))"
+                return _paren_ex(_cpp_call_ex('mojo_list_set_double', [obj, idx64, f"(double)({val})"]))
             else:
-                return f"(mojo_list_set_int({obj}, {idx64}, (int64_t)({val})))"
+                return _paren_ex(_cpp_call_ex('mojo_list_set_int', [obj, idx64, f"(int64_t)({val})"]))
         elif obj_ct == 'MojoDict *':
-            return f"(mojo_dict_set_int_kw({obj}, (int64_t)({idx}), (int64_t)({val})))"
-        return f"(*(&({obj}[{idx}])) = {val})"
-    return f"({gen._cpp_expr(e.left)} = {val})"
+            return _paren_ex(_cpp_call_ex('mojo_dict_set_int_kw', [obj, f"(int64_t)({idx})", f"(int64_t)({val})"]))
+        return _assign_ex(f"*(&({obj}[{idx}]))", val)
+    return _assign_ex(gen._cpp_expr(e.left), val)
 
 
 def _cpx_call_expr(gen, e) -> str:
@@ -6701,7 +6716,7 @@ def _cpp_expr_ex(gen, e):
     if isinstance(e, gimple_ctypes.BinaryOp):
         return ex_text(_cpx_binary_op(gen, e))
     if isinstance(e, gimple_ctypes.CompareChain):
-        return ex_text(_cpx_compare_chain(gen, e))
+        return _cpx_compare_chain(gen, e)
     if isinstance(e, gimple_ctypes.DictExpr):
         pairs = [f"{{{gen._cpp_expr(k)}, {gen._cpp_expr(v)}}}" for k, v in e.pairs]
         return ex_text('{' + ', '.join(pairs) + '}')
@@ -6744,7 +6759,7 @@ def _cpp_expr_ex(gen, e):
         val = gen._cpp_expr(e.value)
         return ex_text(f"({name} = {val})")
     if isinstance(e, gimple_ctypes.BinaryOp) and e.op == ':=':
-        return ex_text(_cpx_walrus(gen, e))
+        return _cpx_walrus(gen, e)
     if isinstance(e, gimple_ctypes.CallExpr):
         return ex_text(_cpx_call_expr(gen, e))
     if isinstance(e, gimple_ctypes.SliceExpr):
