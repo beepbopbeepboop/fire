@@ -476,3 +476,42 @@ Still open: the remaining 23 in `_cpf_named_target` (its own branches), `_cpp_fo
 The 11 `_cpx_*` expression arms are a separate job: they return expression text, which needs C++ expression
 shapes (casts, receivers, runtime-stub calls) in `mojo/ir/instr.py`, not more statement shapes.
 Stage 5c is unchanged: blocked on the pointer-versus-scalar call-site analysis or an owner decision.
+
+## Plan (planning round, 2026-11-22): the expression printers
+
+Statement printers are done as far as the shapes go: `cpp_core.py` has 82 `{indent}` text sites at the last
+count, the largest being `_cpp_for_stmt` (10), `_cpf_call_iterable` (6), `_cpp_raise_stmt` (5, multi-line
+`_MojoCppExc{...}` throws) and `_cpy_unsupported_shape` (4). What remains is the expression side.
+
+**Measured.** The 11 `_cpx_*` arms are 2,217 (`_cpx_call_expr`), 289 (`_cpx_member_expr`), 250
+(`_cpx_binary_op`), 248 (`_cpx_await_expr`), 145 (`_cpx_subscript_expr`), 137 (`_cpx_lambda_expr`), 96
+(`_cpx_ident_expr`), 47 (`_cpx_compare_chain`), 44 (`_cpx_walrus`), 35 (`_cpx_unary_op`), 34 (`_cpx_slice_expr`)
+lines, about 3,500 in all. `_cpp_expr(gen, e)` dispatches to them and returns `str` from every branch; 235
+`gen._cpp_expr(` call sites across `mojo/backend_gimple/` take that `str`.
+
+**Why it is not a statement-style conversion.** `mojo/ir/instr.py`'s `Ex.show()` renders no parentheses for
+`un`/`bin`/`cast`/`call`, and the arms wrap their text in `(...)` (`_cpx_unary_op` returns `(!x)`). The arms
+also take their operands as text, so an `Ex` built from them would be `ex_text` leaves. The IR gains value only
+when operands are `Ex`, which means the dispatcher has to return `Ex`.
+
+**Approach (chosen).** Migrate the dispatcher, not the arms:
+
+1. Add a `paren` kind to `Ex` (`(` + a + `)`) and check `cond`'s spacing against the arms' `?:` text.
+2. Add `_cpp_expr_ex(gen, e) -> Ex`, the dispatcher's new body: every branch returns an `Ex`. A branch whose arm
+   is not yet migrated returns `ex_text(<the arm's current str>)`.
+3. `_cpp_expr(gen, e)` becomes `return _cpp_expr_ex(gen, e).show()`. The 235 callers do not change.
+4. Migrate the arms one at a time, smallest first: `_cpx_slice_expr` (34), `_cpx_unary_op` (35), `_cpx_walrus`
+   (44), `_cpx_compare_chain` (47), `_cpx_ident_expr` (96), `_cpx_subscript_expr`, `_cpx_lambda_expr`,
+   `_cpx_binary_op`, `_cpx_member_expr`, `_cpx_await_expr`, and `_cpx_call_expr` last (2,217 lines; it needs
+   `_cpx_call_expr`'s own split with `tools/extract_arm.py` first).
+
+**Proof per step.** (a) `test_gimple_cpp_core_arms.py` pins that the dispatcher returns `Ex` for each migrated
+branch and that `_cpp_expr` equals `_cpp_expr_ex(...).show()` for a fixed set of nodes; (b) `c_oracle check
+--base HEAD` identical on 285 C and 13 coroutine programs; (c) `compile_stdlib.py` unchanged verdict. The oracle
+does not reach every arm, so each arm also gets a direct node-level check in (a), as the helper checks do now.
+
+**Not done in this round.** No code change: this is the plan the next round executes. Step 1 (the `paren` kind and
+its test) is the smallest first commit.
+
+**Stage 5c** is unchanged: blocked on the pointer-versus-scalar call-site analysis or an owner decision
+(`doc/GIR_WORKERS.md` §6).
