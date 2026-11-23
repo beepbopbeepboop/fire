@@ -4870,20 +4870,20 @@ def _cpx_call_ident(gen, e) -> Ex:
             except Exception:
                 _lct = None
         if gimple_ctypes.TypeLattice.is_list(_lct):
-            return _as_ex(f"mojo_list_len({_cpp_as('MojoList *', args[0])})")
+            return _cpp_call_ex('mojo_list_len', [_cpp_as('MojoList *', args[0])])
         if _lct == 'MojoDict *':
-            return _as_ex(f"mojo_dict_len({_cpp_as('MojoDict *', args[0])})")
+            return _cpp_call_ex('mojo_dict_len', [_cpp_as('MojoDict *', args[0])])
         if _lct == 'MojoSet *':
-            return _as_ex(f"mojo_set_len({_cpp_as('MojoSet *', args[0])})")
+            return _cpp_call_ex('mojo_set_len', [_cpp_as('MojoSet *', args[0])])
         if gimple_ctypes.TypeLattice.is_cstr(_lct):
-            return _as_ex(f"mojo_strlen((char *)({args[0]}))")
+            return _cpp_call_ex('mojo_strlen', [f"(char *)({args[0]})"])
         # mojo_len takes the boxed int64_t representation of a
         # container/string pointer — exactly what this emitter's
         # locals hold.
         if gimple_ctypes.TypeLattice.is_word_or_none(_lct):
             # an unsolved word: ask the runtime what it is
-            return _as_ex(f"mojo_len_word((int64_t)({args[0]}))")
-        return _as_ex(f"mojo_len((int64_t)({args[0]}))")
+            return _cpp_call_ex('mojo_len_word', [f"(int64_t)({args[0]})"])
+        return _cpp_call_ex('mojo_len', [f"(int64_t)({args[0]})"])
     if (fname in ('str', 'String') and len(e.args) == 1
             and not gen._locally_binds_name(fname)):
         # `str(x)` / Mojo's `String(x)` stringification. Dispatch
@@ -4906,12 +4906,12 @@ def _cpx_call_ident(gen, e) -> Ex:
         except Exception:
             _sct = None
         if gimple_ctypes.TypeLattice.is_cpp_int_scalar(_sct):
-            return _as_ex(f"mojo_str_from_int((int64_t)({args[0]}))")
+            return _cpp_call_ex('mojo_str_from_int', [f"(int64_t)({args[0]})"])
         if gimple_ctypes.TypeLattice.is_double(_sct):
-            return _as_ex(f"mojo_repr_float((double)({args[0]}))")
+            return _cpp_call_ex('mojo_repr_float', [f"(double)({args[0]})"])
         if gimple_ctypes.TypeLattice.is_cstr(_sct):
-            return _as_ex(f"((char *)({args[0]}))")
-        return _as_ex(f"mojo_str((void *)({args[0]}))")
+            return _paren_ex(_cpp_cast_ex('char *', ex_text(f"({args[0]})")))
+        return _cpp_call_ex('mojo_str', [f"(void *)({args[0]})"])
     if (fname == 'int' and len(e.args) == 1
             and not gen._locally_binds_name('int')):
         # int(x) — mirrors the ordinary GIMPLE path's own
@@ -4946,13 +4946,13 @@ def _cpx_call_ident(gen, e) -> Ex:
                     gen, _sym,
                     f"{_int_struct}_{gimple_ctypes._safe_name('__int__')}",
                     [])
-                return _as_ex(f"{_sym}({gen._cpp_expr(_int_arg)}, {', '.join(_int_args)})")
+                return _cpp_call_ex(_sym, [gen._cpp_expr(_int_arg), ', '.join(_int_args)])
         _ict = (gen._cpp_declared.get(_int_arg.name)
                 if gen._cpp_declared is not None
                 and isinstance(_int_arg, gimple_ctypes.IdentExpr) else None)
         if gimple_ctypes.TypeLattice.is_cstr(_ict):
-            return _as_ex(f"mojo_make_int((char *)({args[0]}))")
-        return _as_ex(f"((int64_t)({args[0]}))")
+            return _cpp_call_ex('mojo_make_int', [f"(char *)({args[0]})"])
+        return _paren_ex(_cpp_cast_ex('int64_t', ex_text(f"({args[0]})")))
     if (fname == 'float' and len(e.args) == 1
             and not gen._locally_binds_name('float')):
         # float(x) — same shape as int(x) just above, mirroring
@@ -4963,14 +4963,14 @@ def _cpx_call_ident(gen, e) -> Ex:
                 if gen._cpp_declared is not None
                 and isinstance(_flt_arg, gimple_ctypes.IdentExpr) else None)
         if gimple_ctypes.TypeLattice.is_cstr(_fct):
-            return _as_ex(f"mojo_make_float((char *)({args[0]}))")
-        return _as_ex(f"((double)({args[0]}))")
+            return _cpp_call_ex('mojo_make_float', [f"(char *)({args[0]})"])
+        return _paren_ex(_cpp_cast_ex('double', ex_text(f"({args[0]})")))
     if (fname == 'repr' and len(e.args) == 1
             and not gen._locally_binds_name('repr')):
-        return _as_ex(f"mojo_repr_str_or_none((char *)({args[0]}))")
+        return _cpp_call_ex('mojo_repr_str_or_none', [f"(char *)({args[0]})"])
     if (fname == 'hasattr' and len(e.args) == 2
             and not gen._locally_binds_name('hasattr')):
-        return _as_ex(f"mojo_hasattr((int)({args[0]}), {args[1]})")
+        return _cpp_call_ex('mojo_hasattr', [f"(int)({args[0]})", args[1]])
     if fname == 'getattr' and not gen._locally_binds_name('getattr'):
         # `getattr(obj, name_expr)` — dynamic, runtime-string-keyed
         # attribute lookup (save_env.py's `resource_info`:
@@ -4981,10 +4981,9 @@ def _cpx_call_ident(gen, e) -> Ex:
         # uses for a member read off a word. A 2-arg miss raises
         # AttributeError; a 3-arg miss yields the default.
         if len(e.args) == 2:
-            return _as_ex(f"mojo_getattr_any((void *)(intptr_t)({args[0]}), (char *)({args[1]}))")
+            return _cpp_call_ex('mojo_getattr_any', [f"(void *)(intptr_t)({args[0]})", f"(char *)({args[1]})"])
         if len(e.args) == 3:
-            return (_as_ex(f"mojo_getattr_default((void *)(intptr_t)({args[0]}), "
-                    f"(char *)({args[1]}), (int64_t)({args[2]}))"))
+            return (_cpp_call_ex('mojo_getattr_default', [f"(void *)(intptr_t)({args[0]})", f"(char *)({args[1]})", f"(int64_t)({args[2]})"]))
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"getattr() with {len(e.args)} arguments is not a "
             "supported compiled generator/coroutine shape")
@@ -4995,11 +4994,11 @@ def _cpx_call_ident(gen, e) -> Ex:
         # uses for every other iterable — mojo_range/mojo_range3
         # return a pointer whose C++ type supports range-for).
         if len(e.args) == 1:
-            return _as_ex(f"mojo_range({args[0]}, 0)")
+            return _cpp_call_ex('mojo_range', [args[0], '0'])
         if len(e.args) == 2:
-            return _as_ex(f"mojo_range({args[0]}, {args[1]})")
+            return _cpp_call_ex('mojo_range', [args[0], args[1]])
         if len(e.args) == 3:
-            return _as_ex(f"mojo_range3({args[0]}, {args[1]}, {args[2]})")
+            return _cpp_call_ex('mojo_range3', [args[0], args[1], args[2]])
     if (fname == 'isinstance' and len(e.args) == 2
             and not gen._locally_binds_name('isinstance')):
         # isinstance(x, T) — real semantics, mirroring the plain
@@ -5243,7 +5242,7 @@ def _cpx_call_ident(gen, e) -> Ex:
         if _next_struct:
             _sym = gen._struct_method_csym(_next_struct, '__next__', '')
             gen._cpp_struct_method_refs.add((_next_struct, '__next__'))
-            return _as_ex(f"{_sym}({args[0]})")
+            return _cpp_call_ex(_sym, [args[0]])
     if (fname in ('list', 'set') and len(e.args) == 1 and len(e.kwargs or []) == 0
             and not gen._locally_binds_name(fname)):
         # `list(<iterable-expr>)` / `set(<iterable-expr>)` where
@@ -5399,7 +5398,7 @@ def _cpx_call_ident(gen, e) -> Ex:
                 or (isinstance(_mm_arg, gimple_ctypes.IdentExpr)
                     and _mm_arg.name in getattr(gen, '_cpp_list_iter_cursor', {})))
             if _mm_is_iter:
-                return _as_ex(f"mojo_{fname}((void *)({args[0]}))")
+                return _cpp_call_ex(f"mojo_{fname}", [f"(void *)({args[0]})"])
         elif len(e.args) >= 2:
             _mv = gen._cpp_fresh_name("_mg_mm")
             _body = f"int64_t {_mv} = (int64_t)({args[0]}); "
@@ -5565,8 +5564,7 @@ def _cpx_call_ident(gen, e) -> Ex:
         # `mojo_is_callable_word`) instead of the always-true stub
         # below, so `if not callable(onempty): raise` is a real guard
         # in front of the `mojo_fnptr_call_N` dispatch.
-        return (_as_ex(f"mojo_is_callable_word((int64_t)(intptr_t)"
-                f"({gen._cpp_expr(e.args[0])}))"))
+        return (_cpp_call_ex('mojo_is_callable_word', [f"(int64_t)(intptr_t)({gen._cpp_expr(e.args[0])})"]))
     if fname == 'callable' and len(e.args) == 1:
         # This scalar coroutine-body model has no runtime type
         # tag to genuinely check "is this value callable" for
@@ -5737,7 +5735,7 @@ def _cpx_call_ident(gen, e) -> Ex:
             _mf_args = [(_ae if _pt in ('double', 'float') or _pt is None
                          else f"_mj_w({_ae})")
                         for _pt, _ae in zip(_mf_ptypes, _mf_args)]
-        return _as_ex(f"@@CSYM:{fname}@@({', '.join(_mf_args)})")
+        return _cpp_call_ex(f"@@CSYM:{fname}@@", _mf_args)
     # A call to a module-level function that ISN'T overload-mangled
     # — a simple `def fspath(p): ...` whose name also lands in the
     # globals struct (os.py's own `fspath(top)` shape; the .ci
@@ -5749,7 +5747,7 @@ def _cpx_call_ident(gen, e) -> Ex:
             and fname in gen._cpp_early_global_names
             and fname in gen._cpp_module_fn_names):
         gen._cpp_module_variadic_func_refs.add(fname)
-        return _as_ex(f"{fname}({', '.join(args)})")
+        return _cpp_call_ex(fname, args)
     # A call through a DECLARED callable-value local (`getpos()`
     # after `getpos = lambda: None` / `getpos = data.tell`) — the
     # one callee shape whose bare-name emission is valid C++
@@ -5772,7 +5770,7 @@ def _cpx_call_ident(gen, e) -> Ex:
                     gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG))
                 or _cpp_is_callable_ctype(_dcall)):
             cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
-            return _as_ex(f"{cpp_fname}({', '.join(args)})")
+            return _cpp_call_ex(cpp_fname, args)
     # A call through a DECLARED `*args`/`**kwargs`-family
     # callable-value local (`e(4, 5)` after
     # `e = lambda *a: a[0] + a[1]`): the local's declared
@@ -5899,7 +5897,7 @@ def _cpx_call_ident(gen, e) -> Ex:
     # calling any module-level function here.
     _nhs = getattr(gen, '_cpp_nested_helper_syms', None)
     if _nhs and fname in _nhs:
-        return _as_ex(f"{_nhs[fname]}({', '.join(args)})")
+        return _cpp_call_ex(_nhs[fname], args)
     # `ast_rewriter.py`'s idiom-rewrite rules (os.environ.get/[]/
     # `in`, platform.system()/machine(), subprocess.run(...) and
     # its .returncode/.stdout/.stderr, sys.stdin.read()) all lower
@@ -5947,11 +5945,11 @@ def _cpx_call_ident(gen, e) -> Ex:
             'mojo_stat_ino', 'mojo_os_samestat', 'mojo_s_isdir',
             'mojo_os_close', 'mojo_list_slice_word', 'mojo_bytes_from_cstr',
             'mojo_bytes_from_str'):
-        return _as_ex(f"{fname}({', '.join(args)})")
+        return _cpp_call_ex(fname, args)
     if fname == 'mojo_fsencode_w' and len(args) == 1:
         # the argument is a str pointer or a bytes pointer or a word: the
         # runtime tells them apart, so pass the bits as a word
-        return _as_ex(f"mojo_fsencode_w((int64_t)(intptr_t)({args[0]}))")
+        return _cpp_call_ex('mojo_fsencode_w', [f"(int64_t)(intptr_t)({args[0]})"])
     # A call to a C-stdlib / POSIX function with a curated, known
     # signature (`_LIBC_SIGS`) — e.g. `close(fd)` inside a compiled
     # generator (Lib/os.py's `_fwalk`, reached via
@@ -5969,7 +5967,7 @@ def _cpx_call_ident(gen, e) -> Ex:
         _lsr = getattr(gen, '_cpp_libc_sig_refs', None)
         if _lsr is not None:
             _lsr.add(fname)
-        return _as_ex(f"{fname}({', '.join(args)})")
+        return _cpp_call_ex(fname, args)
     # An exception CONSTRUCTOR used as a VALUE — `onempty =
     # Exception('no filenames provided')` in scriptutil.py's
     # `_iter_filenames`, then `raise onempty`. As the OPERAND of a

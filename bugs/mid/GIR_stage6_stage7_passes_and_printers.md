@@ -637,3 +637,26 @@ pins 30 arms with 0 failures; `compile_stdlib.py` gives `FAILED: 0 (0 expected, 
 
 Still open: the `_dict_val_ct` return above, then `_cpx_call_ident`'s 1,231 lines of text, which
 include calls to `_cpp_emit_generator_start_expr`, the comprehension builders and `_cpp_as`.
+
+## Status 2026-11-23 (step 16): 32 of `_cpx_call_ident`'s text returns are call shapes
+
+`_cpx_call_ident` now builds 32 of its returns as `call`, `cast`, `paren` or `cast`-over-`paren` Ex
+trees instead of text: the `mojo_*_len` and `mojo_str*` / `mojo_repr_*` / `mojo_make_*` runtime calls,
+the `mojo_hasattr` / `mojo_getattr_*` / `mojo_range*` calls, the `os`-style and generator-helper calls
+built from `fname`, `cpp_fname`, `_sym`, `_nhs[fname]` and `@@CSYM:...@@` (their argument lists are
+passed as lists), and the `((int64_t)(x))` / `((double)(x))` / `((char *)(x))` parenthesized casts.
+Each shape renders the exact text of the f-string it replaced.
+
+Still text (about 26 returns): the C++ lambda bodies (`[&]() {...}()`, statement blobs, not calls);
+helper calls whose return type is not yet checked (`_cpp_emit_generator_start_expr`,
+`_cpp_next_on_generator_expr`, `_cpp_build_container_from_iterable`, `_cpp_rethrow_pending`,
+`gen._cpp_expr`); the `mojo_list_slice_word` return (5937), whose trailing `, ` on a one-argument
+call differs from `_cpp_call_ex` (the original emits a trailing comma that is not valid C, so it
+needs a deliberate decision, not a silent change); the `(int64_t)(void *)malloc(1)` cast chain; and
+the bare text leaves (`'0'`, `args[0]`, `'const_cast<char *>("")'`).
+
+Also still open: the `mojo_dict_get_int` return in `_cpx_call_member` (runtime cast type).
+
+Verified: `c_oracle check --base HEAD -j 4` gives identical C on all 285 pydiff programs and
+identical C++ companions on all 13 coroutine programs; `test_gimple_cpp_core_arms.py` pins 30 arms
+with 0 failures; `compile_stdlib.py` gives 610 passed, `FAILED: 0 (0 expected, 0 unexpected)`, no skips.
