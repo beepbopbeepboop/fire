@@ -28,10 +28,26 @@ so 3 remain:
 The first two are a live SIGSEGV in the word-dispatch loop arm: the test's own
 docstring claims that shape was fixed ("the caller here is a function, where the
 binding is seen"), so this is a REGRESSION or an uncovered variant, not a known
-gap. A standalone `fire.py build` repro of the exact source does NOT reach it --
-it dies earlier on the unrelated `FormatStruct` blocker in the stdlib, so the
-suite's dylib path is what gets far enough. The job was re-disabled (switch
-restored) because it still fails; delete it only when all three are fixed.
+gap.
+
+STANDALONE REPRO (verified): the exact source
+
+    def each(xs):
+        for x in xs:
+            print(x)
+
+    def main():
+        ys = "de"
+        each([4, 5])
+        each(ys)
+
+    main()
+
+builds clean (`fire.py build` exit 0), prints `4`, `5`, and then dies with
+SIGSEGV -- shell reports 139. So the list call works, the str-through-a-variable
+call segfaults in the runtime word-dispatch arm. Repro file:
+`/Users/mrs/.hermes/cache/scratch/iter_mixed.mojo`. The job is re-disabled
+(switch restored) because it still fails; delete it only when all three are fixed.
 
 
 - **Last known working:** `128bc1eb82` integrate fix-proof-fix-gate-type-string-ratchet
