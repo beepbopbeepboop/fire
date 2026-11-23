@@ -7958,7 +7958,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     continue
                 if el.name not in declared:
                     declared[el.name] = 'int64_t'
-                    lines.append(f"{indent}int64_t {el.name};")
+                    lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {el.name}"))
                 if _boxed_names is not None:
                     _boxed_names.add(el.name)
                 lines.append(_cpp_assign_line(
@@ -7977,14 +7977,13 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # slot is read back through the word-boxing getter so a string
             # or nested container survives as a word.
             _uw = gen._cpp_fresh_name("_mg_unpack")
-            lines.append(f"{indent}MojoList *{_uw} = mojo_iter_word("
-                         f"(int64_t)(intptr_t)({_tup_val}));")
+            lines.append(_cpp_assign_line(f"MojoList *{_uw}", f"mojo_iter_word((int64_t)(intptr_t)({_tup_val}))", indent))
             for i, el in enumerate(s.target.elements):
                 if not isinstance(el, gimple_ctypes.IdentExpr):
                     continue
                 if el.name not in declared:
                     declared[el.name] = 'int64_t'
-                    lines.append(f"{indent}int64_t {el.name};")
+                    lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {el.name}"))
                 _el_decl = declared.get(el.name)
                 if gimple_ctypes.TypeLattice.is_cstr(_el_decl):
                     _el_get = f"mojo_list_get_str({_uw}, {i})"
@@ -8003,7 +8002,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             if isinstance(el, gimple_ctypes.IdentExpr):
                 if el.name not in declared:
                     declared[el.name] = 'int64_t'
-                    lines.append(f"{indent}int64_t {el.name};")
+                    lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {el.name}"))
                 if _tup_is_split_call:
                     _cpp_mark_tagged_word(gen, el.name)
                 if _tup_is_list_call and gimple_ctypes.TypeLattice.is_word(declared.get(el.name)):
@@ -8042,7 +8041,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             _pset = gimple_ctypes.presence_set_stmt(
                 gen._struct_name_owner.get(gen._cpp_gen_self_struct),
                 s.target.member, 'self', '->')
-            return [f"{indent}self->{gimple_ctypes._safe_field(s.target.member)} = {val};"
+            return [_cpp_assign_line(f"self->{gimple_ctypes._safe_field(s.target.member)}", val, indent)
                     + (f" {_pset}" if _pset else '')]
         # `cls.<attr> = val` / `ClassName.<attr> = val` — the write-side
         # analogue of the class-level-attribute READ support just above
@@ -8080,8 +8079,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                         and s.target.member not in gen.struct_field_types.get(_tgt_struct, {})):
                     val = gen._cpp_expr(s.value)
                     _ctag = gimple_exprtypes._struct_type_id(_tgt_struct)
-                    return [f'{indent}mojo_class_setattr({_ctag}LL, "{s.target.member}", '
-                            f'(int64_t)(intptr_t)({val}));']
+                    return [_cpp_call_line(indent, 'mojo_class_setattr', [f"{_ctag}LL", f'"{s.target.member}"', f"(int64_t)(intptr_t)({val})"])]
         # arr[i] = val / d[k] = val  →  a real runtime-helper write
         # (mojo_list_set_*/mojo_dict_set_*), mirroring the plain
         # (non-generator) GIMPLE path's own SubscriptExpr-target
@@ -8133,7 +8131,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 if gimple_ctypes.TypeLattice.is_double(vctype):
                     return [_cpp_call_line(indent, 'mojo_dict_set_double', [f'({obj})', key_expr, val])]
                 return [_cpp_call_line(indent, 'mojo_dict_set_int', [f'({obj})', key_expr, f'(int64_t)({val})'])]
-            return [f"{indent}*(&({obj}[{idx}])) = {val};"]
+            return [_cpp_assign_line(f"*(&({obj}[{idx}]))", val, indent)]
         # sys.stderr/stdout/stdin = val (task #150's remaining
         # non-self-MemberExpr gap, e.g. test_faulthandler.py's
         # `sys.stderr = None`): `sys` has no real backing value
@@ -8173,7 +8171,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and s.target.obj.name == 'sys' \
                 and s.target.member in ('stderr', 'stdout', 'stdin', 'dont_write_bytecode'):
             val = gen._cpp_expr(s.value)
-            return [f"{indent}(void)({val});"]
+            return [_cpp_ir_line(indent, 'expr', f"(void)({val})")]
         # x[:] = value  (full-slice replace-in-place; real
         # occurrences: Lib/test/support/__init__.py's patch_list
         # (`orig[:] = saved`) and iter_builtin_types (`subs[:] =
