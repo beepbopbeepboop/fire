@@ -10584,7 +10584,7 @@ def _cpf_simple_target_call_iterable(gen, s: 'ForStmt', declared: dict, indent: 
         _args = ', '.join(_argstrs) if _argstrs else ''
         # Call the foreign callable
         _call_res = f"{_cpp_fc}({_args})"
-        lines = [f"{indent}MojoList *{_itvar} = mojo_list_new();"]
+        lines = [_cpp_assign_line(f"MojoList *{_itvar}", "mojo_list_new()", indent)]
         # Build call through mojo_dyn_call preserving positional/keyword args.
         try:
             _call_res = _cpp_dyn_call_expr(gen, s.iterable)
@@ -10606,15 +10606,15 @@ def _cpf_simple_target_call_iterable(gen, s: 'ForStmt', declared: dict, indent: 
         except Exception:
             _call_res = f"{_cpp_fc}({_args})"
         # For csv.reader style, we need to iterate over its result
-        lines.append(f"{indent}for (auto _fr_row : {_call_res}) {{")
+        lines.append(_cpp_ir_line(indent, 'for', f"auto _fr_row : {_call_res}"))
         if target not in declared:
             declared[target] = 'MojoList *'
-            lines.append(f"{indent}    MojoList * {target} = _fr_row;")
+            lines.append(_cpp_assign_line(f"MojoList * {target}", "_fr_row", indent + '    '))
         else:
-            lines.append(f"{indent}    {target} = _fr_row;")
+            lines.append(_cpp_assign_line(target, "_fr_row", indent + '    '))
         for inner in s.body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-        lines.append(f"{indent}}}")
+        lines.append(_cpp_ir_line(indent, 'end'))
         return lines
     return None
 
