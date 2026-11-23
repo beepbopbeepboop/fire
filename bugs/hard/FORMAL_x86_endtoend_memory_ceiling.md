@@ -1,3 +1,5 @@
+SPLIT: FORMAL_x86_endtoend_memory_ceiling-part1, FORMAL_x86_endtoend_memory_ceiling-part2, FORMAL_x86_endtoend_memory_ceiling-part3
+
 # FORMAL: three generated proofs exceed the per-process `-M 6144` memory ceiling
 
 ## Symptom, measured
