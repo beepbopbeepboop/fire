@@ -2675,8 +2675,7 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # moment a recorded peak stops fitting its class).
 test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
      mem='tiny', excl=True, timeout=3600,
-     desc='from-scratch stdlib dylib; reports modules that fell back to source',
-     disabled='bugs/gate-stdlib-dylib.md')
+     desc='from-scratch stdlib dylib; reports modules that fell back to source')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
      deps=['preflight'], mem='tiny',
      desc='the runtime dylib: export table, per-arch link, cross-arch checks')
@@ -2736,8 +2735,7 @@ test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'],
 # on a 96 GB budget), so the ratchet assigns 2.25 GB and the floor covers it.
 test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, mem='tiny',
      timeout=7200,
-     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree',
-     disabled='bugs/gate-stdlib-syntax.md')
+     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree')
 
 # ── bootstrap: an ordered graph, not one recipe ─────────────────────────────
 # Every step below runs a compiler, or the compiler over a whole closure, so
