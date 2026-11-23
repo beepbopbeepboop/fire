@@ -26,3 +26,77 @@ A new method added to `TestBridgeSimpset` (to be written alongside the change):
 ## Notes
 
 - Only touches `formal/arm64_proof_gen.py` (the block-theorem emission); adds named facts; no other generator logic changes.
+
+## Status (2026-11-23): planning round — measurement, premise correction, plan
+
+This round landed no code. Reason: the doc's premise is wrong for the current
+generator, and the acceptance names a fact whose meaning is a design decision
+(below). The doc stays open; nothing here is "still broken, re-verified".
+
+### Measurement (current master, `bigbody`, generated via `test_formal_eval_eq_mojo_bridge._generate`)
+
+- `formal/arm64_proof_gen.py` around lines 6993-7130 (`_gen_run_cert`):
+  the `qS{k}`/`qT{k}` chain is ALREADY emitted as named, non-nested defs
+  (`def bigbody_b0_qS{k} st := { bigbody_b0_qT{k-1} st with pc := … }`).
+  Each `qS_k` does NOT embed `qS_{k-1}` textually. The premise "each `qS_k`
+  embeds `qS_{k-1}`, growing the state term" is false; the doc's Goal is stale.
+- The quadratic cost is elsewhere. `…_self{k}` (`for k in range(1, m)`) re-emits
+  the whole prefix inside its own proof: `hpc0..hpc{k}` (`pc_facts[:k+1]`),
+  `hx0..hx{k-1}` (`hx_facts[:k]`) and `hs0..hs{k-1}` (`step_facts[:k]`), then
+  calls `…_self{k-1}` for the prefix. Measured on bigbody block 0 (11 self
+  theorems in the output): self_k carries exactly 2k `have hs/hpc` lines
+  (2, 4, 6 … 22), so the block costs ~m² kernel-checked step facts, each
+  re-elaborating a `bigbody_sr_N` application. 163 self theorems in the file.
+- `_gen_run_cert`'s own `…_runs` and `…_mid` also re-emit all `m` step facts
+  (`step_facts`, `pc_facts`), so they are linear per block; only `self_k` is
+  quadratic.
+- Existing names: `{name}_blk_{bi}` is ALREADY taken (`def {bname} : Block`,
+  line ~12834, `{bname}_cert`). `bigbody_blk_N_qs_chain` is a fresh name, no
+  collision, but the part2 doc says "29 bigbody_blk_N block theorems"; that
+  count should be re-measured, not trusted.
+- Test status: `TestBridgeSimpset` (8 tests) passes on master. The named test
+  `test_the_block_theorem_prefix_hoists_each_qS_chain_once` does not exist yet.
+
+### Decision needed (controller / owner)
+
+1. **What the one-fact-per-block means.** Option A (recommended): the per-block
+   chain fact is the prefix already proven by `…_self{m-1}`, and `…_self{k}`
+   cites `…_self{k-1}` plus only ITS OWN last-step facts (linear). Name it by
+   an alias `theorem {S}_qs_chain := {S}_self{m-1}` only if the controller
+   accepts an alias as the "one named fact". Option B: keep the literal
+   `have bigbody_blk_N_qs_chain : ∀ k ≤ m, arm64_runs … = some (qS_k st)` built
+   once, and have every `self_k` cite it. Option B is a bigger rewrite of the
+   same induction and does not lower the cost any more than A does.
+   Recommendation: A, with assertions (a)-(c) rewritten to test the linear
+   property (no `hs`/`hpc` for index < k-1 inside `…_self{k}`), because the
+   doc's (a)-(c) as written test names, not cost.
+2. **Verification.** Option A changes Lean proof text. Text assertions cannot
+   show it still typechecks. The one check that proves it is a single `lean`
+   run of the `bigbody` proof, which is heavy (the integrator's job, not a
+   light worker's quick test). The round that lands A must say so in
+   `NOT DONE` with the exact `lean` target.
+
+### Implementation plan (Option A)
+
+Files: `formal/arm64_proof_gen.py` only, the `for k in range(1, m):` loop
+in `_gen_run_cert` (around lines 6993-7030).
+
+- In `…_self{k}`, emit `pc_facts` only for indices `k-1` and `k` if its
+  `_pc_proof` omega does not need earlier hpcs. CAUTION: `_pc_proof(k)` appends
+  `<;> omega` when `any(pc_writes[:k])`, and omega reads `hpc{k-1}` from
+  context. So `hpc{k-1}` must stay in context whenever `any(pc_writes[:k-1])`,
+  or its proof must be rewritten to not need omega. Check this per-block in
+  the generator, do not assume.
+- Emit `hx_facts` and `step_facts` only for index `k-1` (the one the tail's
+  `runs_cons_seq`/`runs_cons_jump` uses). The `hx` for the svc write at `k-1`
+  is the `_emit_reg_chain` over `run_pcs[:k-1]`, which is still O(k) text for
+  svc blocks; note it, do not fix it in this change.
+- Keep the `rw [runs_append …, self_{k-1} st hpc …]` tail unchanged.
+- Test: add `test_the_block_prefix_is_not_reproved_per_self` to
+  `TestBridgeSimpset`: generate `bigbody`, for each `…_self{k}` assert it
+  contains at most 2 `have hs`/`have hpc` lines (not 2k). Also keep the
+  doc's own named test in the file (the doc's `Done when` name), rewritten
+  per decision 1.
+- Quick test: `python3 tools/memslot.py --gb 8 --label x -- python3 test_formal_eval_eq_mojo_bridge.py TestBridgeSimpset`
+  (text-only, 3 s). Integrator: one `lean` check of the regenerated `bigbody`
+  proof, and `dangling_doc_refs --ratchet` after deleting this doc.
