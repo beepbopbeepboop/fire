@@ -4507,6 +4507,15 @@ _OPEN_STDLIB_DYLIB_PROBE_REASON = (
 
 UNREGISTERED = {
     'test_codegen_erased_container_values.py': _OPEN_PROBE_HARNESS_REASON,
+    # The same per-file compile's UNANNOTATED scalar-global export (2026-11-23:
+    # a bare `from helper import CONST` read 0 for `CONST = 41`). Added with
+    # its fix and run directly (`python3 tools/memslot.py --gb 8 --label
+    # imported-global-unannotated -- python3
+    # test_codegen_imported_global_unannotated_scalar.py`, 0.2 GB); the
+    # landing was told not to register in tools/suite.py, and it is a
+    # build-and-RUN case that wants a bucket when one is next touched.
+    'test_codegen_imported_global_unannotated_scalar.py':
+        _STANDALONE_TEST_REASON,
     # The cases-generator analyzer landing (2026-11-17) left these regression
     # pins next to their fixes without registering them. Each runs directly;
     # the `*_build.py` siblings compile one small source with `fire.py build`

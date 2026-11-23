@@ -1,4 +1,4 @@
-SPLIT: CODEGEN_selfhost_stage2_attributeerror_comptimevar_node-part1, CODEGEN_selfhost_stage2_attributeerror_comptimevar_node-part2, CODEGEN_selfhost_stage2_attributeerror_comptimevar_node-part3 (fixed 2026-11-23: a module attribute that is itself a module, read as a VALUE, is now resolved through `funcs_shared.module_receiver_ref`; doc deleted), CODEGEN_selfhost_stage2_attributeerror_comptimevar_node-part4
+SPLIT: CODEGEN_selfhost_stage2_attributeerror_comptimevar_node-part1 (fixed 2026-11-23: an unannotated scalar-literal global is exported as its definer types it, `module_loader._ml_py_literal_ctype`; doc deleted), CODEGEN_selfhost_stage2_attributeerror_comptimevar_node-part2, CODEGEN_selfhost_stage2_attributeerror_comptimevar_node-part3 (fixed 2026-11-23: a module attribute that is itself a module, read as a VALUE, is now resolved through `funcs_shared.module_receiver_ref`; doc deleted), CODEGEN_selfhost_stage2_attributeerror_comptimevar_node-part4
 
 # CODEGEN: the stage2 binary raises `AttributeError: _as_comptimevar_node` on every dump
 
