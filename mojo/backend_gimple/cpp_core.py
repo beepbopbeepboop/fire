@@ -3470,7 +3470,7 @@ def _cpx_member_expr(gen, e) -> str:
     return f"{obj_expr}.{gimple_ctypes._safe_field(e.member)}"
 
 
-def _cpx_lambda_expr(gen, e) -> str:
+def _cpx_lambda_expr(gen, e) -> Ex:
     """`LambdaExpr` in `_cpp_expr`: an anonymous function as a C++ lambda.
 
     One arm of `_cpp_expr`, which tests the condition and calls this."""
@@ -3559,9 +3559,9 @@ def _cpx_lambda_expr(gen, e) -> str:
         # a real, correctly-typed local.
         _boxed = f"{_pname}__boxed"
         _cast = f"{_pctype} {_pname} = ({_pctype})({_boxed});"
-        return (f"(({gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG})"
+        return (ex_text(f"(({gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG})"
                 f"([&](int64_t {_boxed}) -> int64_t "
-                f"{{ {_cast} return (int64_t)({_body}); }}))")
+                f"{{ {_cast} return (int64_t)({_body}); }}))"))
     if _lam_ctype != gimple_ctypes._CPP_CALLABLE_CTYPE:
         # The `*args`/`**kwargs` family: each `*`/`**` parameter
         # becomes a real C++ parameter of its container ctype under
@@ -3599,12 +3599,12 @@ def _cpx_lambda_expr(gen, e) -> str:
         # POINTER, whose ADDRESS is the one thing an int64_t box can
         # carry faithfully (the 1-arg path's bare cast only ever
         # carries an int64_t or a struct pointer its hint named).
-        return (f"(({_lam_ctype})"
+        return (ex_text(f"(({_lam_ctype})"
                 f"([&]({_params}) -> int64_t "
-                f"{{ return (int64_t)(intptr_t)({_body}); }}))")
+                f"{{ return (int64_t)(intptr_t)({_body}); }}))"))
     _body = gen._cpp_expr(e.body)
-    return (f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
-            f"([&]() -> int64_t {{ return (int64_t)({_body}); }}))")
+    return (ex_text(f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
+            f"([&]() -> int64_t {{ return (int64_t)({_body}); }}))"))
 
 
 def _paren_ex(a: Ex) -> Ex:
@@ -6700,7 +6700,7 @@ def _cpp_expr_ex(gen, e):
     if isinstance(e, gimple_ctypes.MemberExpr):
         return ex_text(_cpx_member_expr(gen, e))
     if isinstance(e, gimple_ctypes.LambdaExpr):
-        return ex_text(_cpx_lambda_expr(gen, e))
+        return _cpx_lambda_expr(gen, e)
     if isinstance(e, gimple_ctypes.UnaryOp):
         return _cpx_unary_op(gen, e)
     if isinstance(e, gimple_ctypes.TernaryExpr):

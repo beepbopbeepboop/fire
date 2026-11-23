@@ -57,7 +57,6 @@ TOOL = os.path.join(ROOT, 'tools', 'extract_arm.py')
 # line that could move, so the parent may only get shorter.
 # The expression arms still building C++ text (plan step 4 in the stage 6/7 doc).
 EXPR_ARMS_STILL_TEXT = {
-    '_cpx_lambda_expr',
     '_cpx_member_expr', '_cpx_await_expr', '_cpx_call_expr',
 }
 PARENTS = [
