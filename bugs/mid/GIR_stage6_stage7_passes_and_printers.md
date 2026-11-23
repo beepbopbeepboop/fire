@@ -983,3 +983,21 @@ the rest of the 58.
 
 Verified: `c_oracle check --base 06996ee9c` identical on all 285 pydiff programs and all 32 coroutine programs;
 `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
+
+## Status 2026-11-23 (step 35): the for-statement lines are statements
+
+The ten text lines of `_cpp_for_stmt` are statements now: loop-index and element assignments through
+`_cpp_assign_line` (the loop index, a tuple element, the pair reads, the array element, and the three
+typed element reads of the literal-tuple loop), the fixed-size array declaration through a `decl`, and the
+`for (int64_t i = 0; i < n; i++) {` header through a `for` statement.
+
+Coverage: the tuple-element read (`tu_int`, new program `30`) and the array declaration and element read
+(`arr_decl`, `arr_read`, new program `31`) are reached. The loop-index assignment, the `enumerate`/`zip`
+pair reads, the string and double element reads, and the `for` header are NOT reached by any compiling program
+(probed: `enumerate` and `zip` loops compile but do not take those branches), so they are verified by
+transcription only.
+
+Still text statement lines: `_cpf_call_iterable` (6), the named-target iterators (9), and the rest of the 58.
+
+Verified: `c_oracle check --base adbd0cbda` identical on all 285 pydiff programs and all 34 coroutine programs;
+`test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
