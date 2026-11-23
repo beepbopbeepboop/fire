@@ -810,3 +810,19 @@ Remaining text lambdas on the call paths: `_cpp_try_kwargs_forward_call`, and th
 `sorted()` lambda.
 
 `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
+
+## Status 2026-11-23 (step 24): the call arms have no text lambdas left
+
+- `_cpp_try_kwargs_forward_call` (a `**kwargs` forward through a runtime dict lookup): each statement line is an
+  opaque statement, and the `return` is a call shape. It returns an `Ex`; its caller already takes it through `_as_ex`.
+- The `sorted()` comparator is a `closure` (a lambda VALUE, not called in place), with a new IR kind
+  `Ex('closure')`: `name` is the parameter list, `text` the optional return type, `body` the statements. It renders
+  `[&](params) { stmt }`. The `stable_sort` call that takes it is a call shape. Pinned in the arm test.
+
+What the call arms do now: every lambda they print is an `Ex('lambda')` or `Ex('closure')`. The text lambdas that
+remain in `cpp_core.py` are in expression printers outside the call arms (`_cpx_member_expr`, `_cpx_lambda_expr`,
+`_cpx_binary_op`), in statement printers (`_cps_assign_stmt`, `_cpf_simple_target_call_iterable`, `_cpp_try_stmt`), and in
+`_cpp_assign_cast_type`, `_cpp_raise_tuple_msg_expr`. Those are the next lambda work, not call-arm work.
+
+Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine programs;
+`test_gimple_cpp_core_arms.py` 30 arms, 0 failures, with the closure and the stable_sort text pinned.
