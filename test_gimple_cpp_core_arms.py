@@ -168,6 +168,28 @@ def main() -> int:
                                 f'call `gen.{name}(...)` so the coro '
                                 f'pass-through analysis stays out of it')
 
+    # The IR helpers take C text or a stage-2b Ex operand, and the printer arms pass
+    # both. A string reaching `Instr.show()` as an Ex crashed the generator corpus
+    # (`'str' object has no attribute 'show'`), and the corpus does not reach every
+    # arm, so each helper is pinned here with text operands directly.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from mojo.backend_gimple import cpp_core as _C
+    from mojo.ir.instr import ex_text as _ex
+    text_cases = [
+        (_C._cpp_assign_line('x', '1', '  '), '  x = 1;'),
+        (_C._cpp_assign_line(_ex('x'), _ex('y'), ''), 'x = y;'),
+        (_C._cpp_assign_line('*p', 'q', ''), '*p = q;'),
+        (_C._cpp_call_line('  ', 'fprintf', ['stderr', '"m\\n"']), '  fprintf(stderr, "m\\n");'),
+        (_C._cpp_ir_line('  ', 'end'), '  }'),
+        (_C._cpp_ir_line('  ', 'for', '; c < n; '), '  for (; c < n; ) {'),
+        (_C._cpp_ir_line('  ', 'decl', 'int64_t x'), '  int64_t x;'),
+        (_C._cpp_ir_line('  ', 'block'), '  {'),
+        (_C._cpp_ir_line('  ', 'coyield', '(0)'), '  co_yield (0);'),
+    ]
+    for got, want in text_cases:
+        if got != want:
+            failures.append(f'IR helper text: got {got!r}, want {want!r}')
+
     for f in failures:
         print(f'FAIL: {f}')
     print(f'{pinned} arm(s) pinned across {len(PARENTS)} printer(s), '
