@@ -846,3 +846,22 @@ Remaining text lambdas: `_cpx_lambda_expr` (3), `_cps_assign_stmt`, `_cpf_simple
 
 Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine programs;
 `test_gimple_cpp_core_arms.py` 30 arms, 0 failures, with the thunk, struct-word and closure texts pinned.
+
+## Status 2026-11-23 (step 26): the expression and raise lambdas are on the lambda shape
+
+- `_cpx_lambda_expr`'s three lambda values (a one-parameter boxed closure cast to the one-argument callable
+  type, a parameter-list closure cast to a lambda type, and the no-parameter callable closure) are `closure`s
+  under a paren and a cast, as the thunks were.
+- `_cpp_raise_tuple_msg_expr` (the `char *` message of a tuple raise): a call-once lambda over its statements,
+  parenthesized. Its two callers take `.show()` at the message boundary.
+- The dynamic word-call lambda is now one helper, `_cpp_dyn_word_lambda`, used by `_cpp_dyn_call_expr` and by the
+  call-iterable site in `_cpf_simple_target_call_iterable` (which had its own copy of the same text). The arm test
+  pins it byte for byte.
+
+Still a text lambda: `_cpp_try_stmt`'s scope-exit guard (`_MojoScopeExit fin([&]() { ... });`). It is a multi-line
+statement block printed as text lines, so it belongs to the try printer's block shape, not to the expression lambda
+shape. `_cpp_assign_cast_type` and `_cps_assign_stmt` match `[&]` only in a docstring and a comment; they print no lambda.
+
+Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine programs.
+As in step 25, the corpus does not confirm the `_cpx_lambda_expr` sites or the raise-tuple site; they are checked by
+transcription and the helper pin. `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.

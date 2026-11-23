@@ -423,6 +423,15 @@ def main() -> int:
         [_C._cpp_instr('decl', 'int64_t _l = 1'), _C._cpp_instr('return', _ex('_W{_l}'))]),
         '[&]() { struct _W { int64_t w; operator int64_t() const { return w; } '
         'operator char *() const { return (char *)w; } }; int64_t _l = 1; return _W{_l}; }()'))
+    # The shared word-call lambda (a dynamic call through a callable value, and the iterable of a call).
+    class _WordGen:
+        def _cpp_word_container_operator(self, kind, flag):
+            return 'op'
+    text_cases.append((_C._cpp_dyn_word_lambda(_WordGen(), 'F', ['a; ']),
+        '[&]() { struct _W { int64_t w; operator int64_t() const { return w; } '
+        'operator char *() const { return (char *)w; } op op op }; '
+        'MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); a; '
+        'return _W{mojo_dyn_call(F, _a, _k)}; }()'))
     # Cast spellings: a name the type table canonicalises (intptr_t is int64_t there) must keep its own spelling.
     text_cases.append((_C._cpp_cast_ex('intptr_t', _ex('x')), '(intptr_t)x'))
     text_cases.append((_C._cpp_cast_ex('char *', _ex('x')), '(char *)x'))

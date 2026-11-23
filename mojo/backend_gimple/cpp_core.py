@@ -2066,6 +2066,25 @@ def _cpp_materialize_generator_handle_arg(gen, expr):
     return name, stmts
 
 
+def _cpp_dyn_word_lambda(gen, fn_arg: str, parts: list) -> Ex:
+    """The call-once lambda that calls a runtime callable with a packed argument list: a word-holding
+    struct (returned as a word), its list and dict locals, the packing statements in `parts`, and the
+    `mojo_dyn_call` return. `fn_arg` is the callable's word spelling."""
+    lam = Ex('lambda')
+    lam.body = [
+        _cpp_opaque("struct _W { int64_t w; operator int64_t() const { return w; } "
+                    "operator char *() const { return (char *)w; } "
+                    + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
+                              for _k in ('MojoList', 'MojoDict', 'MojoSet'))
+                    + "};"),
+        _cpp_instr('decl', "MojoList *_a = mojo_list_new()"),
+        _cpp_instr('decl', "MojoDict *_k = mojo_dict_new()"),
+        _cpp_opaque(''.join(parts).rstrip()),
+        _cpp_instr('return', ex_text(f"_W{{mojo_dyn_call({fn_arg}, _a, _k)}}")),
+    ]
+    return lam
+
+
 def _cpp_dyn_call_expr(gen, e):
     """A call through a PARAMETER that holds a callable as a bare word
     (`onempty(items)`, `_walk(root)`, `get_files(root, suffix=suffix)`,
@@ -2172,19 +2191,7 @@ def _cpp_dyn_call_expr(gen, e):
         parts.append(f'mojo_dict_set_int(_k, (char *)"{_kn}", '
                      f"(int64_t)(intptr_t)({gen._cpp_expr(_kv)})); ")
     _cpp_fname = gen._cpp_kw_param_renames.get(_fname, _fname)
-    _dyn = Ex('lambda')
-    _dyn.body = [
-        _cpp_opaque("struct _W { int64_t w; operator int64_t() const { return w; } "
-                    "operator char *() const { return (char *)w; } "
-                    + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                              for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                    + "};"),
-        _cpp_instr('decl', "MojoList *_a = mojo_list_new()"),
-        _cpp_instr('decl', "MojoDict *_k = mojo_dict_new()"),
-        _cpp_opaque(''.join(parts).rstrip()),
-        _cpp_instr('return', ex_text(f"_W{{mojo_dyn_call((int64_t)(intptr_t)({_cpp_fname}), _a, _k)}}")),
-    ]
-    return _dyn
+    return _cpp_dyn_word_lambda(gen, f"(int64_t)(intptr_t)({_cpp_fname})", parts)
 
 
 def _cpp_dyn_call_text(gen, e):
@@ -3645,9 +3652,12 @@ def _cpx_lambda_expr(gen, e) -> Ex:
         # a real, correctly-typed local.
         _boxed = f"{_pname}__boxed"
         _cast = f"{_pctype} {_pname} = ({_pctype})({_boxed});"
-        return (ex_text(f"(({gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG})"
-                f"([&](int64_t {_boxed}) -> int64_t "
-                f"{{ {_cast} return (int64_t)({_body}); }}))"))
+        _lam1 = Ex('closure')
+        _lam1.name = f"int64_t {_boxed}"
+        _lam1.text = 'int64_t'
+        _lam1.body = [_cpp_opaque(_cast),
+                      _cpp_instr('return', _cpp_cast_ex('int64_t', _paren_ex(ex_text(_body))))]
+        return _paren_ex(_cpp_cast_ex(gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG, _paren_ex(_lam1)))
     if _lam_ctype != gimple_ctypes._CPP_CALLABLE_CTYPE:
         # The `*args`/`**kwargs` family: each `*`/`**` parameter
         # becomes a real C++ parameter of its container ctype under
@@ -3685,12 +3695,17 @@ def _cpx_lambda_expr(gen, e) -> Ex:
         # POINTER, whose ADDRESS is the one thing an int64_t box can
         # carry faithfully (the 1-arg path's bare cast only ever
         # carries an int64_t or a struct pointer its hint named).
-        return (ex_text(f"(({_lam_ctype})"
-                f"([&]({_params}) -> int64_t "
-                f"{{ return (int64_t)(intptr_t)({_body}); }}))"))
+        _lam2 = Ex('closure')
+        _lam2.name = _params
+        _lam2.text = 'int64_t'
+        _lam2.body = [_cpp_instr('return', _cpp_cast_ex('int64_t', _cpp_cast_ex(
+            'intptr_t', _paren_ex(ex_text(_body)))))]
+        return _paren_ex(_cpp_cast_ex(_lam_ctype, _paren_ex(_lam2)))
     _body = gen._cpp_expr(e.body)
-    return (ex_text(f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
-            f"([&]() -> int64_t {{ return (int64_t)({_body}); }}))"))
+    _lam3 = Ex('closure')
+    _lam3.text = 'int64_t'
+    _lam3.body = [_cpp_instr('return', _cpp_cast_ex('int64_t', _paren_ex(ex_text(_body))))]
+    return _paren_ex(_cpp_cast_ex(gimple_ctypes._CPP_CALLABLE_CTYPE, _paren_ex(_lam3)))
 
 
 def _paren_ex(a: Ex) -> Ex:
@@ -10812,16 +10827,8 @@ def _cpf_simple_target_call_iterable(gen, s: 'ForStmt', declared: dict, indent: 
                 for _ae in _argstrs:
                     _parts.append(
                         f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_ae})); ")
-                _call_res = (
-                    "[&]() { struct _W { int64_t w; "
-                    "operator int64_t() const { return w; } "
-                    "operator char *() const { return (char *)w; } "
-                    + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                              for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                    + "}; "
-                    "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
-                    + ''.join(_parts)
-                    + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_cpp_fc}), _a, _k)}}; }}()")
+                _call_res = _cpp_dyn_word_lambda(
+                    gen, f"(int64_t)(intptr_t)({_cpp_fc})", _parts).show()
         except Exception:
             _call_res = f"{_cpp_fc}({_args})"
         # For csv.reader style, we need to iterate over its result
@@ -12692,7 +12699,7 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
                     else:
                         msg_cpp = f'const_cast<char *>("{gimple_ctypes._c_escape(text)}")'
                 elif isinstance(msg_arg, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-                    msg_cpp = _cpp_raise_tuple_msg_expr(gen, msg_arg)
+                    msg_cpp = _cpp_raise_tuple_msg_expr(gen, msg_arg).show()
                 else:
                     msg_cpp = gen._cpp_expr(msg_arg)
             else:
@@ -12723,7 +12730,7 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
             # literals like `raise Exc((header, line))` do not go through
             # the call-argument list lowering (which cannot produce a
             # `char *` message).
-            msg_cpp = _cpp_raise_tuple_msg_expr(gen, msg_arg)
+            msg_cpp = _cpp_raise_tuple_msg_expr(gen, msg_arg).show()
         else:
             # Variable/expression message: evaluate as char* expression
             msg_cpp = gen._cpp_expr(msg_arg)
@@ -12731,7 +12738,7 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
             f"(void *){msg_cpp} }};"]
 
 
-def _cpp_raise_tuple_msg_expr(gen, lit) -> str:
+def _cpp_raise_tuple_msg_expr(gen, lit) -> Ex:
     """Build a `char *` repr for a tuple/list literal used as a `raise`
     message argument in a compiled generator body. Exception messages are
     consumed as `char *`, so the literal cannot be lowered as a boxed
@@ -12772,8 +12779,10 @@ def _cpp_raise_tuple_msg_expr(gen, lit) -> str:
         stmts.append('_p = strdup(","); _s = mojo_str_cat_free(_s, _p); free(_p);')
     stmts.append(f'_p = strdup("{close_ch}"); _s = mojo_str_cat_free(_s, _p); free(_p);')
     stmts.append('return _s;')
-    body = ' '.join(stmts)
-    return f"([&]() -> char * {{ {body} }}())"
+    lam = Ex('lambda')
+    lam.text = 'char *'
+    lam.body = [_cpp_opaque(' '.join(stmts[:-1])), _cpp_opaque(stmts[-1])]
+    return _paren_ex(lam)
 
 
 def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
