@@ -8079,7 +8079,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 if _cls_gname is not None:
                     gen._cpp_class_attr_refs.add(_cls_gname)
                     val = gen._cpp_expr(s.value)
-                    return [f"{indent}{_cls_gname} = {val};"]
+                    return [_cpp_assign_line(_cls_gname, val, indent)]
                 if (_cls_gname is None
                         and s.target.member not in gen._struct_method_names.get(_tgt_struct, ())
                         and s.target.member not in gen.struct_field_types.get(_tgt_struct, {})):
@@ -8329,8 +8329,8 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 gen._cpp_func_scope_decls.append(f"int64_t {_cursor};")
             gen._cpp_list_iter_cursor[name] = {'list': cpp_name,
                                                'cursor': _cursor}
-            return [f"{indent}{cpp_name} = {_cpp_as('MojoList *', _it_arg_e)};",
-                    f"{indent}{_cursor} = 0;"]
+            return [_cpp_assign_line(cpp_name, _cpp_as('MojoList *', _it_arg_e), indent),
+                    _cpp_assign_line(_cursor, '0', indent)]
     # `g = <compiled-generator>(args)` — a generator CONSTRUCTION as the
     # assigned value: declare the local a real `MojoGenerator *` (the
     # opaque coroutine-handle type every drive symbol speaks), emit the
@@ -8358,8 +8358,8 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             gen._cpp_generator_var_api[name] = _ga_api
             _ga_start = _cpp_emit_generator_start_expr(gen, s.value, _ga_api)
             if name in gen._cpp_mut_capture_names:
-                return [f"{indent}*{cpp_name} = {_ga_start};"]
-            return [f"{indent}{cpp_name} = {_ga_start};"]
+                return [_cpp_assign_line('*' + cpp_name, _ga_start, indent)]
+            return [_cpp_assign_line(cpp_name, _ga_start, indent)]
     # A list/dict/set LITERAL RHS (`lines = []`, ftplib.py's mlsd) is
     # NOT representable as the raw C++ brace-init text `_cpp_expr`'s
     # literal cases emit — for a container-typed local that text must
