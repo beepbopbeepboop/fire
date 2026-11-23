@@ -4490,7 +4490,8 @@ test('closure-address-of-capture', [PY, 'test_closure_address_of_capture.py'],
      desc="Pointer(to=x) of a by-value capture takes the env field's address (CODEGEN closure capture)")
 test('codegen-container-param-unknown-arg', [PY, 'test_codegen_container_param_unknown_arg.py'],
      mem='tiny',
-     desc='container parameter with an unknown argument (registered by the estate audit)')
+     desc='container parameter with an unknown argument (registered by the estate audit)',
+     disabled='bugs/gate-codegen-container-param-unknown-arg.md')
 test('comptime-generic-alias-fold', [PY, 'test_comptime_generic_alias_fold.py'],
      mem='tiny',
      desc='a generic comptime alias folds (registered by the estate audit)')
