@@ -5006,7 +5006,7 @@ def _cpx_call_ident(gen, e) -> Ex:
         if gimple_ctypes.TypeLattice.is_double(_sct):
             return _cpp_call_ex('mojo_repr_float', [f"(double)({args[0]})"])
         if gimple_ctypes.TypeLattice.is_cstr(_sct):
-            return _paren_ex(_cpp_cast_ex('char *', ex_text(f"({args[0]})")))
+            return _paren_ex(_cpp_cast_ex('char *', _paren_ex(ex_text(args[0]))))
         return _cpp_call_ex('mojo_str', [f"(void *)({args[0]})"])
     if (fname == 'int' and len(e.args) == 1
             and not gen._locally_binds_name('int')):
@@ -5048,7 +5048,7 @@ def _cpx_call_ident(gen, e) -> Ex:
                 and isinstance(_int_arg, gimple_ctypes.IdentExpr) else None)
         if gimple_ctypes.TypeLattice.is_cstr(_ict):
             return _cpp_call_ex('mojo_make_int', [f"(char *)({args[0]})"])
-        return _paren_ex(_cpp_cast_ex('int64_t', ex_text(f"({args[0]})")))
+        return _paren_ex(_cpp_cast_ex('int64_t', _paren_ex(ex_text(args[0]))))
     if (fname == 'float' and len(e.args) == 1
             and not gen._locally_binds_name('float')):
         # float(x) — same shape as int(x) just above, mirroring
@@ -5060,7 +5060,7 @@ def _cpx_call_ident(gen, e) -> Ex:
                 and isinstance(_flt_arg, gimple_ctypes.IdentExpr) else None)
         if gimple_ctypes.TypeLattice.is_cstr(_fct):
             return _cpp_call_ex('mojo_make_float', [f"(char *)({args[0]})"])
-        return _paren_ex(_cpp_cast_ex('double', ex_text(f"({args[0]})")))
+        return _paren_ex(_cpp_cast_ex('double', _paren_ex(ex_text(args[0]))))
     if (fname == 'repr' and len(e.args) == 1
             and not gen._locally_binds_name('repr')):
         return _cpp_call_ex('mojo_repr_str_or_none', [f"(char *)({args[0]})"])
@@ -5213,7 +5213,7 @@ def _cpx_call_ident(gen, e) -> Ex:
                       for f in _fmts]
             _isi = Ex('lambda')
             _isi.body = [_cpp_instr('decl', f"const int64_t {_vname} = (int64_t)({_obj_e})"),
-                         _cpp_instr('return', ex_text(f"({' || '.join(_parts)})"))]
+                         _cpp_instr('return', _paren_ex(ex_text(' || '.join(_parts))))]
             return _isi
         return _as_ex('(' + ' || '.join(_mk(f) if f is not None else '0'
                                  for f in _fmts) + ')')
@@ -6403,6 +6403,15 @@ def _cpp_unary_ex(kind: str, inner) -> Ex:
     return e
 
 
+def _cpp_cond_ex(a, b, c) -> Ex:
+    """`a ? b : c` as a `cond` Ex; the caller parenthesizes it."""
+    e = Ex('cond')
+    e.a = _as_ex(a)
+    e.b = _as_ex(b)
+    e.c = _as_ex(c)
+    return e
+
+
 def _cpp_cast_ex(ctype: str, inner) -> Ex:
     """`(ctype) inner` as a `cast` Ex; `ctype` is the C spelling, `inner` an Ex or text.
 
@@ -6899,9 +6908,9 @@ def _cpp_expr_ex(gen, e):
                 if isinstance(b, gimple_ctypes.ListExpr) and not b.elements:
                     return "(int64_t)(intptr_t)mojo_list_new()"
                 return f"(int64_t)({gen._cpp_expr(b)})"
-            return ex_text(f"({gen._cpp_expr(e.condition)} ? {_tb(e.then_val)} : {_tb(e.else_val)})")
-        return (ex_text(f"({_cpp_untyped_word_truth(gen, e.condition, gen._cpp_expr(e.condition))}"
-                f" ? {gen._cpp_expr(e.then_val)} : {gen._cpp_expr(e.else_val)})"))
+            return _paren_ex(_cpp_cond_ex(ex_text(gen._cpp_expr(e.condition)), ex_text(_tb(e.then_val)), ex_text(_tb(e.else_val))))
+        return _paren_ex(_cpp_cond_ex(ex_text(_cpp_untyped_word_truth(gen, e.condition, gen._cpp_expr(e.condition))),
+                                      ex_text(gen._cpp_expr(e.then_val)), ex_text(gen._cpp_expr(e.else_val))))
     if isinstance(e, gimple_ctypes.BinaryOp):
         return _cpx_binary_op(gen, e)
     if isinstance(e, gimple_ctypes.CompareChain):
@@ -6946,7 +6955,7 @@ def _cpp_expr_ex(gen, e):
         # `x := expr` assigns x and yields the value
         name = e.name
         val = gen._cpp_expr(e.value)
-        return ex_text(f"({name} = {val})")
+        return _paren_ex(ex_bin(ex_text(name), '=', ex_text(val)))
     if isinstance(e, gimple_ctypes.BinaryOp) and e.op == ':=':
         return _cpx_walrus(gen, e)
     if isinstance(e, gimple_ctypes.CallExpr):

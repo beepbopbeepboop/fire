@@ -935,3 +935,19 @@ Still text in `_cpx_binary_op`: three lambda-body returns (`_W{...}` in the `and
 helpers returning text. `_cpx_call_ident` (4) and `_cpp_expr_ex` (3) are next.
 
 Verified: `test_gimple_cpp_core_arms.py` 30 arms, 0 failures; `c_oracle check` identical as above.
+
+## Status 2026-11-23 (step 31): the ident-arm casts, the `||` join, the ternary and the assignment are shapes
+
+`_cpx_call_ident` builds its `(char *)(x)`, `(int64_t)(x)` and `(double)(x)` casts over a parenthesized operand,
+and the `a || b` join of its `isinstance` lambda, as IR shapes. `_cpp_expr_ex` builds its conditional
+(`_cpp_cond_ex`, a new helper over the `cond` kind) and its `(name = value)` assignment (`ex_bin`) as shapes.
+The `_cpp_expr_ex` edits keep its line count at the ratchet (101): the function is at its limit, so a
+future addition there needs `tools/extract_arm.py`.
+
+Coverage (line tracer over every C++ corpus program, plus probes): reached are the `int64_t` cast (new programs
+`25`) and the assignment (new `26`); the `char *` and `double` casts, the `||` join, and the typed ternary are
+NOT reached by any program that compiles (the float-conversion probe is refused as a generator). They are verified
+by transcription and the helper pins only.
+
+Verified: `test_gimple_cpp_core_arms.py` 30 arms, 0 failures; `c_oracle check --base c1c60bdc3` identical on all 285
+pydiff programs and all 29 coroutine programs (the two new programs included).
