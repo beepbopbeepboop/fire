@@ -5932,8 +5932,8 @@ def _cpx_call_ident(gen, e) -> Ex:
             else f"(int64_t)({a})" for i, a in enumerate(args))
         return _as_ex(_cpp_rethrow_pending(_rt, f"{fname}({_cargs})"))
     if fname == 'mojo_list_slice_word' and len(args) == 6:
-        return (_as_ex(f"mojo_list_slice_word((int64_t)(intptr_t)({args[0]}), "
-                + ', '.join(f"(int64_t)({a})" for a in args[1:]) + ")"))
+        return _cpp_call_ex('mojo_list_slice_word',
+                            [f"(int64_t)(intptr_t)({args[0]})"] + [f"(int64_t)({a})" for a in args[1:]])
     if fname in (
             'mojo_c_getenv', 'mojo_platform_system',
             'mojo_platform_machine', 'mojo_stdin_read',

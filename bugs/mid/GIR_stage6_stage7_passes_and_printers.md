@@ -660,3 +660,25 @@ Also still open: the `mojo_dict_get_int` return in `_cpx_call_member` (runtime c
 Verified: `c_oracle check --base HEAD -j 4` gives identical C on all 285 pydiff programs and
 identical C++ companions on all 13 coroutine programs; `test_gimple_cpp_core_arms.py` pins 30 arms
 with 0 failures; `compile_stdlib.py` gives 610 passed, `FAILED: 0 (0 expected, 0 unexpected)`, no skips.
+
+## Status 2026-11-23 (step 17): `mojo_list_slice_word` is a call shape; what is left is lambda bodies
+
+The 6-argument `mojo_list_slice_word` return of `_cpx_call_ident` is now a `call` shape. Its
+trailing-comma concern from step 16 does not apply: the arm is guarded by `len(args) == 6`, so
+`args[1:]` always has five elements.
+
+What remains as text returns in the call arms, and why each is a leaf rather than a missed port:
+
+- C++ lambda bodies (`[&]() -> T { ... }()`): `_cpx_call_ident`'s `mojo_list_get_*`, slice,
+  comprehension, `_W` word-container, and `malloc` returns, plus `_cpp_next_on_generator_expr` and
+  `_cpp_build_container_from_iterable`. Their bodies are statements, not expressions, so they need a
+  lambda shape with a statement body, which is a design step, not a call port.
+- `_cpp_emit_generator_start_expr` and `_cpp_rethrow_pending`: they return a call or a lambda as text.
+  Converting them means changing their return type and every call site, which is its own step.
+- Bare text leaves (`'0'`, `args[0]`, `'const_cast<char *>("")'`, `'1'`): already single-token
+  `ex_text` values, not calls.
+- `mojo_dict_get_int` in `_cpx_call_member`: runtime cast type, not yet checked against `type_named`.
+
+Verified: `c_oracle check --base HEAD -j 4` gives identical C on all 285 pydiff programs and
+identical C++ companions on all 13 coroutine programs; `test_gimple_cpp_core_arms.py` pins 30 arms
+with 0 failures.
