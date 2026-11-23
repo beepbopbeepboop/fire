@@ -1759,6 +1759,90 @@ def _module_attr_module(gen, module: str, attr: str):
                     return _ref
     return None
 
+def resolve_module_attr_ref(gen, base_ref: str, attr: str):
+    """The module ref that `base_ref` binds `attr` to, registered in this
+    generation unit as a module namespace, or None.
+
+    `base_ref` is a MODULE ref (not the local alias a source statement
+    used), so `base_ref.attr` is a read of that module's namespace. The
+    answer comes from the defining module's own import statements
+    (`_module_attr_module`, which parses its source once and caches it) —
+    never from a name guess, because the same attribute name can be an
+    ordinary function or constant.
+
+    Registration is what makes the re-dispatched `<target>.<member>` read
+    lower as a module-qualified access instead of an attribute read on an
+    opaque int64_t marker: both `_selfhost_sibling_member_kind` and the
+    generic module-qualified branch gate on `_module_alias_names`, and both
+    read the alias's `imported_symbols` entry for the target module. An
+    entry with `return_type: 'unknown'` is the exact module-marker shape
+    `_gen_stmt_ImportStmt` writes, and the imported-symbol stub pass skips
+    that shape.
+    """
+    try:
+        ref = gen._module_attr_module(base_ref, attr)
+    except Exception:
+        ref = None
+    if not ref:
+        return None
+    if ref not in gen._module_alias_names:
+        gen._module_alias_names.add(ref)
+    if ref not in gen.imported_symbols:
+        gen.imported_symbols[ref] = {
+            'module': ref, 'return_type': 'unknown',
+        }
+    return ref
+
+
+def module_receiver_ref(gen, recv):
+    """The MODULE ref the member read `recv` denotes, or None.
+
+    `recv` is the RECEIVER of an outer member access: `h.sub` in
+    `h.sub.double_it`. It answers only when `h` is a module alias this
+    compile registered, and then either `h.sub` is a submodule file
+    (`import pkg.impl` makes `pkg.impl` a module object) or `h`'s own module
+    binds `sub` to a module (`import helper as h`, where `helper.py` does
+    `import impl as sub`). Every other receiver — a class instance's field,
+    a plain local — answers None and keeps its existing lowering.
+
+    The one answer both spellings consult: the CALL re-dispatch
+    (`emit_methods._lmc_two_hop_module_call`) and the VALUE read
+    (`emit_exprs._lower_MemberExpr`) reach the same module for the same
+    receiver, so `h.sub.f(21)` and `f = h.sub.f` cannot disagree about which
+    module `f` belongs to.
+    """
+    if not isinstance(recv, gimple_ctypes.MemberExpr):
+        return None
+    if not isinstance(recv.obj, gimple_ctypes.IdentExpr):
+        return None
+    _base = _as_str(recv.obj.name)
+    _member = _as_str(recv.member)
+    if _base not in getattr(gen, '_module_alias_names', ()):
+        return None
+    # `import pkg.impl` binds `pkg`, and `pkg.impl` is then a submodule
+    # file: the dotted name is the module itself.
+    _dotted = _base + '.' + _member
+    if gen._submodule_source_path(_dotted):
+        # The plain-`import` pre-pass records only the BOUND name (`pkg`),
+        # and the full dotted target is registered later, after the toplevel
+        # body is lowered — so register it here, as the module-globals pass
+        # will (same dict, same shape, first writer wins).
+        if _dotted not in gen._module_alias_names:
+            if _dotted not in gen.imported_symbols:
+                gen.imported_symbols[_dotted] = {
+                    'module': _dotted, 'return_type': 'unknown',
+                }
+            gen._module_alias_names.add(_dotted)
+        return _dotted
+    # Otherwise the receiver's base is a module whose own namespace binds
+    # `member` to a module (`import helper as h` + `helper: import impl as
+    # sub`). Resolve through the base's REAL module, not its local alias.
+    _info = (getattr(gen, 'imported_symbols', None) or {}).get(_base)
+    _base_ref = ((_info.get('module') if isinstance(_info, dict) else None)
+                 or _base)
+    return resolve_module_attr_ref(gen, _base_ref, _member)
+
+
 def _module_ref_is_source(gen, ref: str, base_path: str) -> bool:
     """Does `ref` name a real module FILE reachable from the module whose
     source is `base_path`? Used to tell a `from PKG import name` that binds

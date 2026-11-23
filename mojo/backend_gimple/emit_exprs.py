@@ -62,7 +62,7 @@ from mojo.middle.calls_shared import _callable_value_symbol
 # "Does the module `<alias>` holds define `<member>` as a class?" — the
 # class-as-value stub in `_lower_MemberExpr` asks the module, not the TU-wide
 # `struct_field_types`.
-from mojo.middle.funcs_shared import module_member_is_struct
+from mojo.middle.funcs_shared import module_member_is_struct, module_receiver_ref
 from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
 from mojo.middle.calls_shared import _struct_operator_receiver, _STRUCT_OP_DUNDER
@@ -2046,6 +2046,23 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # `_classattr_GimpleGen___cpp_kwfwd_counter` global.
         return gen.lower_expr(gimple_ctypes.MemberExpr(
             obj=gimple_ctypes.IdentExpr(name=_as_str(node.obj.member),
+                                        line=getattr(node, 'line', 0)),
+            member=_as_str(node.member)))
+    # `h.sub.f` read as a VALUE where `h.sub` is itself a MODULE: `import
+    # helper as h` and `helper.py: import impl as sub` make `h.sub` a module
+    # object, and `h.sub.double_it` is `impl`'s function. The CALL spelling
+    # already resolves the receiver (`_lmc_two_hop_module_call`). Without this
+    # the receiver lowered to a dynamic getattr on the module marker and
+    # `double_it` was read off that — a fatal `AttributeError: sub` at run
+    # time, the same for `import pkg.impl; pkg.impl.double_it`. Re-lower the
+    # read against the resolved module, so it takes the one-level module
+    # alias path (`_callable_value_symbol`) that `i.double_it` already takes.
+    # A receiver that is not a module binding answers None and falls through
+    # to the existing lowering unchanged.
+    _mr_ref = module_receiver_ref(gen, node.obj)
+    if _mr_ref:
+        return gen.lower_expr(gimple_ctypes.MemberExpr(
+            obj=gimple_ctypes.IdentExpr(name=_mr_ref,
                                         line=getattr(node, 'line', 0)),
             member=_as_str(node.member)))
     # `dict.fromkeys` / `frozendict.fromkeys` read as a VALUE
