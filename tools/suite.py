@@ -2076,8 +2076,7 @@ test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=Tru
 # a dict comprehension's key and value live in, which formal/model.py reads.
 test('doc-refs-stale-verdicts', [PY, 'test_dangling_doc_refs.py'], cache=True,
      mem='tiny', extra=['test_dangling_doc_refs.py', 'tools/dangling_doc_refs.py'],
-     desc='the stale-verdict report flags a wrong row and passes a right one',
-     disabled='bugs/gate-doc-refs-stale-verdicts.md')
+     desc='the stale-verdict report flags a wrong row and passes a right one')
 test('comprehension-parse-shape', [PY, 'test_comprehension_parse_shape.py'],
      cache=True, mem='tiny', extra=['test_comprehension_parse_shape.py', 'fire_compiler.py'],
      desc='Comprehension stores a dict comprehension\'s key in .element, value in .value')
