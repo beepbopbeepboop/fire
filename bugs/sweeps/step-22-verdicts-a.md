@@ -15,3 +15,13 @@
 | 11 | test_formal_globals.py | T | build: parse error: test_formal_globals.py:2332:0: Expected RPAREN got EOF('') | not Mojo source |  |
 
 TOTALS: T=11 M=0 S=0 C=0
+
+## 2026-11-22: row 5 is a false positive -- `now` is an intended ABSENT fixture
+
+`runtime/stdlib_wrapper.mojo`'s `from time import now` is not a defect. It is the
+measured fixture for the formal model's `reflect.EXCL_ABSENT` answer -- "the
+module declares no name under this spelling at all", the fifth answer that is
+NOT an exclusion (`formal/model/module.py:2037`, which names this exact line:
+"every one of the four enumerated rules was false about
+`formal/hostmods/time.mojo`, which declares no `now` at all"). The file is a
+69-byte deliberate negative case, and the model handles it explicitly. No fix.
