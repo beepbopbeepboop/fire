@@ -515,3 +515,32 @@ its test) is the smallest first commit.
 
 **Stage 5c** is unchanged: blocked on the pointer-versus-scalar call-site analysis or an owner decision
 (`doc/GIR_WORKERS.md` §6).
+
+## Status 2026-11-22 (expression plan, steps 1-12): ten of eleven expression arms return Ex
+
+The expression plan above is executed through step 12. Commits: `9a5867c05` (step 1, the `paren` shape),
+`bf6dfd0bd` (step 2, the dispatcher returns `Ex`; `_cpp_expr` is `gen._cpp_expr_ex(e).show()`; one-line
+`gen` delegate in `gimple_codegen.py`), then one commit per arm: `e2e5fb31d` slice (list-step and word-step as
+`call`), `9d48f7723` unary (`paren`, `un`, `bin`, `call`), `94d289c60` walrus and compare chain (`paren`,
+`bin` with `=`, `bin` with `&&`), `6f58b2c84` identifier (wrap), `f335d3194` subscript (`call`, `index`),
+`49dc7971a` binary (`call`, `paren(bin)`), `fda723321` lambda (wrap: C++ lambda text), `64b379e86` member
+(`field`, `call`), `72532e250` await (`coawait`), and `eda30cc25`, which extracts the three callee arms of
+`_cpx_call_expr` (766, 1,226 and 129 lines) as pure moves.
+
+Every arm migration was checked the same way: the arm test pins each branch through a stub generator with
+expected strings taken from HEAD's output for the same stub; a direct comparison against HEAD's function on the
+same inputs; `c_oracle check --base HEAD` identical on 285 C and 13 coroutine C++ programs; and the
+`compile_stdlib.py` verdict unchanged (PASSED 592, FAILED 18 = 0 expected / 18 unexpected).
+
+**Still open (the last expression arm).** `_cpx_call_expr` returns text, and its three extracted children
+(`_cpx_call_member`, `_cpx_call_ident`, `_cpx_call_callexpr`) return text: 2,121 lines, the bulk of the
+expression printer. The arm test keeps `_cpx_call_expr` on `EXPR_ARMS_STILL_TEXT`. Porting it is the next
+round: the children first, each by its own return shapes (most are `call`, with a few `field`/`index`/`paren`
+and lambda text leaves), smallest (`_cpx_call_callexpr`, 129) first, then the two large ones after another
+`tools/extract_arm.py` pass on them. The same per-branch comparison against HEAD applies.
+
+**Known gaps from these steps.** (1) The floormod and div branches of `_cpx_binary_op` are not reached by any
+stub input; their call text is pinned on the helper, not through the arm. (2) `test_selfhost.py` fails
+(2 passed, 1 failed) with 73 GCC errors, identical on HEAD (checked in a detached worktree; error sets equal
+after stripping the path). It predates this work and is not fixed here; it is the owner's gate. (3) The
+oracle reaches most arms but not every branch, which is why each migration carries a direct check.
