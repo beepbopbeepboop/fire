@@ -90,6 +90,18 @@ CASES = {
          'main.py': ('import helper as h\n'
                      'print(h.sub.double_it(21))\n')},
         'main', '42\n', False),
+    # The CALL spelling through the two-hop receiver WITH keyword arguments:
+    # `_lower_method_call` used to gate the two-hop arm on "no kwargs", so the
+    # receiver fell to a dynamic getattr on the module marker, and the
+    # rewritten call dropped the keywords. A keyword-only parameter pins both.
+    'call_two_hop_keyword_only': (
+        {'impl.py': ('def pick(p: int, *, a: int = 0, b: int = 0) -> int:\n'
+                     '    return a * 10 + b\n'),
+         'helper.py': HUB_SRC,
+         'main.py': ('import helper as h\n'
+                     'print(h.sub.pick(1, b=2))\n'
+                     'print(h.sub.pick(1, a=3))\n')},
+        'main', '2\n30\n', False),
     'call_dotted_import': (
         {'pkg/__init__.py': '',
          'pkg/impl.py': IMPL_SRC,

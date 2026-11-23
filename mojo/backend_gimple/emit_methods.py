@@ -4117,7 +4117,7 @@ def _lmc_two_hop_module_call(gen, node: gimple_ctypes.CallExpr, func) -> tuple[s
             member=func.member,
             line=getattr(func, 'line', 0), col=getattr(func, 'col', 0)),
         args=list(node.args),
-        kwargs=[],
+        kwargs=list(getattr(node, 'kwargs', None) or []),
         line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
     return _lower_method_call(gen, _th_node)
 
@@ -5401,8 +5401,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `import a.b` binds `a`, so `a.b.f(...)` is a TWO-hop attribute call
     # ...
     if (isinstance(func.obj, gimple_ctypes.MemberExpr)
-            and isinstance(func.obj.obj, gimple_ctypes.IdentExpr)
-            and not getattr(node, 'kwargs', None)):
+            and isinstance(func.obj.obj, gimple_ctypes.IdentExpr)):
         _arm_r = _lmc_two_hop_module_call(gen, node, func)
         if _arm_r is not None:
             return _arm_r
