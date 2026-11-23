@@ -57,7 +57,7 @@ TOOL = os.path.join(ROOT, 'tools', 'extract_arm.py')
 # line that could move, so the parent may only get shorter.
 # The expression arms still building C++ text (plan step 4 in the stage 6/7 doc).
 EXPR_ARMS_STILL_TEXT = {
-    '_cpx_ident_expr', '_cpx_subscript_expr', '_cpx_lambda_expr', '_cpx_binary_op',
+    '_cpx_subscript_expr', '_cpx_lambda_expr', '_cpx_binary_op',
     '_cpx_member_expr', '_cpx_await_expr', '_cpx_call_expr',
 }
 PARENTS = [
@@ -262,6 +262,33 @@ def main() -> int:
     _chain = _N.CompareChain(operands=[_N.IdentExpr(name='x'), _N.IdentExpr(name='y'), _N.IdentExpr(name='z')], ops=['<', '<='])
     text_cases.append((_C._cpx_compare_chain(_EGen({'x': 'int64_t', 'y': 'int64_t', 'z': 'int64_t'}), _chain).show(),
                        '((x < y) && (y <= z))'))
+    # The identifier arm, through a stub: the literal spellings, a mutable capture, a
+    # keyword-renamed parameter, a module global and a plain name. Expected strings are HEAD's.
+    class _IGen(_StubGen):
+        def __init__(self):
+            super().__init__({'x': 'int64_t'})
+            self._cpp_gen_self_struct = None
+            self._cpp_mut_capture_names = {'x'}
+            self._generator_api = {}
+            self._supported_generators = ()
+            self._global_var_types = {'zz': 'int64_t'}
+            self._cpp_early_global_names = set()
+            self.module_name = 'mm'
+            self._current_module_ctx = None
+            self._cpp_module_global_refs = set()
+            self._cpp_module_func_refs = set()
+            self.func_param_types = {}
+            self._cpp_kw_param_renames = {'default': 'default_'}
+        def _func_csym(self, n):
+            return n
+        def _cpp_sig_default_word(self, e):
+            return None
+        def _cpp_expr_ex(self, n):
+            return _C._cpp_expr_ex(self, n)
+
+    for _nm, _want in (('None', '0'), ('True', 'true'), ('False', 'false'), ('x', '(*x)'),
+                       ('default', 'default_'), ('y', 'y'), ('zz', '_mm_globals.zz')):
+        text_cases.append((_C._cpx_ident_expr(_IGen(), _N.IdentExpr(name=_nm)).show(), _want))
     _xs = _N.IdentExpr(name='xs')
     _ints = lambda v: _N.IntLiteral(value=v)
     _lst = _slice({'xs': 'MojoList *'}, _xs, _ints(1), _ints(4), _ints(2))

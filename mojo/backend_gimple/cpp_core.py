@@ -3085,25 +3085,25 @@ def _cpp_build_container_from_iterable(gen, kind: str, iter_node, target_name: s
             f"{body_text} return {acc}; }}()")
 
 
-def _cpx_ident_expr(gen, e) -> str:
+def _cpx_ident_expr(gen, e) -> Ex:
     """`IdentExpr` in `_cpp_expr`: names, literals spelled as names, `self` in generator methods, and captured-pointer reads.
 
     One arm of `_cpp_expr`, which tests the condition and calls this."""
     if e.name == 'None':
-        return '0'  # None → null pointer / zero (matches _lower_IdentExpr)
+        return ex_text('0')  # None → null pointer / zero (matches _lower_IdentExpr)
     if e.name == 'True':
-        return 'true'
+        return ex_text('true')
     if e.name == 'False':
-        return 'false'
+        return ex_text('false')
     if e.name == 'self' and getattr(gen, '_cpp_gen_self_struct', None):
-        return "self"  # self is a struct pointer in generator methods
+        return ex_text("self")  # self is a struct pointer in generator methods
     # A mutated-by-reference capture (see `_gen_cpp_async_unit`'s
     # `mut_capture_names` docstring) is threaded through as a
     # pointer parameter -- every ordinary READ of its name must
     # dereference that pointer, not read the pointer's own address
     # as if it were the value.
     if e.name in gen._cpp_mut_capture_names:
-        return f"(*{e.name})"
+        return ex_text(f"(*{e.name})")
     # Module-global reference: a name that isn't a declared local/
     # param/capture but IS a known module-level global (in
     # `_global_var_types`) resolves to the module globals struct
@@ -3135,7 +3135,7 @@ def _cpx_ident_expr(gen, e) -> str:
             and e.name in getattr(gen, '_supported_generators', ())):
         _gw = gen._cpp_sig_default_word(e)
         if _gw is not None:
-            return _gw
+            return ex_text(_gw)
     if (gen._cpp_declared is not None
             and e.name not in gen._cpp_declared
             and (e.name in gen._global_var_types
@@ -3161,7 +3161,7 @@ def _cpx_ident_expr(gen, e) -> str:
         if field in gimple_ctypes._CPP_KEYWORD_FIELDS:
             field = f"_kw_{field}"
         gen._cpp_module_global_refs.add((mod_key, e.name))
-        return f"_{safe_mod}_globals.{field}"
+        return ex_text(f"_{safe_mod}_globals.{field}")
     # A bare module-level function name referenced as a value (e.g.
     # tokenize.py's `encode = detect_encoding`) — the generator body
     # holds it as an opaque int64_t; the call site resolves the real
@@ -3171,14 +3171,14 @@ def _cpx_ident_expr(gen, e) -> str:
             and e.name in gen.func_param_types
             and e.name not in gen._global_var_types):
         gen._cpp_module_func_refs.add(e.name)
-        return f"(int64_t)&{gen._func_csym(e.name)}"
+        return ex_text(f"(int64_t)&{gen._func_csym(e.name)}")
     # A coroutine parameter whose Python name is a reserved C/C++
     # keyword (e.g. `default`) was renamed in the emitted
     # signature — see self._cpp_kw_param_renames's docstring.
     # Every read of it must agree with that renamed identifier.
     if e.name in gen._cpp_kw_param_renames:
-        return gen._cpp_kw_param_renames[e.name]
-    return e.name
+        return ex_text(gen._cpp_kw_param_renames[e.name])
+    return ex_text(e.name)
 
 
 def _cpx_member_expr(gen, e) -> str:
@@ -6693,7 +6693,7 @@ def _cpp_expr_ex(gen, e):
             return ex_text(val)  # backtick-quoted identifier (mojo keyword escape)
         return ex_text(_cpp_string_literal_expr(gen, val, gimple_ctypes._str_literal_interp_flag(e)))
     if isinstance(e, gimple_ctypes.IdentExpr):
-        return ex_text(_cpx_ident_expr(gen, e))
+        return _cpx_ident_expr(gen, e)
     if isinstance(e, gimple_ctypes.MemberExpr):
         return ex_text(_cpx_member_expr(gen, e))
     if isinstance(e, gimple_ctypes.LambdaExpr):
