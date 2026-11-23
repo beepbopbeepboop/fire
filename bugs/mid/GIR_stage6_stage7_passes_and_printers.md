@@ -716,3 +716,24 @@ are the next text consumers to port.
 
 Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine
 programs; `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
+
+## Status 2026-11-23 (step 20): four more lambdas are on the lambda shape
+
+`Ex('lambda')` now renders an empty return type as `[&]() { ... }()`, and an empty statement in a
+body takes no separator (so an empty opaque block does not double a space). Four lambdas are
+ported, each on structure rather than text:
+
+- the `isi` cache lambda (`const int64_t v = ...; return (a || b);`, no return type), in `_cpx_call_ident`;
+- the list-iterator `next` lambda (an `if` with its miss statement, then `return get(list, cur++)`);
+- the min/max accumulator lambda (a run of opaque blocks, then `return`);
+- the `_cpp_build_container_from_iterable` lambda (a declaration, the loop body, `return acc`).
+
+`_cpp_build_container_from_iterable` returns an `Ex` now; its `ex_text` caller in the comprehension
+arm takes it directly. The arm test pins the empty-return-type and empty-statement rules.
+
+Still text lambdas in `_cpx_call_ident`: the `_W` word-container lambda, the list-copy lambda with its
+callable body, the struct constructor (`calloc` plus `attr_inits`), and the pack call with
+`_pack_stmts`. Each needs its own port, the last three with a byte pin.
+
+Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine
+programs; `test_gimple_cpp_core_arms.py` 30 arms, 0 failures, with the new rules pinned.

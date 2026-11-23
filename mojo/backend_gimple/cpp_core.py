@@ -2720,6 +2720,13 @@ def _cpp_next_lambda_ex(vct: str, base: str, handle: str, decl, stop_tag) -> Ex:
     return e
 
 
+def _cpp_opaque(text: str) -> Instr:
+    """A statement of a lambda body that is already C text (a block the lowering prints as a string)."""
+    ins = Instr('opaque')
+    ins.text = text
+    return ins
+
+
 def _cpp_next_on_generator_expr(gen, handle_expr, api) -> Ex:
     """`next(<generator-handle>)` inside a coroutine body, lowered to the
     SAME extern "C" drive API _cpp_yield_from's delegation loop already uses:
@@ -3105,8 +3112,12 @@ def _cpp_build_container_from_iterable(gen, kind: str, iter_node, target_name: s
     declared[acc] = res_ctype
     lines = gen._cpp_for_stmt(for_stmt, declared, '    ')
     body_text = ' '.join(l.strip() for l in lines)
-    return (f"[&]() -> {res_ctype} {{ {res_ctype} {acc} = {new_fn} (); "
-            f"{body_text} return {acc}; }}()")
+    _cfi = Ex('lambda')
+    _cfi.text = res_ctype
+    _cfi.body = [_cpp_instr('decl', f"{res_ctype} {acc} = {new_fn} ()"),
+                 _cpp_opaque(body_text),
+                 _cpp_instr('return', ex_text(acc))]
+    return _cfi
 
 
 def _cpx_ident_expr(gen, e) -> Ex:
@@ -5138,9 +5149,10 @@ def _cpx_call_ident(gen, e) -> Ex:
             _vname = gen._cpp_fresh_name("_mg_isi")
             _parts = [(f if f is not None else '0').format(v=_vname)
                       for f in _fmts]
-            return (_as_ex(f"[&]() {{ const int64_t {_vname} = "
-                    f"(int64_t)({_obj_e}); return "
-                    f"({' || '.join(_parts)}); }}()"))
+            _isi = Ex('lambda')
+            _isi.body = [_cpp_instr('decl', f"const int64_t {_vname} = (int64_t)({_obj_e})"),
+                         _cpp_instr('return', ex_text(f"({' || '.join(_parts)})"))]
+            return _isi
         return _as_ex('(' + ' || '.join(_mk(f) if f is not None else '0'
                                  for f in _fmts) + ')')
     if (fname in ('tuple', 'list') and len(e.args) == 1
@@ -5204,12 +5216,16 @@ def _cpx_call_ident(gen, e) -> Ex:
             _li_stop = gen._exc_type_id('StopIteration')
             _li_miss = (f"throw _MojoCppExc{{ (int64_t){_li_stop}, "
                         f"nullptr, (void *)nullptr }};")
-        return (_as_ex(f"[&]() -> int64_t {{ if ({_li_cur} >= "
-                f"mojo_list_len({_li_list})) {{ {_li_miss} }} "
-                f"return " + ("mojo_list_get_boxed" if e.args[0].name in
-                              getattr(gen, '_cpp_mixed_list_params', ())
-                              else "mojo_list_get_int")
-                + f"({_li_list}, {_li_cur}++); }}()"))
+        _lnx = Ex('lambda')
+        _lnx.text = 'int64_t'
+        _lnx.body = [_cpp_instr('if', f"{_li_cur} >= mojo_list_len({_li_list})"),
+                     _cpp_opaque(_li_miss),
+                     _cpp_instr('end'),
+                     _cpp_instr('return', _cpp_call_ex(
+                         "mojo_list_get_boxed" if e.args[0].name in
+                         getattr(gen, '_cpp_mixed_list_params', ())
+                         else "mojo_list_get_int", [_li_list, f"{_li_cur}++"]))]
+        return _lnx
     if fname == 'next' and len(e.args) == 1:
         # next(<compiled-generator handle>) — a local assigned from a
         # compiled generator's start-call (`lines =
@@ -5435,7 +5451,11 @@ def _cpx_call_ident(gen, e) -> Ex:
                 _body = _body + (f"{{ int64_t _c = (int64_t)({_a}); "
                                  f"if ({_cmp}) {_mv} = _c; }} ")
                 _ai = _ai + 1
-            return _as_ex(f"[&]() -> int64_t {{ {_body}return {_mv}; }}()")
+            _mmx = Ex('lambda')
+            _mmx.text = 'int64_t'
+            _mmx.body = [_cpp_opaque(_body.rstrip()),
+                         _cpp_instr('return', ex_text(_mv))]
+            return _mmx
     if (fname == 'sorted' and e.args
             and not gen._locally_binds_name('sorted')):
         # `sorted(iterable)` / `sorted(iterable, key=..., reverse=
@@ -6817,7 +6837,7 @@ def _cpp_expr_ex(gen, e):
         # real occurrence).
         if e.kind in ('list', 'set') and len(e.generators) == 1:
             g0 = e.generators[0]
-            return ex_text(gen._cpp_build_container_from_iterable(
+            return (gen._cpp_build_container_from_iterable(
                 e.kind, g0.iterable, g0.target, e.element, g0.conditions))
         gimple_ctypes._debug_note('stubbed operation',
                                    f'generator-body {e.kind} comprehension (unsupported shape)')

@@ -95,9 +95,12 @@ class Ex:
         if k == 'cond':
             return self.a.show() + ' ? ' + self.b.show() + ' : ' + self.c.show()
         if k == 'lambda':
-            # `[&]() -> T { stmt stmt }()`: a call-once lambda; `text` is T's C spelling.
-            return ('[&]() -> ' + self.text + ' { '
-                    + ' '.join(st.show() for st in self.body) + ' }()')
+            # `[&]() -> T { stmt stmt }()`: a call-once lambda; `text` is T's C spelling,
+            # or '' for a lambda with no return type (`[&]() { ... }()`). An empty
+            # statement (an opaque block that came out empty) takes no separator.
+            head = '[&]() -> ' + self.text if self.text else '[&]()'
+            parts = [st.show() for st in self.body]
+            return head + ' { ' + ' '.join(p for p in parts if p != '') + ' }()'
         if k == 'none':
             return ''
         return '<opaque>'
