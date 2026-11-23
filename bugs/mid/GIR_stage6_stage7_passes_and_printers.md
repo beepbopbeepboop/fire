@@ -578,3 +578,21 @@ type before counting it as Ex.
 Porting order for the next round: the 17 call f-strings first (`call` shape, with the argument text as
 leaves where the argument is itself a helper call), then the 25 paren/cast forms (`paren(call)` or
 `paren(bin)`), then the 9 others, with the 4 helper-call returns last, after the helpers are checked.
+
+## Status 2026-11-23 (step 13, continued): seven member-call returns are `call` shapes
+
+`fc555d283` ports seven plain `NAME(args)` returns of `_cpx_call_member` (the `staticmethod`,
+`self`, `cls`, module-object and class-qualified forms, the receiver-prefixed form, and
+`_dict_fn(...)`) from f-strings to `_cpp_call_ex`, with the argument order unchanged.
+
+The 17/25/9/4 counts in the step-13 classification are out of date: master had already ported
+most of the non-call returns, so the remaining `_cpx_call_member` returns are re-counted from
+the arm itself, not from that table.
+
+Verified: `c_oracle check --base HEAD -j 4` gives identical C on all 285 pydiff programs and
+identical C++ companions on all 13 coroutine programs; `test_gimple_cpp_core_arms.py` pins 30
+arms with 0 failures; `compile_stdlib.py` gives `FAILED: 0 (0 expected, 0 unexpected)`, no skips.
+
+Still open: the remaining `_cpx_call_member` returns (multi-line helpers, paren/cast forms,
+the helper-call returns), `_cpx_call_ident` (1,231 lines), and the parent `_cpx_call_expr`'s
+`.show()` dispatch.
