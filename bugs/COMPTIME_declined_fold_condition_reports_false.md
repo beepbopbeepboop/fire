@@ -108,20 +108,26 @@ Option 1 (teach `eval_const` the operators) is untested and has its own risk:
 
 ### The 8 are one distinct cause, and it is latent
 
-All 8 carry the same GIMPLE diagnostic, `error: non-trivial conversion in
-'integer_cst'`, at a `raise "<string literal>"` that ends a word-returning
-function -- deque.mojo:798 is `raise "ValueError: Given element is not in
-deque"` at the end of an index-returning method. So this is one root cause, not
-eight.
+Measured again on HEAD (which carries `dbc3a10e9`, the same CONST_UNKNOWN
+semantics), `compile_stdlib.py --roots std/collections` gives
+`PASSED: 25 / FAILED: 8 (0 expected, 8 unexpected)`, and all 8 are the SAME
+diagnostic at the SAME column shape: `error: unknown type name 'Format…'` at
+`<module>.mojo:<line>:33` -- array.mojo:588, counter.mojo:540, deque.mojo:578,
+dict.mojo:648, interval.mojo:664, list.mojo:638 and two more. (An earlier
+measurement with a hand-written variant of the same change instead produced
+`non-trivial conversion in 'integer_cst'` at a `raise "<string>"`; the point is
+unchanged -- one cause, and it only appears once the pruned arm is emitted.)
+
+The truncation is the harness's; the type name is `Format…`, i.e. `FormatSpec`,
+which the stdlib's formatting paths use. So the plausible mechanism is: emitting
+BOTH arms compiles a `FormatSpec`-using path whose IMPORT is not emitted (or is
+itself pruned), leaving the type undeclared. That is the lead to pull -- find the
+module-level import that the pruned arm was suppressing.
 
 It is NOT reachable standalone: `def f() -> Int: raise "boom"`,
 `def f(): raise "boom"` and `def f() -> Int: raise ValueError("boom")` all build
-(rc 0) on this tree. The failure appears only once option 2's CONST_UNKNOWN
-emits the code that was previously pruned -- i.e. the newly-emitted arm contains
-a shape the backend cannot lower. That makes the next step concrete: reproduce
-it by forcing that arm to be emitted (or by compiling `std/collections/deque.mojo`
-with the option-2 patch applied) and find what the `raise`-terminates-a-word-
-function path emits wrong.
+(rc 0) on this tree. The failure appears only once CONST_UNKNOWN emits the
+previously-pruned code.
 
 ## Done when
 

@@ -71,9 +71,6 @@ class Ex:
             return '*' + self.a.show()
         if k == 'un':
             return self.op + self.a.show()
-        if k == 'paren':
-            # A parenthesized operand: `(a)`.
-            return '(' + self.a.show() + ')'
         if k == 'cast':
             return '(' + self.ty.name + ')' + self.a.show()
         if k == 'call':
@@ -161,9 +158,6 @@ class Instr:
         if k == 'decl':
             # A declaration `<type> <name>;` with no initialiser.
             return self.rhs.show() + ';'
-        if k == 'throw':
-            # A C++ `throw <expr>;` (the raise printer).
-            return 'throw ' + self.rhs.show() + ';'
         if k == 'block':
             # A bare `{` opening a C block with no header of its own.
             return '{'
