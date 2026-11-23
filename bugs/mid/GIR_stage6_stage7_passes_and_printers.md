@@ -343,3 +343,24 @@ and tagged-word print forms) are built by `_cpp_call_line` (a `call` shape with 
 stubs unchanged (3 == 3). The multi-argument print lines and the remaining `_cps_expr_stmt` forms (28 sites
 before this step, about 20 left) are still text.
 
+
+## Status 2026-11-22 (continued): the simple statement forms are on the IR
+
+Landed, each verified (`test_gimple_cpp_core_arms.py` 30/0; `c_oracle check --base HEAD`: all 285 C and 13
+coroutine C++ programs identical; `compile_stdlib.py` PASSED 592, FAILED 18 = 0 expected / 18 unexpected,
+the same module set as before):
+
+- `ecdb1887d`: three `fname(args);` statements in `_cps_expr_stmt` (fnptr and captured-callable calls).
+- `ecdb1887d`-follow-up commit `ecdb1887d`... see `git log` for the assign commit: five `lhs = rhs;`
+  statements (class-attribute store, generator-variable store incl. `*name`, list-iterator setup).
+- New IR shape `coyield` in `mojo/ir/instr.py` (`co_yield <expr>;`), used for the three `co_yield`
+  statements of `_cps_expr_stmt`; the `abort()` pair and `self->f = self->f op val;` in `_cps_aug_assign`
+  now go through `_cpp_call_line` / `_cpp_ir_line` / `_cpp_assign_line`.
+
+Still text (measured 2026-11-22, after the above): `_cpf_named_target` 80 sites, `_cpp_yield_from` 39,
+`_cpp_for_stmt` 37, `_cps_assign_stmt` 18 (container forms, `self->f = ...`, `(void)(...)`), `_cpy_handle_local`
+13 (needs `for (;;)` and `throw` shapes), `_cpp_container_literal_init` 12, `_cpp_yield_tuple` 14,
+`_cpp_for_generator_delegate` 10, `_cpf_call_iterable` 10, `_cpp_with_stmt` 9, `_cpf_*` loop headers
+(`for (...) {`, which need a loop-header shape), and the 11 `_cpx_*` expression arms. The plan's remaining
+steps are therefore: loop-header and `throw` shapes in `mojo/ir/instr.py`, then the container and
+named-target forms, then the expression arms.

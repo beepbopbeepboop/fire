@@ -157,6 +157,9 @@ class Instr:
             return 'while (' + self.rhs.show() + ') {'
         if k == 'break':
             return 'break;'
+        if k == 'coyield':
+            # A C++ coroutine's `co_yield <expr>;` (the generator printer).
+            return 'co_yield ' + self.rhs.show() + ';'
         if k == 'coreturn':
             # A C++ coroutine's `co_return` (the generator and async printers).
             if self.rhs.kind == 'none':

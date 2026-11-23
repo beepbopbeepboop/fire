@@ -7460,14 +7460,15 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # every marked site into a tagged word (`mojo_box_none()`) when
             # the generator mixes kinds, and refuses the whole generator when
             # it does not (a lone None has no word to carry it).
-            return [f"{indent}co_yield /*Y:none*/ (0);"]
+            return [_cpp_ir_line(indent, 'coyield', '/*Y:none*/ (0)')]
         if isinstance(s.value.value, gimple_ctypes.TupleExpr):
             return gen._cpp_yield_tuple(s.value.value, declared, indent)
         if id(s.value) in (getattr(gen, '_cpp_tuple_guarded_yields', None) or ()):
             # `if isinstance(x, tuple): yield x` where `x` is the boxed
             # word a heterogeneous `pop()` produced: the promise slot is
             # a `MojoList *` (the tuple), so narrow the word to it.
-            return [f"{indent}co_yield {gen._cpp_container_cast_prefix('MojoList', True)}({gen._cpp_expr(s.value.value)});"]
+            return [_cpp_ir_line(indent, 'coyield',
+                                 f"{gen._cpp_container_cast_prefix('MojoList', True)}({gen._cpp_expr(s.value.value)})")]
         # Mark the site with its static ctype: if the generator's yields turn
         # out to be of different known scalar kinds, `_gen_cpp_generator_unit`
         # boxes each site by this marker (a TAGGED-word value slot);
@@ -7488,7 +7489,7 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                                          'mojo_fsencode_w')):
             _ytag = 'bytes' if _yexpr.func.name == 'mojo_fsencode_w' else 'str'
             _yexpr_cpp = f"(char *)(intptr_t)({_yexpr_cpp})"
-        return [f"{indent}co_yield /*Y:{_ytag}*/ ({_yexpr_cpp});"]
+        return [_cpp_ir_line(indent, 'coyield', f"/*Y:{_ytag}*/ ({_yexpr_cpp})")]
     if isinstance(s.value, gimple_ctypes.YieldFromExpr):
         if gen._cpp_emit_kind in ('async', 'async_gen'):
             raise gimple_exprtypes._UnsupportedAsyncShape(
@@ -7797,8 +7798,8 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     # COMPILING, since every statement in a function body must.
     if (isinstance(s.value, gimple_ctypes.CallExpr) and isinstance(s.value.func, gimple_ctypes.IdentExpr)
             and s.value.func.name == 'abort'):
-        return [f'{indent}fprintf(stderr, "mojo: abort() called\\n");',
-                f"{indent}abort();"]
+        return [_cpp_call_line(indent, 'fprintf', ['stderr', '"mojo: abort() called\\n"']),
+                _cpp_ir_line(indent, 'expr', 'abort()')]
     # Bare CallExpr as statement: func(args)
     if isinstance(s.value, gimple_ctypes.CallExpr):
         return [_cpp_ir_line(indent, 'expr', gen._cpp_expr(s.value))]
@@ -8699,7 +8700,8 @@ def _cps_aug_assign(gen, s, declared: dict, indent: str) -> list[str]:
             _pset = gimple_ctypes.presence_set_stmt(
                 gen._struct_name_owner.get(gen._cpp_gen_self_struct),
                 s.target.member, 'self', '->')
-            return [f"{indent}self->{gimple_ctypes._safe_field(s.target.member)} = self->{gimple_ctypes._safe_field(s.target.member)} {op} {val};"
+            _fld = gimple_ctypes._safe_field(s.target.member)
+            return [_cpp_assign_line(f"self->{_fld}", f"self->{_fld} {op} {val}", indent)
                     + (f" {_pset}" if _pset else '')]
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             "augmented assignment to an undeclared/non-simple target")
