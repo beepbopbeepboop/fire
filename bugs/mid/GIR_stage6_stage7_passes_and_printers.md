@@ -880,3 +880,25 @@ and the corpus programs that would confirm the expression sites without the orac
 
 Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine programs;
 `test_gimple_cpp_core_arms.py` 30 arms, 0 failures, with the guard lines pinned.
+
+## Status 2026-11-23 (step 28): the C++ corpus reaches the ported expression and raise sites
+
+`tools/cpp_corpus/generators/11`-`21` are new programs, one per site group of steps 25-26, each compiled on the
+C++ path and checked by the oracle. Measured with a line tracer on `cpp_core.py`, each reaches its site:
+
+- thunk on `self` (11), thunk on a local struct (20): `_cpp_int64_thunk`
+- and/or with a word-holding struct (12): `_cpp_struct_word_lambda` (the `or`/str branch)
+- raise with a tuple message (14): `_cpp_raise_tuple_msg_expr`
+- list literal at a call argument (13, 15): the typed `_cpp_list_literal_arg_expr` lambda
+- nested literal (16): `_cpp_boxed_list_literal_expr`
+- lambda value, one plain parameter (16), `*args` (18), no parameter (19): the three `_cpx_lambda_expr` closures
+- callable-valued parameter (21): `_cpp_dyn_word_lambda`
+
+The oracle compares the pre-lambda commit (`dfa8aa136`, the parent of the first lambda port) with the working
+tree on all of them: identical C++ companions on all 24 coroutine programs, identical C on all 285.
+
+Still unreached by any program I could make compile: the `and`/`or` branch that boxes a word left operand with a
+string right (needs a tagged left operand), the `in` over function values (`_cpp_in`'s lambda; the programs with
+function-value membership are refused as generators), and `_cpp_lambda`'s word-left `and`/`or` (`_aol`). Those three
+sites remain verified by transcription and the helper pins only. Refused shapes found on the way: a bool yield, a
+multi-parameter lambda value, and a callable parameter yielded directly.
