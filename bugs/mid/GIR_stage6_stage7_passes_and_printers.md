@@ -351,7 +351,7 @@ coroutine C++ programs identical; `compile_stdlib.py` PASSED 592, FAILED 18 = 0 
 the same module set as before):
 
 - `ecdb1887d`: three `fname(args);` statements in `_cps_expr_stmt` (fnptr and captured-callable calls).
-- `ecdb1887d`-follow-up commit `ecdb1887d`... see `git log` for the assign commit: five `lhs = rhs;`
+- `ecdb1887d`: five `lhs = rhs;`
   statements (class-attribute store, generator-variable store incl. `*name`, list-iterator setup).
 - New IR shape `coyield` in `mojo/ir/instr.py` (`co_yield <expr>;`), used for the three `co_yield`
   statements of `_cps_expr_stmt`; the `abort()` pair and `self->f = self->f op val;` in `_cps_aug_assign`
