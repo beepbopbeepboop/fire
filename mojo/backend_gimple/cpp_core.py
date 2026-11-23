@@ -7958,7 +7958,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         lines = []
         if _tup_is_pop or _tup_is_boxed_ident:
             _ubox = gen._cpp_fresh_name("_mg_unpack")
-            lines.append(f"{indent}int64_t {_ubox} = (int64_t)({_tup_val});")
+            lines.append(_cpp_assign_line(f"int64_t {_ubox}", f"(int64_t)({_tup_val})", indent))
             for i, el in enumerate(s.target.elements):
                 if not isinstance(el, gimple_ctypes.IdentExpr):
                     continue
@@ -8004,7 +8004,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # Still emit the call itself (discarding its bogus
             # scalar result) so any real side effect the actual
             # external function would have isn't silently dropped.
-            lines.append(f"{indent}(void)({_tup_val});")
+            lines.append(_cpp_ir_line(indent, 'expr', f"(void)({_tup_val})"))
         for i, el in enumerate(s.target.elements):
             if isinstance(el, gimple_ctypes.IdentExpr):
                 if el.name not in declared:
@@ -8036,9 +8036,9 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                         _el_get = f"mojo_list_get_int({_cpp_as('MojoList *', _tup_val)}, {i})"
                     lines.append(_cpp_assign_line(ex_text(el.name), ex_text(_el_get), indent))
                 elif _tup_is_unresolved_call:
-                    lines.append(f"{indent}{el.name} = 0;")
+                    lines.append(_cpp_assign_line(el.name, '0', indent))
                 else:
-                    lines.append(f"{indent}{el.name} = ({_tup_val})[{i}];")
+                    lines.append(_cpp_assign_line(el.name, f"({_tup_val})[{i}]", indent))
         return lines
     if not isinstance(s.target, gimple_ctypes.IdentExpr):
         # self.field = val  →  self->field = val
@@ -9539,7 +9539,7 @@ def _cpw_async_with(gen, s, declared: dict, indent: str) -> list[str]:
     declared[mgr_tmp] = mgr_ctype
     if gen._cpp_func_scope_decls is not None:
         gen._cpp_func_scope_decls.append(f"{gimple_exprtypes._c_to_cpp_scalar_type(mgr_ctype)} {mgr_tmp};")
-    lines = [f"{indent}{mgr_tmp} = ({gimple_exprtypes._c_to_cpp_scalar_type(mgr_ctype)})({gen._cpp_expr(mgr_expr)});"]
+    lines = [_cpp_assign_line(mgr_tmp, f"({gimple_exprtypes._c_to_cpp_scalar_type(mgr_ctype)})({gen._cpp_expr(mgr_expr)})", indent)]
 
     # Resolve async method bases for __aenter__/__aexit__.
     # Prefer struct-qualified async methods when manager type is known.
@@ -9592,16 +9592,16 @@ def _cpw_async_with(gen, s, declared: dict, indent: str) -> list[str]:
             declared[alias_name] = aenter_vct
             if gen._cpp_func_scope_decls is not None:
                 gen._cpp_func_scope_decls.append(f"{gimple_exprtypes._c_to_cpp_scalar_type(aenter_vct)} {alias_name};")
-        lines.append(f"{indent}{alias_name} = ({gimple_exprtypes._c_to_cpp_scalar_type(aenter_vct)})({aenter_call});")
+        lines.append(_cpp_assign_line(alias_name, f"({gimple_exprtypes._c_to_cpp_scalar_type(aenter_vct)})({aenter_call})", indent))
     else:
-        lines.append(f"{indent}(void)({aenter_call});")
+        lines.append(_cpp_ir_line(indent, 'expr', f"(void)({aenter_call})"))
 
     # Body + __aexit__ on normal path. (Exceptions in body not fully
     # propagated to __aexit__ args in this narrow lowering.)
     for st in s.body:
         lines.extend(gen._cpp_stmt(st, declared, indent))
     aexit_call = f"co_await {aexit_base}_Awaiter{{{aexit_base}_impl((int64_t)(intptr_t)({mgr_tmp}), 0, 0, 0).h}}"
-    lines.append(f"{indent}(void)({aexit_call});")
+    lines.append(_cpp_ir_line(indent, 'expr', f"(void)({aexit_call})"))
     return lines
 
 
@@ -10548,11 +10548,11 @@ def _cpf_generator_handle(gen, s: 'ForStmt', declared: dict, indent: str, target
     _gi_read = (f"{_gi_base}_value({_gi_handle})"
                 if _gi_vct != 'bool'
                 else f"(({_gi_base}_value({_gi_handle})) != 0)")
-    lines = [f"{indent}while ({_gi_base}_resume({_gi_handle})) {{",
-             f"{indent}    {target} = {_gi_read};"]
+    lines = [_cpp_ir_line(indent, 'while', f"{_gi_base}_resume({_gi_handle})"),
+             _cpp_assign_line(target, _gi_read, indent + '    ')]
     for inner in s.body:
         lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-    lines.append(f"{indent}}}")
+    lines.append(_cpp_ir_line(indent, 'end'))
     return lines
 
 
