@@ -10830,6 +10830,593 @@ def _cpf_list_iter_cursor(gen, s: 'ForStmt', declared: dict, indent: str, target
     return lines
 
 
+def _cpf_named_target_iter_expr(gen, s: 'ForStmt', declared: dict, indent: str, target, iter_expr: str, target_was_declared: bool) -> list[str]:
+    """The named-target arm of _cpf_named_target when the iterable is an expression (extracted, unchanged body).
+
+    One arm of `_cpf_named_target`, which tests the condition and calls this."""
+    # `for x in <identifier>` where the identifier is a
+    # CONTAINER-typed local/param (declared int64_t — this
+    # scalar body model boxes MojoList* as int64_t) but the body
+    # iterates it (locale.py's `_grouping_intervals(grouping)`
+    # `for interval in grouping:`, statistics.py's
+    # `_fail_neg(values)` `for x in values:`): range-for over an
+    # int64_t doesn't compile. Emit an indexed loop over the
+    # list's elements (mojo_list_len / mojo_list_get_int), the
+    # same element protocol a `yield from`-over-list already
+    # uses. Only fires when the iterable is a bare identifier
+    # (so `for x in <call>()`'s generator delegation is
+    # untouched) whose declared type is the boxed-int64_t
+    # container convention -- OR a real `MojoList *`-typed
+    # local/parameter (a generator function whose param is
+    # annotated/inferred as MojoList*, not boxed int64_t: e.g.
+    # `def _fix_read_default(row): for value in row: ...` where
+    # `row`'s C++ param type is the real pointer). Without this
+    # second case, the generic range-for fallback below emitted
+    # `for (auto value : row)` on a bare `MojoList *` pointer --
+    # C++ range-for needs ADL `begin`/`end` for the iterated
+    # expression's type, which don't exist for a raw pointer --
+    # "'begin' was not declared in this scope" / "'end' was not
+    # declared in this scope". Found via Tools/c-analyzer/
+    # c_common/tables.py's `_fix_read_default`.
+    # A third shape reaches the same "raw pointer, no ADL
+    # begin/end" failure: `for x in self.<field>:` where
+    # `<field>` is a struct FIELD (not a local/param) typed
+    # `MojoList *` in the generated C++ struct typedef --
+    # save_env.py's `resource_info`: `for name in self.
+    # resources:`. struct_field_types (the same lookup
+    # `_cpp_expr`'s MemberExpr case already uses for
+    # `self.<field>` reads) tells us the field's real C type;
+    # anything that ISN'T one of the four known scalars is,
+    # per this codegen's own struct-field-boxing convention,
+    # pointer-shaped (a real `MojoList *` in the emitted
+    # typedef, same as this branch already assumes for a bare
+    # identifier) -- so the identical indexed-loop lowering
+    # applies, reading through `self->field` instead of a bare
+    # local name.
+    _self_field_itname = None
+    _self_field_elem_ctype = None
+    # `for x in self.<field>:` where the field's resolved C type
+    # IS one of the four scalars — i.e. genuinely NOT a container
+    # per this codegen's own struct-field boxing convention (the
+    # inverse of the check just below that claims non-scalar
+    # fields as MojoList*-shaped). The field holds an opaque
+    # boxed value this body model cannot iterate (real:
+    # Lib/tempfile.py's `_TemporaryFileWrapper.__iter__`:
+    # `for line in self.file:` — `file` is an unannotated-init
+    # param, typed int64_t, holding a file object). The generic
+    # range-for fallback emitted `for (auto line : self->file)`
+    # — invalid C++ over a plain int64_t ("'begin' was not
+    # declared in this scope"). Same treatment as the
+    # `iter_expr == '0'` scalar-stub case just below: bind the
+    # target to 0 and run ZERO iterations rather than emitting
+    # broken C++.
+    _self_scalar_iter_stub = False
+    if (isinstance(s.iterable, gimple_ctypes.MemberExpr)
+            and isinstance(s.iterable.obj, gimple_ctypes.IdentExpr)
+            and s.iterable.obj.name == 'self'
+            and getattr(gen, '_cpp_gen_self_struct', None)):
+        _stub_ft = gen.struct_field_types.get(
+            gen._cpp_gen_self_struct, {}).get(s.iterable.member)
+        if gimple_ctypes.TypeLattice.is_py_scalar(_stub_ft):
+            _self_scalar_iter_stub = True
+    elif (isinstance(s.iterable, gimple_ctypes.CallExpr)
+            and isinstance(s.iterable.func, gimple_ctypes.MemberExpr)
+            and not s.iterable.args
+            and s.iterable.func.member in ('keys', 'values', 'items',
+                                           'copy')
+            and isinstance(s.iterable.func.obj, gimple_ctypes.MemberExpr)
+            and isinstance(s.iterable.func.obj.obj,
+                           gimple_ctypes.IdentExpr)
+            and s.iterable.func.obj.obj.name == 'self'
+            and getattr(gen, '_cpp_gen_self_struct', None)):
+        # The method-call sibling of the bare self-field case just
+        # above: `for k in self.<field>.keys():` (and its
+        # .values()/.items()/.copy() siblings) where the FIELD's
+        # resolved C type is one of the four scalars — genuinely
+        # not a container per this codegen's own boxing convention
+        # (real: Lib/shelve.py's `Shelf.__iter__`:
+        # `for k in self.dict.keys():`, where `dict` is an
+        # unannotated-init param typed int64_t). The single-name
+        # `.keys()`-family dispatch below only fires for a
+        # MojoDict*-typed receiver, so this shape previously fell
+        # all the way to the generic range-for emitting the raw
+        # member call text (`for (auto k : self->dict.keys())` —
+        # "request for member 'keys' in ... non-class type
+        # 'int64_t'"). Same documented zero-iteration stub
+        # convention as the bare-field case.
+        _stub_ft = gen.struct_field_types.get(
+            gen._cpp_gen_self_struct, {}).get(
+            s.iterable.func.obj.member)
+        if gimple_ctypes.TypeLattice.is_py_scalar(_stub_ft):
+            _self_scalar_iter_stub = True
+    _pre_lines: list[str] = []
+    # `for x in sorted(<self.field-or-declared-list>, key=...):`
+    # -- `_cpp_expr` above already lowered the WHOLE `sorted(...)`
+    # call into `iter_expr` (a self-invoking C++ lambda building
+    # a fresh `MojoList *`, see the CallExpr/'sorted' case), but
+    # using that expression text directly as `_itname` below
+    # (referenced from BOTH `mojo_list_len` and
+    # `mojo_list_get_int`, each re-evaluated every loop
+    # iteration) would re-run the ENTIRE sort -- reallocating a
+    # new list and re-invoking the `key=` callable O(n log n)
+    # times -- on every single element read, an O(n^2 log n)
+    # blowup and a fresh MojoList leak per iteration. Evaluate
+    # it exactly ONCE into a cached local before the loop
+    # instead, then treat that cached local exactly like the
+    # existing bare-identifier/self-field cases below. The
+    # element type is the WRAPPED iterable's own (sorting
+    # reorders, never changes, element type) -- resolved via the
+    # same `self.<field>` + `_field_elem_types` lookup the plain
+    # `for x in self.<field>:` case just above already uses,
+    # since a `self.<field>` iterable is the one real corpus
+    # shape (`Lib/enum.py`-style `key=lambda m: m.<field>`, see
+    # the (since-fixed) compiled-generator lambda-expression bug).
+    if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+            and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+            and s.iterable.func.name == 'sorted' and s.iterable.args
+            and not gen._locally_binds_name('sorted')):
+        _sorted_inner = s.iterable.args[0]
+        if (isinstance(_sorted_inner, gimple_ctypes.MemberExpr)
+                and isinstance(_sorted_inner.obj, gimple_ctypes.IdentExpr)
+                and _sorted_inner.obj.name == 'self'
+                and getattr(gen, '_cpp_gen_self_struct', None)):
+            _sw_ft = gen.struct_field_types.get(
+                gen._cpp_gen_self_struct, {}).get(_sorted_inner.member)
+            if not gimple_ctypes.TypeLattice.is_py_scalar(_sw_ft):
+                _self_field_elem_ctype = gen._field_elem_types.get(
+                    gen._cpp_gen_self_struct, {}).get(_sorted_inner.member)
+        _cached = gen._cpp_fresh_name("_mg_sorted")
+        _pre_lines.append(
+            f"{indent}MojoList *{_cached} = " + _cpp_as('MojoList *', iter_expr) + ";")
+        _self_field_itname = _cached
+    if (isinstance(s.iterable, gimple_ctypes.MemberExpr)
+            and isinstance(s.iterable.obj, gimple_ctypes.IdentExpr)
+            and s.iterable.obj.name == 'self'
+            and getattr(gen, '_cpp_gen_self_struct', None)):
+        _self_ft = gen.struct_field_types.get(
+            gen._cpp_gen_self_struct, {}).get(s.iterable.member)
+        if not gimple_ctypes.TypeLattice.is_py_scalar(_self_ft):
+            _self_field_itname = f"self->{gimple_ctypes._safe_field(s.iterable.member)}"
+            # The field's ELEMENT type (as opposed to the field's
+            # own MojoList*-pointer type just checked above) —
+            # `_field_elem_types` is the same struct-field
+            # element-type map the ordinary GIMPLE path already
+            # populates for a `self.x: list[str]`-shaped field
+            # (e.g. from a class-body tuple/list literal
+            # initializer of string constants, save_env.py's
+            # `resources = ('sys.argv', 'cwd', ...)`). Drives
+            # which `mojo_list_get_*` accessor/target C type is
+            # correct below; unknown defaults to the same
+            # int64_t/mojo_list_get_int convention the sibling
+            # bare-identifier branch above already uses.
+            _self_field_elem_ctype = gen._field_elem_types.get(
+                gen._cpp_gen_self_struct, {}).get(s.iterable.member)
+    if ((isinstance(s.iterable, gimple_ctypes.IdentExpr)
+            and gen._cpp_declared is not None
+            and s.iterable.name in gen._cpp_declared
+            and gimple_ctypes.TypeLattice.is_word_or_list(gen._cpp_declared[s.iterable.name]))
+            or _self_field_itname is not None):
+        _itname = _self_field_itname if _self_field_itname is not None else s.iterable.name
+        # A LOCAL list's element type (literal-init/append
+        # tracking) — same role `_self_field_elem_ctype` plays
+        # for the self-field case below.
+        _local_elem_ctype = None
+        if _self_field_itname is None:
+            _local_elem_ctype = getattr(gen, '_cpp_list_local_elem_types', {}).get(_itname)
+        _ctr = gen._cpp_fresh_name("_mg_i")
+        lines = list(_pre_lines)
+        # TUPLE target over a boxed-list iterable (`for path_str,
+        # dirnames, filenames in results:` — pathlib's
+        # `Path.walk`). The old behavior declared the WHOLE
+        # comma-joined target as one C++ declarator list
+        # (`int64_t path_str, dirnames, filenames;`) and
+        # "assigned" via the comma-expression no-op
+        # `a, b, c = mojo_list_get_int(...)` — which both
+        # CONFLICTS with any name an earlier statement already
+        # declared under its own inferred type (walk's
+        # `path_str` was already char *, from its `[2:]` slice
+        # use: "conflicting declaration 'int64_t path_str'"),
+        # and silently performs NO unpacking at all. Lower it
+        # exactly like every other boxed-tuple consumer: cache
+        # each element (itself a `mojo_mark_as_tuple`'d MojoList *,
+        # per `_cpp_yield_tuple`'s producer convention) into a
+        # sub-list pointer, then read each name's slot through
+        # the accessor matching that name's ALREADY-DECLARED
+        # type when known (an earlier declaration wins — its C++
+        # type cannot change), int64_t otherwise.
+        _tuple_names = (target_slots(target)
+                        if for_target_is_tuple(target) else None)
+        if _tuple_names:
+            _tupvar = gen._cpp_fresh_name("_mg_tup")
+            for _nm in _tuple_names:
+                if _nm not in declared:
+                    # String-evidence in the loop body (a slice/
+                    # subscript/str-method use of this name)
+                    # types the target char * up front — the
+                    # body's own uses must agree with the one
+                    # C++ declaration this loop emits for it.
+                    _tct = ('char *'
+                            if _cpp_body_str_evidence(_nm, s.body)
+                            else 'int64_t')
+                    declared[_nm] = _tct
+                    lines.append(f"{indent}{'char *' if gimple_ctypes.TypeLattice.is_cstr(_tct) else 'int64_t'} {_nm};")
+            if s.else_body:
+                _brk_var = gen._cpp_fresh_name("_mg_brk")
+                lines.append(f"{indent}bool {_brk_var} = false;")
+            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                         f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
+                         f"{_ctr}++) {{")
+            lines.append(f"{indent}    MojoList *{_tupvar} = "
+                         + _cpp_as('MojoList *', f"mojo_list_get_int({_cpp_as('MojoList *', _itname)}, {_ctr})") + ";")
+            for _si, _nm in enumerate(_tuple_names):
+                _nct = declared.get(_nm, 'int64_t')
+                if gimple_ctypes.TypeLattice.is_cstr(_nct):
+                    lines.append(f"{indent}    {_nm} = "
+                                 f"mojo_list_get_str({_tupvar}, {_si});")
+                elif gimple_ctypes.TypeLattice.is_double(_nct):
+                    lines.append(f"{indent}    {_nm} = "
+                                 f"mojo_list_get_double({_tupvar}, {_si});")
+                elif _itname in getattr(gen, '_cpp_word_iter_locals', ()):
+                    # elements of a value whose kind only the runtime
+                    # knew: read by the kind the tuple recorded, bound
+                    # as the box's own word
+                    lines.append(f"{indent}    {_nm} = mojo_box_word("
+                                 f"mojo_list_get_boxed({_tupvar}, {_si}));")
+                else:
+                    lines.append(f"{indent}    {_nm} = "
+                                 f"mojo_list_get_int({_tupvar}, {_si});")
+            if s.else_body:
+                for inner in s.body:
+                    lines.extend(gen._cpp_stmt_with_break_flag(inner, declared, indent + '    ', _brk_var))
+            else:
+                for inner in s.body:
+                    lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+            if s.else_body:
+                lines.append(f"{indent}if (!{_brk_var}) {{")
+                for inner in s.else_body:
+                    lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                lines.append(f"{indent}}}")
+            return lines
+        # A known struct-pointer element type (e.g. `Thing *`,
+        # from `_field_elem_types` -- the `self.<field>: list
+        # [Struct]` case, and now also its `sorted(self.<field>,
+        # key=...)` wrapper just above) needs the loop variable
+        # declared with that REAL pointer type, cast out of the
+        # boxed-int64_t element read, so a later `target.<field>`
+        # read inside the loop body resolves through the
+        # ordinary struct-field lowering (`_cpp_struct_ptr_local`
+        # only recognizes a declared type ending in ' *') instead
+        # of emitting `target->member` on a plain int64_t (an
+        # invalid-C++ "not a structure or union" error) --
+        # previously EVERY struct-pointer-list element loop
+        # variable was declared int64_t regardless, so this also
+        # closes that same gap for a plain (non-sorted)
+        # `for x in self.<field>:` over a `list[Struct]` field.
+        _elem_struct_ctype = None
+        _eff_elem = (_self_field_elem_ctype if _self_field_elem_ctype is not None
+                     else _local_elem_ctype)
+        if (_eff_elem is None
+                and not target_was_declared
+                and isinstance(target, str)
+                and not for_target_is_tuple(target)
+                and _cpp_body_str_evidence(target, s.body)):
+            # Unknown element provenance but the loop body itself
+            # uses the (single) target as a string — declare it
+            # char * up front so every body use agrees with the
+            # one declaration (pathlib's `_filter_trailing_slash`:
+            # `for path_str in paths:` with `path_str[-1]` /
+            # `path_str[:-1]` uses).
+            _eff_elem = 'char *'
+        if (isinstance(_eff_elem, str)
+                and gimple_ctypes.TypeLattice.ends_in_star(_eff_elem)
+                and _eff_elem[:-2] in gen.struct_field_types):
+            _elem_struct_ctype = _eff_elem
+        if gimple_ctypes.TypeLattice.is_cstr(_eff_elem):
+            if not target_was_declared:
+                lines.append(f"{indent}char *{target};")
+                _eff_rhs = f"mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
+            elif gimple_ctypes.TypeLattice.is_cstr(declared.get(target)):
+                _eff_rhs = f"mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
+            else:
+                _eff_rhs = f"(int64_t)(intptr_t)mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
+            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                         f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
+                         f"{_ctr}++) {{")
+            lines.append(f"{indent}    {target} = {_eff_rhs};")
+        elif gimple_ctypes.TypeLattice.is_double(_eff_elem):
+            if not target_was_declared:
+                lines.append(f"{indent}double {target};")
+            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                         f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
+                         f"{_ctr}++) {{")
+            lines.append(f"{indent}    {target} = "
+                         f"mojo_list_get_double({_cpp_as('MojoList *', _itname)}, {_ctr});")
+        elif _elem_struct_ctype is not None:
+            if not target_was_declared:
+                lines.append(f"{indent}{_elem_struct_ctype}{target};")
+            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                         f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
+                         f"{_ctr}++) {{")
+            lines.append(f"{indent}    {target} = ({_elem_struct_ctype})"
+                         f"mojo_list_get_int({_cpp_as('MojoList *', _itname)}, {_ctr});")
+        else:
+            if not target_was_declared:
+                lines.append(f"{indent}int64_t {target};")
+            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                         f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
+                         f"{_ctr}++) {{")
+            # A list parameter whose call sites disagree on the element
+            # type (`module_gen._param_elem_mixed`): the slot is read
+            # by the kind the list recorded, so the target holds a BOX
+            # for a string/float slot, not a bare word.
+            _mixed_read = (_itname in getattr(gen, '_cpp_mixed_list_params', ()))
+            lines.append(f"{indent}    {target} = "
+                         + ("mojo_list_get_boxed" if _mixed_read else "mojo_list_get_int")
+                         + f"({_cpp_as('MojoList *', _itname)}, {_ctr});")
+        if gimple_ctypes.TypeLattice.is_cstr(_eff_elem):
+            declared[target] = 'char *'
+        elif gimple_ctypes.TypeLattice.is_double(_eff_elem):
+            declared[target] = 'double'
+        elif _elem_struct_ctype is not None:
+            declared[target] = _elem_struct_ctype
+        else:
+            declared[target] = 'int64_t'
+        for inner in s.body:
+            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+        lines.append(f"{indent}}}")
+        return lines
+    if iter_expr == '0' or _self_scalar_iter_stub:
+        # The iterable lowered to the scalar stub '0' (e.g.
+        # test_exception_group.py's leaf_generator:
+        # `for e in exc.exceptions:` where `exc` is an untyped
+        # param boxed to int64_t and `.exceptions` is the
+        # diagnosed attribute-read stub) — or is a self-field
+        # whose resolved C type is a plain scalar (see
+        # `_self_scalar_iter_stub` above). A range-for over `0`
+        # or any bare int64_t is invalid C++, and the iterable's
+        # real value is already unrepresentable here — so run
+        # ZERO iterations: bind the target to 0 and skip the
+        # body, mirroring how every other stubbed operation in
+        # this body model behaves.
+        _cpp_refuse_unpacking_target(target)
+        lines = []
+        if not target_was_declared:
+            lines.append(f"{indent}int64_t {target} = 0;")
+        else:
+            lines.append(f"{indent}{target} = 0;")
+        return lines
+    # `for x in <MojoList *-typed expression>:` where the list
+    # provenance is statically known but the iterable is NOT one of
+    # the shapes the branches above already handle: a call to a
+    # module-level function whose inferred return ctype is
+    # MojoList* (dyld.py's `for path in dyld_framework_path(env):`),
+    # or a module-level list global (`for path in
+    # DEFAULT_FRAMEWORK_FALLBACK:`). The generic range-for below
+    # cannot iterate a raw MojoList* pointer ("no viable 'begin'
+    # function available"), so lower through the same cached-local
+    # + indexed loop every other list-iteration branch here uses.
+    # Element type comes from Pass 2c's `_return_elem_types`
+    # fixpoint for the callee ('char *' for a split()-of-strings
+    # producer like dyld_env), defaulting to the boxed int64_t
+    # convention when unknown.
+    _iter_list_expr = None
+    _iter_elem = None
+    if isinstance(s.iterable, gimple_ctypes.CallExpr) and isinstance(s.iterable.func, gimple_ctypes.IdentExpr):
+        _callee = s.iterable.func.name
+        if gimple_ctypes.TypeLattice.is_list(gen.func_return_types.get(_callee)):
+            _iter_list_expr = _cpp_as('MojoList *', gen._cpp_expr(s.iterable))
+            _iter_elem = gen._return_elem_types.get(_callee)
+    elif (isinstance(s.iterable, gimple_ctypes.CallExpr)
+            and isinstance(s.iterable.func, gimple_ctypes.MemberExpr)
+            and s.iterable.func.member in ('split', 'rsplit', 'splitlines')
+            and len(s.iterable.args) <= 1
+            and gimple_ctypes.TypeLattice.is_cstr(_cpp_receiver_ctype(gen, s.iterable.func.obj))):
+        # `for fact in <char*-expr>.split(sep):` — a str.split-family
+        # call used DIRECTLY as the loop iterable. `_cpp_expr`'s own
+        # split-family case lowers the call to a real MojoList* of
+        # strings (`mojo_str_split` family); this branch just routes
+        # it through the same cached-local + indexed-loop lowering
+        # every other list-iteration shape here uses, with element
+        # type char* (a string split always yields strings). Before
+        # this, the iterable fell to the generic range-for over the
+        # raw pointer expression ("'begin' was not declared in this
+        # scope" / invalid member-call on char*, depending on which
+        # fallback caught it first). Real: ftplib.py's mlsd.
+        _iter_list_expr = _cpp_as('MojoList *', gen._cpp_expr(s.iterable))
+        _iter_elem = 'char *'
+    elif (isinstance(s.iterable, (gimple_ctypes.TupleExpr,
+                                  gimple_ctypes.ListExpr))
+            and isinstance(target, str) and not for_target_is_tuple(target)):
+        # `for fld in ('v', 'missing'):` — a list/tuple LITERAL used
+        # directly as the loop iterable. `_cpp_expr` already lowered
+        # the literal to a real `MojoList *` (a self-invoking lambda
+        # that constructs and fills one: there is no braced-init-list
+        # C++ value for a container in this model), but the generic
+        # range-for below emitted `for (auto fld : <that>)`, and a
+        # raw `MojoList *` has no ADL `begin`/`end` — g++:
+        # "'begin' was not declared in this scope" /
+        # "'end' was not declared in this scope". Iterate it through
+        # the same cached-local + indexed lowering every other
+        # list-valued iterable here uses. Element type comes from the
+        # literal elements themselves (all-str -> char *, all-float
+        # -> double, else the boxed int64_t convention). Real: the
+        # nested recursive generator in
+        # test_gimple_generator_runner.py looping over
+        # `('v', 'missing')` while walking struct attributes.
+        _iter_list_expr = _cpp_as('MojoList *', iter_expr)
+        _lit_etype = None
+        for _lit_el in s.iterable.elements:
+            _lit_ect = gimple_exprtypes._infer_simple_expr_ctype(
+                _lit_el, gen._cpp_declared,
+                getattr(gen, '_cpp_gen_self_fields', None),
+                gen._async_api) or 'int64_t'
+            _lit_etype = (_lit_ect if _lit_etype is None
+                          else (gimple_ctypes.TypeLattice.join(
+                              _lit_etype, _lit_ect) or 'int64_t'))
+        _iter_elem = _lit_etype
+    elif isinstance(s.iterable, gimple_ctypes.StringLiteral):
+        # `for c in "abc":` -- a string LITERAL used directly as the
+        # loop iterable. It is the same string iteration as the
+        # string-local arm below, and without this arm it fell to the
+        # generic range-for, `for (auto c : "abc")`, which C++ runs
+        # over the literal's `char[4]` ARRAY: four `char`s including the
+        # terminating NUL, each yielded as an integer
+        # (`list(letters())` printed `[97, 98, 99, 0]` where CPython
+        # prints `['a', 'b', 'c']`;
+        # CODEGEN_str_iteration_link_mode_crash, package B).
+        _iter_list_expr = (f"mojo_str_chars((char *)({gen._cpp_expr(s.iterable)}))")
+        _iter_elem = 'char *'
+    elif (isinstance(s.iterable, gimple_ctypes.IdentExpr)
+            and gen._cpp_declared is not None
+            and gimple_ctypes.TypeLattice.is_cstr(gen._cpp_declared.get(s.iterable.name))):
+        # `for c in <string local>:` iterates its characters (one
+        # 1-character string each); a raw `char *` has no begin().
+        _iter_list_expr = (f"mojo_str_chars((char *)({gen._cpp_expr(s.iterable)}))")
+        _iter_elem = 'char *'
+    elif isinstance(s.iterable, gimple_ctypes.IdentExpr) \
+            and gen._cpp_declared is not None \
+            and s.iterable.name not in gen._cpp_declared \
+            and gimple_ctypes.TypeLattice.is_list(gen._global_var_types.get(s.iterable.name)):
+        _iter_list_expr = _cpp_as('MojoList *', gen._cpp_expr(s.iterable))
+    elif (isinstance(s.iterable, gimple_ctypes.IdentExpr)
+            and gen._cpp_declared is not None
+            and s.iterable.name not in gen._cpp_declared
+            and isinstance(target, str) and not for_target_is_tuple(target)
+            and isinstance(iter_expr, str)
+            and iter_expr.startswith('_root_globals.')):
+        # The same module-level-global case with the global's C
+        # type NOT yet resolved (`_global_var_types` is populated
+        # by the module-globals passes, which run AFTER generator
+        # units compile — see the tuple-target sibling of this
+        # branch above for the full pass-ordering rationale). If
+        # `_cpp_expr` resolved the bare name to a real
+        # `_root_globals.<name>` field read at all, that field is
+        # a boxed container under this codegen's own convention
+        # (the pointer, cast through int64_t), so the identical
+        # cached-local + indexed-loop lowering applies. Element
+        # type: string evidence in the loop body upgrades the
+        # target to char*, else the boxed int64_t default. Before
+        # this branch, the iterable fell to the generic range-for
+        # over the raw field read ("'begin' was not declared in
+        # this scope" — a raw pointer/int64_t member has no ADL
+        # begin/end). Real: any generator body iterating a
+        # module-level list global (minimal repro:
+        # `_names = ['a', 'b']` + `def g(): for x in _names:
+        # yield x`).
+        _iter_list_expr = _cpp_as('MojoList *', iter_expr)
+        _g_slot_info = getattr(gen, '_global_literal_slot_ctypes', {}).get(
+            s.iterable.name)
+        if isinstance(_g_slot_info, str):
+            _iter_elem = _g_slot_info
+        elif _cpp_body_str_evidence(target, s.body):
+            _iter_elem = 'char *'
+    if _iter_list_expr is not None and not isinstance(target, str):
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "unsupported for-loop target over a list-typed iterable")
+    if (_iter_list_expr is not None and gimple_ctypes.TypeLattice.is_word_or_none(_iter_elem)
+            and isinstance(target, str)
+            and (gimple_ctypes.TypeLattice.is_cstr(declared.get(target))
+                 or target in (getattr(gen, '_cpp_str_evidence_names', None) or ()))):
+        # the element type is unknown, but the target already holds a
+        # string in this body (`name = entry.name`, then `for name in
+        # xs[::-1]`): read the slots as strings.
+        _iter_elem = 'char *'
+    if _iter_list_expr is not None:
+        _cached = gen._cpp_fresh_name("_mg_iter")
+        _ctr = gen._cpp_fresh_name("_mg_i")
+        lines = [f"{indent}MojoList *{_cached} = {_iter_list_expr};"]
+        # for/else: the else body runs only when the loop completes
+        # WITHOUT a `break`. This lowering has to carry it itself (it
+        # returns before the generic for/else block below), with the
+        # same shared break-flag protocol that block uses; without it
+        # a `for x in <list-valued expr>: ... else: ...` silently
+        # dropped the else body.
+        _iter_brk = None
+        if s.else_body:
+            _iter_brk = gen._cpp_fresh_name("_mg_brk")
+            lines.insert(0, f"{indent}bool {_iter_brk} = false;")
+        if gimple_ctypes.TypeLattice.is_cstr(_iter_elem):
+            if not target_was_declared:
+                declared[target] = 'char *'
+                lines.append(f"{indent}char *{target};")
+                _name_asn = f"{target} = mojo_list_get_str({_cached}, {_ctr});"
+            elif gimple_ctypes.TypeLattice.is_cstr(declared.get(target)):
+                _name_asn = f"{target} = mojo_list_get_str({_cached}, {_ctr});"
+            else:
+                _name_asn = f"{target} = (int64_t)(intptr_t)mojo_list_get_str({_cached}, {_ctr});"
+            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                         f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
+            lines.append(f"{indent}    {_name_asn}")
+        elif gimple_ctypes.TypeLattice.is_double(_iter_elem):
+            if not target_was_declared:
+                declared[target] = 'double'
+                lines.append(f"{indent}double {target};")
+            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                         f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
+            lines.append(f"{indent}    {target} = mojo_list_get_double({_cached}, {_ctr});")
+        else:
+            if not target_was_declared:
+                declared[target] = 'int64_t'
+                lines.append(f"{indent}int64_t {target};")
+            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                         f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
+            lines.append(f"{indent}    {target} = mojo_list_get_int({_cached}, {_ctr});")
+        for inner in s.body:
+            if _iter_brk is None:
+                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            else:
+                lines.extend(gen._cpp_stmt_with_break_flag(
+                    inner, declared, indent + '    ', _iter_brk))
+        _cpp_refuse_unpacking_target(target)
+        lines.append(f"{indent}}}")
+        if _iter_brk is not None:
+            lines.append(f"{indent}if (!{_iter_brk}) {{")
+            for inner in s.else_body:
+                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+        return lines
+    if s.else_body:
+        # for/else: the else body runs only when the loop
+        # completes WITHOUT a `break` — mirror _cpp_stmt's
+        # WhileStmt else handling with a shared break flag.
+        brk_var = gen._cpp_fresh_name("_mg_brk")
+        lines = [f"{indent}bool {brk_var} = false;"]
+        if (isinstance(s.iterable, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
+                and s.iterable.elements
+                and all(isinstance(el, gimple_ctypes.StringLiteral)
+                        for el in s.iterable.elements)):
+            declared[target] = 'char *'
+        lines.append(f"{indent}for (auto {target} : {iter_expr}) {{")
+        for inner in s.body:
+            lines.extend(gen._cpp_stmt_with_break_flag(inner, declared, indent + '    ', brk_var))
+        _cpp_refuse_unpacking_target(target)
+        lines.append(f"{indent}}}")
+        lines.append(f"{indent}if (!{brk_var}) {{")
+        for inner in s.else_body:
+            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+        lines.append(f"{indent}}}")
+        return lines
+    if (isinstance(s.iterable, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
+            and s.iterable.elements
+            and all(isinstance(el, gimple_ctypes.StringLiteral)
+                    for el in s.iterable.elements)):
+        # `for k in ("a", "b"):` — the generic range-for declares
+        # the target via C++ `auto`, but this emitter's OWN type
+        # tracking must still learn the target's real ctype
+        # (char *), or later uses — most importantly a dict
+        # subscript keyed by the loop variable (`d[k]`) — fall
+        # back to the int64_t default and stringify the pointer
+        # through mojo_str_from_int (garbage key).
+        declared[target] = 'char *'
+    lines = [f"{indent}for (auto {target} : {iter_expr}) {{"]
+    for inner in s.body:
+        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+    _cpp_refuse_unpacking_target(target)
+    lines.append(f"{indent}}}")
+    return lines
+
+
 def _cpf_named_target(gen, s: 'ForStmt', declared: dict, indent: str, target) -> list[str]:
     """`for <name> in <iterable>` in `_cpp_for_stmt`, the shapes not claimed above.
 
@@ -11085,587 +11672,7 @@ def _cpf_named_target(gen, s: 'ForStmt', declared: dict, indent: str, target) ->
     except gimple_exprtypes._UnsupportedGeneratorShape:
         iter_expr = None
     if iter_expr is not None:
-        # `for x in <identifier>` where the identifier is a
-        # CONTAINER-typed local/param (declared int64_t — this
-        # scalar body model boxes MojoList* as int64_t) but the body
-        # iterates it (locale.py's `_grouping_intervals(grouping)`
-        # `for interval in grouping:`, statistics.py's
-        # `_fail_neg(values)` `for x in values:`): range-for over an
-        # int64_t doesn't compile. Emit an indexed loop over the
-        # list's elements (mojo_list_len / mojo_list_get_int), the
-        # same element protocol a `yield from`-over-list already
-        # uses. Only fires when the iterable is a bare identifier
-        # (so `for x in <call>()`'s generator delegation is
-        # untouched) whose declared type is the boxed-int64_t
-        # container convention -- OR a real `MojoList *`-typed
-        # local/parameter (a generator function whose param is
-        # annotated/inferred as MojoList*, not boxed int64_t: e.g.
-        # `def _fix_read_default(row): for value in row: ...` where
-        # `row`'s C++ param type is the real pointer). Without this
-        # second case, the generic range-for fallback below emitted
-        # `for (auto value : row)` on a bare `MojoList *` pointer --
-        # C++ range-for needs ADL `begin`/`end` for the iterated
-        # expression's type, which don't exist for a raw pointer --
-        # "'begin' was not declared in this scope" / "'end' was not
-        # declared in this scope". Found via Tools/c-analyzer/
-        # c_common/tables.py's `_fix_read_default`.
-        # A third shape reaches the same "raw pointer, no ADL
-        # begin/end" failure: `for x in self.<field>:` where
-        # `<field>` is a struct FIELD (not a local/param) typed
-        # `MojoList *` in the generated C++ struct typedef --
-        # save_env.py's `resource_info`: `for name in self.
-        # resources:`. struct_field_types (the same lookup
-        # `_cpp_expr`'s MemberExpr case already uses for
-        # `self.<field>` reads) tells us the field's real C type;
-        # anything that ISN'T one of the four known scalars is,
-        # per this codegen's own struct-field-boxing convention,
-        # pointer-shaped (a real `MojoList *` in the emitted
-        # typedef, same as this branch already assumes for a bare
-        # identifier) -- so the identical indexed-loop lowering
-        # applies, reading through `self->field` instead of a bare
-        # local name.
-        _self_field_itname = None
-        _self_field_elem_ctype = None
-        # `for x in self.<field>:` where the field's resolved C type
-        # IS one of the four scalars — i.e. genuinely NOT a container
-        # per this codegen's own struct-field boxing convention (the
-        # inverse of the check just below that claims non-scalar
-        # fields as MojoList*-shaped). The field holds an opaque
-        # boxed value this body model cannot iterate (real:
-        # Lib/tempfile.py's `_TemporaryFileWrapper.__iter__`:
-        # `for line in self.file:` — `file` is an unannotated-init
-        # param, typed int64_t, holding a file object). The generic
-        # range-for fallback emitted `for (auto line : self->file)`
-        # — invalid C++ over a plain int64_t ("'begin' was not
-        # declared in this scope"). Same treatment as the
-        # `iter_expr == '0'` scalar-stub case just below: bind the
-        # target to 0 and run ZERO iterations rather than emitting
-        # broken C++.
-        _self_scalar_iter_stub = False
-        if (isinstance(s.iterable, gimple_ctypes.MemberExpr)
-                and isinstance(s.iterable.obj, gimple_ctypes.IdentExpr)
-                and s.iterable.obj.name == 'self'
-                and getattr(gen, '_cpp_gen_self_struct', None)):
-            _stub_ft = gen.struct_field_types.get(
-                gen._cpp_gen_self_struct, {}).get(s.iterable.member)
-            if gimple_ctypes.TypeLattice.is_py_scalar(_stub_ft):
-                _self_scalar_iter_stub = True
-        elif (isinstance(s.iterable, gimple_ctypes.CallExpr)
-                and isinstance(s.iterable.func, gimple_ctypes.MemberExpr)
-                and not s.iterable.args
-                and s.iterable.func.member in ('keys', 'values', 'items',
-                                               'copy')
-                and isinstance(s.iterable.func.obj, gimple_ctypes.MemberExpr)
-                and isinstance(s.iterable.func.obj.obj,
-                               gimple_ctypes.IdentExpr)
-                and s.iterable.func.obj.obj.name == 'self'
-                and getattr(gen, '_cpp_gen_self_struct', None)):
-            # The method-call sibling of the bare self-field case just
-            # above: `for k in self.<field>.keys():` (and its
-            # .values()/.items()/.copy() siblings) where the FIELD's
-            # resolved C type is one of the four scalars — genuinely
-            # not a container per this codegen's own boxing convention
-            # (real: Lib/shelve.py's `Shelf.__iter__`:
-            # `for k in self.dict.keys():`, where `dict` is an
-            # unannotated-init param typed int64_t). The single-name
-            # `.keys()`-family dispatch below only fires for a
-            # MojoDict*-typed receiver, so this shape previously fell
-            # all the way to the generic range-for emitting the raw
-            # member call text (`for (auto k : self->dict.keys())` —
-            # "request for member 'keys' in ... non-class type
-            # 'int64_t'"). Same documented zero-iteration stub
-            # convention as the bare-field case.
-            _stub_ft = gen.struct_field_types.get(
-                gen._cpp_gen_self_struct, {}).get(
-                s.iterable.func.obj.member)
-            if gimple_ctypes.TypeLattice.is_py_scalar(_stub_ft):
-                _self_scalar_iter_stub = True
-        _pre_lines: list[str] = []
-        # `for x in sorted(<self.field-or-declared-list>, key=...):`
-        # -- `_cpp_expr` above already lowered the WHOLE `sorted(...)`
-        # call into `iter_expr` (a self-invoking C++ lambda building
-        # a fresh `MojoList *`, see the CallExpr/'sorted' case), but
-        # using that expression text directly as `_itname` below
-        # (referenced from BOTH `mojo_list_len` and
-        # `mojo_list_get_int`, each re-evaluated every loop
-        # iteration) would re-run the ENTIRE sort -- reallocating a
-        # new list and re-invoking the `key=` callable O(n log n)
-        # times -- on every single element read, an O(n^2 log n)
-        # blowup and a fresh MojoList leak per iteration. Evaluate
-        # it exactly ONCE into a cached local before the loop
-        # instead, then treat that cached local exactly like the
-        # existing bare-identifier/self-field cases below. The
-        # element type is the WRAPPED iterable's own (sorting
-        # reorders, never changes, element type) -- resolved via the
-        # same `self.<field>` + `_field_elem_types` lookup the plain
-        # `for x in self.<field>:` case just above already uses,
-        # since a `self.<field>` iterable is the one real corpus
-        # shape (`Lib/enum.py`-style `key=lambda m: m.<field>`, see
-        # the (since-fixed) compiled-generator lambda-expression bug).
-        if (isinstance(s.iterable, gimple_ctypes.CallExpr)
-                and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
-                and s.iterable.func.name == 'sorted' and s.iterable.args
-                and not gen._locally_binds_name('sorted')):
-            _sorted_inner = s.iterable.args[0]
-            if (isinstance(_sorted_inner, gimple_ctypes.MemberExpr)
-                    and isinstance(_sorted_inner.obj, gimple_ctypes.IdentExpr)
-                    and _sorted_inner.obj.name == 'self'
-                    and getattr(gen, '_cpp_gen_self_struct', None)):
-                _sw_ft = gen.struct_field_types.get(
-                    gen._cpp_gen_self_struct, {}).get(_sorted_inner.member)
-                if not gimple_ctypes.TypeLattice.is_py_scalar(_sw_ft):
-                    _self_field_elem_ctype = gen._field_elem_types.get(
-                        gen._cpp_gen_self_struct, {}).get(_sorted_inner.member)
-            _cached = gen._cpp_fresh_name("_mg_sorted")
-            _pre_lines.append(
-                f"{indent}MojoList *{_cached} = " + _cpp_as('MojoList *', iter_expr) + ";")
-            _self_field_itname = _cached
-        if (isinstance(s.iterable, gimple_ctypes.MemberExpr)
-                and isinstance(s.iterable.obj, gimple_ctypes.IdentExpr)
-                and s.iterable.obj.name == 'self'
-                and getattr(gen, '_cpp_gen_self_struct', None)):
-            _self_ft = gen.struct_field_types.get(
-                gen._cpp_gen_self_struct, {}).get(s.iterable.member)
-            if not gimple_ctypes.TypeLattice.is_py_scalar(_self_ft):
-                _self_field_itname = f"self->{gimple_ctypes._safe_field(s.iterable.member)}"
-                # The field's ELEMENT type (as opposed to the field's
-                # own MojoList*-pointer type just checked above) —
-                # `_field_elem_types` is the same struct-field
-                # element-type map the ordinary GIMPLE path already
-                # populates for a `self.x: list[str]`-shaped field
-                # (e.g. from a class-body tuple/list literal
-                # initializer of string constants, save_env.py's
-                # `resources = ('sys.argv', 'cwd', ...)`). Drives
-                # which `mojo_list_get_*` accessor/target C type is
-                # correct below; unknown defaults to the same
-                # int64_t/mojo_list_get_int convention the sibling
-                # bare-identifier branch above already uses.
-                _self_field_elem_ctype = gen._field_elem_types.get(
-                    gen._cpp_gen_self_struct, {}).get(s.iterable.member)
-        if ((isinstance(s.iterable, gimple_ctypes.IdentExpr)
-                and gen._cpp_declared is not None
-                and s.iterable.name in gen._cpp_declared
-                and gimple_ctypes.TypeLattice.is_word_or_list(gen._cpp_declared[s.iterable.name]))
-                or _self_field_itname is not None):
-            _itname = _self_field_itname if _self_field_itname is not None else s.iterable.name
-            # A LOCAL list's element type (literal-init/append
-            # tracking) — same role `_self_field_elem_ctype` plays
-            # for the self-field case below.
-            _local_elem_ctype = None
-            if _self_field_itname is None:
-                _local_elem_ctype = getattr(gen, '_cpp_list_local_elem_types', {}).get(_itname)
-            _ctr = gen._cpp_fresh_name("_mg_i")
-            lines = list(_pre_lines)
-            # TUPLE target over a boxed-list iterable (`for path_str,
-            # dirnames, filenames in results:` — pathlib's
-            # `Path.walk`). The old behavior declared the WHOLE
-            # comma-joined target as one C++ declarator list
-            # (`int64_t path_str, dirnames, filenames;`) and
-            # "assigned" via the comma-expression no-op
-            # `a, b, c = mojo_list_get_int(...)` — which both
-            # CONFLICTS with any name an earlier statement already
-            # declared under its own inferred type (walk's
-            # `path_str` was already char *, from its `[2:]` slice
-            # use: "conflicting declaration 'int64_t path_str'"),
-            # and silently performs NO unpacking at all. Lower it
-            # exactly like every other boxed-tuple consumer: cache
-            # each element (itself a `mojo_mark_as_tuple`'d MojoList *,
-            # per `_cpp_yield_tuple`'s producer convention) into a
-            # sub-list pointer, then read each name's slot through
-            # the accessor matching that name's ALREADY-DECLARED
-            # type when known (an earlier declaration wins — its C++
-            # type cannot change), int64_t otherwise.
-            _tuple_names = (target_slots(target)
-                            if for_target_is_tuple(target) else None)
-            if _tuple_names:
-                _tupvar = gen._cpp_fresh_name("_mg_tup")
-                for _nm in _tuple_names:
-                    if _nm not in declared:
-                        # String-evidence in the loop body (a slice/
-                        # subscript/str-method use of this name)
-                        # types the target char * up front — the
-                        # body's own uses must agree with the one
-                        # C++ declaration this loop emits for it.
-                        _tct = ('char *'
-                                if _cpp_body_str_evidence(_nm, s.body)
-                                else 'int64_t')
-                        declared[_nm] = _tct
-                        lines.append(f"{indent}{'char *' if gimple_ctypes.TypeLattice.is_cstr(_tct) else 'int64_t'} {_nm};")
-                if s.else_body:
-                    _brk_var = gen._cpp_fresh_name("_mg_brk")
-                    lines.append(f"{indent}bool {_brk_var} = false;")
-                lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                             f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
-                             f"{_ctr}++) {{")
-                lines.append(f"{indent}    MojoList *{_tupvar} = "
-                             + _cpp_as('MojoList *', f"mojo_list_get_int({_cpp_as('MojoList *', _itname)}, {_ctr})") + ";")
-                for _si, _nm in enumerate(_tuple_names):
-                    _nct = declared.get(_nm, 'int64_t')
-                    if gimple_ctypes.TypeLattice.is_cstr(_nct):
-                        lines.append(f"{indent}    {_nm} = "
-                                     f"mojo_list_get_str({_tupvar}, {_si});")
-                    elif gimple_ctypes.TypeLattice.is_double(_nct):
-                        lines.append(f"{indent}    {_nm} = "
-                                     f"mojo_list_get_double({_tupvar}, {_si});")
-                    elif _itname in getattr(gen, '_cpp_word_iter_locals', ()):
-                        # elements of a value whose kind only the runtime
-                        # knew: read by the kind the tuple recorded, bound
-                        # as the box's own word
-                        lines.append(f"{indent}    {_nm} = mojo_box_word("
-                                     f"mojo_list_get_boxed({_tupvar}, {_si}));")
-                    else:
-                        lines.append(f"{indent}    {_nm} = "
-                                     f"mojo_list_get_int({_tupvar}, {_si});")
-                if s.else_body:
-                    for inner in s.body:
-                        lines.extend(gen._cpp_stmt_with_break_flag(inner, declared, indent + '    ', _brk_var))
-                else:
-                    for inner in s.body:
-                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-                lines.append(f"{indent}}}")
-                if s.else_body:
-                    lines.append(f"{indent}if (!{_brk_var}) {{")
-                    for inner in s.else_body:
-                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-                    lines.append(f"{indent}}}")
-                return lines
-            # A known struct-pointer element type (e.g. `Thing *`,
-            # from `_field_elem_types` -- the `self.<field>: list
-            # [Struct]` case, and now also its `sorted(self.<field>,
-            # key=...)` wrapper just above) needs the loop variable
-            # declared with that REAL pointer type, cast out of the
-            # boxed-int64_t element read, so a later `target.<field>`
-            # read inside the loop body resolves through the
-            # ordinary struct-field lowering (`_cpp_struct_ptr_local`
-            # only recognizes a declared type ending in ' *') instead
-            # of emitting `target->member` on a plain int64_t (an
-            # invalid-C++ "not a structure or union" error) --
-            # previously EVERY struct-pointer-list element loop
-            # variable was declared int64_t regardless, so this also
-            # closes that same gap for a plain (non-sorted)
-            # `for x in self.<field>:` over a `list[Struct]` field.
-            _elem_struct_ctype = None
-            _eff_elem = (_self_field_elem_ctype if _self_field_elem_ctype is not None
-                         else _local_elem_ctype)
-            if (_eff_elem is None
-                    and not target_was_declared
-                    and isinstance(target, str)
-                    and not for_target_is_tuple(target)
-                    and _cpp_body_str_evidence(target, s.body)):
-                # Unknown element provenance but the loop body itself
-                # uses the (single) target as a string — declare it
-                # char * up front so every body use agrees with the
-                # one declaration (pathlib's `_filter_trailing_slash`:
-                # `for path_str in paths:` with `path_str[-1]` /
-                # `path_str[:-1]` uses).
-                _eff_elem = 'char *'
-            if (isinstance(_eff_elem, str)
-                    and gimple_ctypes.TypeLattice.ends_in_star(_eff_elem)
-                    and _eff_elem[:-2] in gen.struct_field_types):
-                _elem_struct_ctype = _eff_elem
-            if gimple_ctypes.TypeLattice.is_cstr(_eff_elem):
-                if not target_was_declared:
-                    lines.append(f"{indent}char *{target};")
-                    _eff_rhs = f"mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
-                elif gimple_ctypes.TypeLattice.is_cstr(declared.get(target)):
-                    _eff_rhs = f"mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
-                else:
-                    _eff_rhs = f"(int64_t)(intptr_t)mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
-                lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                             f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
-                             f"{_ctr}++) {{")
-                lines.append(f"{indent}    {target} = {_eff_rhs};")
-            elif gimple_ctypes.TypeLattice.is_double(_eff_elem):
-                if not target_was_declared:
-                    lines.append(f"{indent}double {target};")
-                lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                             f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
-                             f"{_ctr}++) {{")
-                lines.append(f"{indent}    {target} = "
-                             f"mojo_list_get_double({_cpp_as('MojoList *', _itname)}, {_ctr});")
-            elif _elem_struct_ctype is not None:
-                if not target_was_declared:
-                    lines.append(f"{indent}{_elem_struct_ctype}{target};")
-                lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                             f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
-                             f"{_ctr}++) {{")
-                lines.append(f"{indent}    {target} = ({_elem_struct_ctype})"
-                             f"mojo_list_get_int({_cpp_as('MojoList *', _itname)}, {_ctr});")
-            else:
-                if not target_was_declared:
-                    lines.append(f"{indent}int64_t {target};")
-                lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                             f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
-                             f"{_ctr}++) {{")
-                # A list parameter whose call sites disagree on the element
-                # type (`module_gen._param_elem_mixed`): the slot is read
-                # by the kind the list recorded, so the target holds a BOX
-                # for a string/float slot, not a bare word.
-                _mixed_read = (_itname in getattr(gen, '_cpp_mixed_list_params', ()))
-                lines.append(f"{indent}    {target} = "
-                             + ("mojo_list_get_boxed" if _mixed_read else "mojo_list_get_int")
-                             + f"({_cpp_as('MojoList *', _itname)}, {_ctr});")
-            if gimple_ctypes.TypeLattice.is_cstr(_eff_elem):
-                declared[target] = 'char *'
-            elif gimple_ctypes.TypeLattice.is_double(_eff_elem):
-                declared[target] = 'double'
-            elif _elem_struct_ctype is not None:
-                declared[target] = _elem_struct_ctype
-            else:
-                declared[target] = 'int64_t'
-            for inner in s.body:
-                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            lines.append(f"{indent}}}")
-            return lines
-        if iter_expr == '0' or _self_scalar_iter_stub:
-            # The iterable lowered to the scalar stub '0' (e.g.
-            # test_exception_group.py's leaf_generator:
-            # `for e in exc.exceptions:` where `exc` is an untyped
-            # param boxed to int64_t and `.exceptions` is the
-            # diagnosed attribute-read stub) — or is a self-field
-            # whose resolved C type is a plain scalar (see
-            # `_self_scalar_iter_stub` above). A range-for over `0`
-            # or any bare int64_t is invalid C++, and the iterable's
-            # real value is already unrepresentable here — so run
-            # ZERO iterations: bind the target to 0 and skip the
-            # body, mirroring how every other stubbed operation in
-            # this body model behaves.
-            _cpp_refuse_unpacking_target(target)
-            lines = []
-            if not target_was_declared:
-                lines.append(f"{indent}int64_t {target} = 0;")
-            else:
-                lines.append(f"{indent}{target} = 0;")
-            return lines
-        # `for x in <MojoList *-typed expression>:` where the list
-        # provenance is statically known but the iterable is NOT one of
-        # the shapes the branches above already handle: a call to a
-        # module-level function whose inferred return ctype is
-        # MojoList* (dyld.py's `for path in dyld_framework_path(env):`),
-        # or a module-level list global (`for path in
-        # DEFAULT_FRAMEWORK_FALLBACK:`). The generic range-for below
-        # cannot iterate a raw MojoList* pointer ("no viable 'begin'
-        # function available"), so lower through the same cached-local
-        # + indexed loop every other list-iteration branch here uses.
-        # Element type comes from Pass 2c's `_return_elem_types`
-        # fixpoint for the callee ('char *' for a split()-of-strings
-        # producer like dyld_env), defaulting to the boxed int64_t
-        # convention when unknown.
-        _iter_list_expr = None
-        _iter_elem = None
-        if isinstance(s.iterable, gimple_ctypes.CallExpr) and isinstance(s.iterable.func, gimple_ctypes.IdentExpr):
-            _callee = s.iterable.func.name
-            if gimple_ctypes.TypeLattice.is_list(gen.func_return_types.get(_callee)):
-                _iter_list_expr = _cpp_as('MojoList *', gen._cpp_expr(s.iterable))
-                _iter_elem = gen._return_elem_types.get(_callee)
-        elif (isinstance(s.iterable, gimple_ctypes.CallExpr)
-                and isinstance(s.iterable.func, gimple_ctypes.MemberExpr)
-                and s.iterable.func.member in ('split', 'rsplit', 'splitlines')
-                and len(s.iterable.args) <= 1
-                and gimple_ctypes.TypeLattice.is_cstr(_cpp_receiver_ctype(gen, s.iterable.func.obj))):
-            # `for fact in <char*-expr>.split(sep):` — a str.split-family
-            # call used DIRECTLY as the loop iterable. `_cpp_expr`'s own
-            # split-family case lowers the call to a real MojoList* of
-            # strings (`mojo_str_split` family); this branch just routes
-            # it through the same cached-local + indexed-loop lowering
-            # every other list-iteration shape here uses, with element
-            # type char* (a string split always yields strings). Before
-            # this, the iterable fell to the generic range-for over the
-            # raw pointer expression ("'begin' was not declared in this
-            # scope" / invalid member-call on char*, depending on which
-            # fallback caught it first). Real: ftplib.py's mlsd.
-            _iter_list_expr = _cpp_as('MojoList *', gen._cpp_expr(s.iterable))
-            _iter_elem = 'char *'
-        elif (isinstance(s.iterable, (gimple_ctypes.TupleExpr,
-                                      gimple_ctypes.ListExpr))
-                and isinstance(target, str) and not for_target_is_tuple(target)):
-            # `for fld in ('v', 'missing'):` — a list/tuple LITERAL used
-            # directly as the loop iterable. `_cpp_expr` already lowered
-            # the literal to a real `MojoList *` (a self-invoking lambda
-            # that constructs and fills one: there is no braced-init-list
-            # C++ value for a container in this model), but the generic
-            # range-for below emitted `for (auto fld : <that>)`, and a
-            # raw `MojoList *` has no ADL `begin`/`end` — g++:
-            # "'begin' was not declared in this scope" /
-            # "'end' was not declared in this scope". Iterate it through
-            # the same cached-local + indexed lowering every other
-            # list-valued iterable here uses. Element type comes from the
-            # literal elements themselves (all-str -> char *, all-float
-            # -> double, else the boxed int64_t convention). Real: the
-            # nested recursive generator in
-            # test_gimple_generator_runner.py looping over
-            # `('v', 'missing')` while walking struct attributes.
-            _iter_list_expr = _cpp_as('MojoList *', iter_expr)
-            _lit_etype = None
-            for _lit_el in s.iterable.elements:
-                _lit_ect = gimple_exprtypes._infer_simple_expr_ctype(
-                    _lit_el, gen._cpp_declared,
-                    getattr(gen, '_cpp_gen_self_fields', None),
-                    gen._async_api) or 'int64_t'
-                _lit_etype = (_lit_ect if _lit_etype is None
-                              else (gimple_ctypes.TypeLattice.join(
-                                  _lit_etype, _lit_ect) or 'int64_t'))
-            _iter_elem = _lit_etype
-        elif isinstance(s.iterable, gimple_ctypes.StringLiteral):
-            # `for c in "abc":` -- a string LITERAL used directly as the
-            # loop iterable. It is the same string iteration as the
-            # string-local arm below, and without this arm it fell to the
-            # generic range-for, `for (auto c : "abc")`, which C++ runs
-            # over the literal's `char[4]` ARRAY: four `char`s including the
-            # terminating NUL, each yielded as an integer
-            # (`list(letters())` printed `[97, 98, 99, 0]` where CPython
-            # prints `['a', 'b', 'c']`;
-            # CODEGEN_str_iteration_link_mode_crash, package B).
-            _iter_list_expr = (f"mojo_str_chars((char *)({gen._cpp_expr(s.iterable)}))")
-            _iter_elem = 'char *'
-        elif (isinstance(s.iterable, gimple_ctypes.IdentExpr)
-                and gen._cpp_declared is not None
-                and gimple_ctypes.TypeLattice.is_cstr(gen._cpp_declared.get(s.iterable.name))):
-            # `for c in <string local>:` iterates its characters (one
-            # 1-character string each); a raw `char *` has no begin().
-            _iter_list_expr = (f"mojo_str_chars((char *)({gen._cpp_expr(s.iterable)}))")
-            _iter_elem = 'char *'
-        elif isinstance(s.iterable, gimple_ctypes.IdentExpr) \
-                and gen._cpp_declared is not None \
-                and s.iterable.name not in gen._cpp_declared \
-                and gimple_ctypes.TypeLattice.is_list(gen._global_var_types.get(s.iterable.name)):
-            _iter_list_expr = _cpp_as('MojoList *', gen._cpp_expr(s.iterable))
-        elif (isinstance(s.iterable, gimple_ctypes.IdentExpr)
-                and gen._cpp_declared is not None
-                and s.iterable.name not in gen._cpp_declared
-                and isinstance(target, str) and not for_target_is_tuple(target)
-                and isinstance(iter_expr, str)
-                and iter_expr.startswith('_root_globals.')):
-            # The same module-level-global case with the global's C
-            # type NOT yet resolved (`_global_var_types` is populated
-            # by the module-globals passes, which run AFTER generator
-            # units compile — see the tuple-target sibling of this
-            # branch above for the full pass-ordering rationale). If
-            # `_cpp_expr` resolved the bare name to a real
-            # `_root_globals.<name>` field read at all, that field is
-            # a boxed container under this codegen's own convention
-            # (the pointer, cast through int64_t), so the identical
-            # cached-local + indexed-loop lowering applies. Element
-            # type: string evidence in the loop body upgrades the
-            # target to char*, else the boxed int64_t default. Before
-            # this branch, the iterable fell to the generic range-for
-            # over the raw field read ("'begin' was not declared in
-            # this scope" — a raw pointer/int64_t member has no ADL
-            # begin/end). Real: any generator body iterating a
-            # module-level list global (minimal repro:
-            # `_names = ['a', 'b']` + `def g(): for x in _names:
-            # yield x`).
-            _iter_list_expr = _cpp_as('MojoList *', iter_expr)
-            _g_slot_info = getattr(gen, '_global_literal_slot_ctypes', {}).get(
-                s.iterable.name)
-            if isinstance(_g_slot_info, str):
-                _iter_elem = _g_slot_info
-            elif _cpp_body_str_evidence(target, s.body):
-                _iter_elem = 'char *'
-        if _iter_list_expr is not None and not isinstance(target, str):
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                "unsupported for-loop target over a list-typed iterable")
-        if (_iter_list_expr is not None and gimple_ctypes.TypeLattice.is_word_or_none(_iter_elem)
-                and isinstance(target, str)
-                and (gimple_ctypes.TypeLattice.is_cstr(declared.get(target))
-                     or target in (getattr(gen, '_cpp_str_evidence_names', None) or ()))):
-            # the element type is unknown, but the target already holds a
-            # string in this body (`name = entry.name`, then `for name in
-            # xs[::-1]`): read the slots as strings.
-            _iter_elem = 'char *'
-        if _iter_list_expr is not None:
-            _cached = gen._cpp_fresh_name("_mg_iter")
-            _ctr = gen._cpp_fresh_name("_mg_i")
-            lines = [f"{indent}MojoList *{_cached} = {_iter_list_expr};"]
-            # for/else: the else body runs only when the loop completes
-            # WITHOUT a `break`. This lowering has to carry it itself (it
-            # returns before the generic for/else block below), with the
-            # same shared break-flag protocol that block uses; without it
-            # a `for x in <list-valued expr>: ... else: ...` silently
-            # dropped the else body.
-            _iter_brk = None
-            if s.else_body:
-                _iter_brk = gen._cpp_fresh_name("_mg_brk")
-                lines.insert(0, f"{indent}bool {_iter_brk} = false;")
-            if gimple_ctypes.TypeLattice.is_cstr(_iter_elem):
-                if not target_was_declared:
-                    declared[target] = 'char *'
-                    lines.append(f"{indent}char *{target};")
-                    _name_asn = f"{target} = mojo_list_get_str({_cached}, {_ctr});"
-                elif gimple_ctypes.TypeLattice.is_cstr(declared.get(target)):
-                    _name_asn = f"{target} = mojo_list_get_str({_cached}, {_ctr});"
-                else:
-                    _name_asn = f"{target} = (int64_t)(intptr_t)mojo_list_get_str({_cached}, {_ctr});"
-                lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                             f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
-                lines.append(f"{indent}    {_name_asn}")
-            elif gimple_ctypes.TypeLattice.is_double(_iter_elem):
-                if not target_was_declared:
-                    declared[target] = 'double'
-                    lines.append(f"{indent}double {target};")
-                lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                             f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
-                lines.append(f"{indent}    {target} = mojo_list_get_double({_cached}, {_ctr});")
-            else:
-                if not target_was_declared:
-                    declared[target] = 'int64_t'
-                    lines.append(f"{indent}int64_t {target};")
-                lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                             f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
-                lines.append(f"{indent}    {target} = mojo_list_get_int({_cached}, {_ctr});")
-            for inner in s.body:
-                if _iter_brk is None:
-                    lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-                else:
-                    lines.extend(gen._cpp_stmt_with_break_flag(
-                        inner, declared, indent + '    ', _iter_brk))
-            _cpp_refuse_unpacking_target(target)
-            lines.append(f"{indent}}}")
-            if _iter_brk is not None:
-                lines.append(f"{indent}if (!{_iter_brk}) {{")
-                for inner in s.else_body:
-                    lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-                lines.append(f"{indent}}}")
-            return lines
-        if s.else_body:
-            # for/else: the else body runs only when the loop
-            # completes WITHOUT a `break` — mirror _cpp_stmt's
-            # WhileStmt else handling with a shared break flag.
-            brk_var = gen._cpp_fresh_name("_mg_brk")
-            lines = [f"{indent}bool {brk_var} = false;"]
-            if (isinstance(s.iterable, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
-                    and s.iterable.elements
-                    and all(isinstance(el, gimple_ctypes.StringLiteral)
-                            for el in s.iterable.elements)):
-                declared[target] = 'char *'
-            lines.append(f"{indent}for (auto {target} : {iter_expr}) {{")
-            for inner in s.body:
-                lines.extend(gen._cpp_stmt_with_break_flag(inner, declared, indent + '    ', brk_var))
-            _cpp_refuse_unpacking_target(target)
-            lines.append(f"{indent}}}")
-            lines.append(f"{indent}if (!{brk_var}) {{")
-            for inner in s.else_body:
-                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            lines.append(f"{indent}}}")
-            return lines
-        if (isinstance(s.iterable, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
-                and s.iterable.elements
-                and all(isinstance(el, gimple_ctypes.StringLiteral)
-                        for el in s.iterable.elements)):
-            # `for k in ("a", "b"):` — the generic range-for declares
-            # the target via C++ `auto`, but this emitter's OWN type
-            # tracking must still learn the target's real ctype
-            # (char *), or later uses — most importantly a dict
-            # subscript keyed by the loop variable (`d[k]`) — fall
-            # back to the int64_t default and stringify the pointer
-            # through mojo_str_from_int (garbage key).
-            declared[target] = 'char *'
-        lines = [f"{indent}for (auto {target} : {iter_expr}) {{"]
-        for inner in s.body:
-            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-        _cpp_refuse_unpacking_target(target)
-        lines.append(f"{indent}}}")
-        return lines
+        return _cpf_named_target_iter_expr(gen, s, declared, indent, target, iter_expr, target_was_declared)
     # An iterable that is a CALL is almost always one shape here — a callable
     # bound to a local or to a parameter (`for row in _get_reader(lines,
     # ...)`, `for entry in _walk(root)`) — and the flat "type: CallExpr"
