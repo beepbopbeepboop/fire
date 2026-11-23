@@ -761,3 +761,28 @@ parameters). Helpers outside the arms that still print lambdas: `_cpp_dyn_call_e
 
 Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine
 programs; `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
+
+## Status 2026-11-23 (step 22): three more call-path lambdas are on the lambda shape
+
+- `_cpx_call_member`'s `str.format_words` lambda: a declaration, the format-argument statements (trimmed
+  of their trailing space, so the join reproduces the old text), and the `mojo_str_format_words` call.
+- `_cpp_dyn_call_expr` (a call through a callable-valued parameter): the `_W` word container as one
+  opaque statement, two declarations, the packed-argument statements, and the `_W{mojo_dyn_call(...)}`
+  return.
+- `_cpp_generator_start_kwargs_expr` (a generator call with `**kwargs`): one statement run, then the
+  `{base}_start(...)` call.
+
+`_cpp_dyn_call_expr` now returns an `Ex`. Its five callers in the statement printers print text, so they
+call the new `_cpp_dyn_call_text` (the one named text boundary for that helper). `_cpp_generator_start_kwargs_expr`'s
+only caller already takes an `Ex` through `_as_ex`.
+
+Not measured: whether the corpus reaches the `format_words`, dynamic-call and `**kwargs` generator paths.
+The C oracle is identical, but identical output on these three is verified only where the corpus hits them.
+
+Remaining text lambdas on the call paths: `_cpp_boxed_list_literal_expr` and `_cpp_list_literal_arg_expr`
+(their parts carry leading spaces, and an empty literal would print a double space that the join drops; needs
+a check of whether an empty literal reaches them), `_cpp_try_kwargs_forward_call`, and the comparator leaf
+inside the `sorted()` lambda.
+
+Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine programs;
+`test_gimple_cpp_core_arms.py` 30 arms, 0 failures.

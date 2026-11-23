@@ -2170,15 +2170,26 @@ def _cpp_dyn_call_expr(gen, e):
         parts.append(f'mojo_dict_set_int(_k, (char *)"{_kn}", '
                      f"(int64_t)(intptr_t)({gen._cpp_expr(_kv)})); ")
     _cpp_fname = gen._cpp_kw_param_renames.get(_fname, _fname)
-    return ("[&]() { struct _W { int64_t w; "
-            "operator int64_t() const { return w; } "
-            "operator char *() const { return (char *)w; } "
-            + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                      for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-            + "}; "
-            "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
-            + ''.join(parts)
-            + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_cpp_fname}), _a, _k)}}; }}()")
+    _dyn = Ex('lambda')
+    _dyn.body = [
+        _cpp_opaque("struct _W { int64_t w; operator int64_t() const { return w; } "
+                    "operator char *() const { return (char *)w; } "
+                    + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
+                              for _k in ('MojoList', 'MojoDict', 'MojoSet'))
+                    + "};"),
+        _cpp_instr('decl', "MojoList *_a = mojo_list_new()"),
+        _cpp_instr('decl', "MojoDict *_k = mojo_dict_new()"),
+        _cpp_opaque(''.join(parts).rstrip()),
+        _cpp_instr('return', ex_text(f"_W{{mojo_dyn_call((int64_t)(intptr_t)({_cpp_fname}), _a, _k)}}")),
+    ]
+    return _dyn
+
+
+def _cpp_dyn_call_text(gen, e):
+    """`_cpp_dyn_call_expr` as C text, for the statement printers that splice it into a line
+    (None when the call is not a dynamic one). They print text; the expression is built as an Ex."""
+    _d = _cpp_dyn_call_expr(gen, e)
+    return None if _d is None else _d.show()
 
 
 def _cpp_resolve_generator_call_api(gen, func):
@@ -2460,11 +2471,14 @@ def _cpp_generator_start_kwargs_expr(gen, call, api, sub_params, defaults):
             cast_args.append(f"({_pt})({_ae})")
         else:
             cast_args.append(_ae)
-    body = " ".join([f"MojoDict *{dvar} = mojo_dict_copy("
-                     f"{_cpp_as('MojoDict *', gen._cpp_expr(spread))});"]
-                    + lines
-                    + [f"return {base}_start({', '.join(cast_args)});"])
-    return f"[&]() -> MojoGenerator * {{ {body} }}()"
+    _gsk = Ex('lambda')
+    _gsk.text = 'MojoGenerator *'
+    _gsk.body = [
+        _cpp_opaque(" ".join([f"MojoDict *{dvar} = mojo_dict_copy("
+                              f"{_cpp_as('MojoDict *', gen._cpp_expr(spread))});"] + lines)),
+        _cpp_instr('return', _cpp_call_ex(f"{base}_start", cast_args)),
+    ]
+    return _gsk
 
 
 def _cpp_emit_generator_start_expr(gen, call, api) -> Ex:
@@ -4597,10 +4611,15 @@ def _cpx_call_member(gen, e) -> Ex:
                     "a `str.format(...)` argument in a compiled "
                     "generator body must be a statically-known "
                     "integer, bool or string")
-        return (ex_text("[&]() -> char * { MojoList *_fmt_l = mojo_list_new(); "
-                + ''.join(_fmt_args)
-                + f"return mojo_str_format_words((char *)({_obj_expr}), "
-                  f"_fmt_l, mojo_dict_new()); }}()"))
+        _fmt = Ex('lambda')
+        _fmt.text = 'char *'
+        _fmt.body = [
+            _cpp_instr('decl', "MojoList *_fmt_l = mojo_list_new()"),
+            _cpp_opaque(''.join(_fmt_args).rstrip()),
+            _cpp_instr('return', _cpp_call_ex('mojo_str_format_words', [
+                f"(char *)({_obj_expr})", '_fmt_l', 'mojo_dict_new()'])),
+        ]
+        return _fmt
     # `<char*-typed obj>.startswith(prefix)` / `.endswith(suffix)`
     # — real `int`-returning runtime helpers (`mojo_str_
     # startswith`/`mojo_str_endswith`), same receiver-ctype gate
@@ -10491,7 +10510,7 @@ def _cpf_word_iterable(gen, s: 'ForStmt', declared: dict, indent: str) -> list[s
     declared[_wi] = 'MojoList *'
     gen._cpp_word_iter_locals.add(_wi)
     try:
-        _call_txt = _cpp_dyn_call_expr(gen, s.iterable)
+        _call_txt = _cpp_dyn_call_text(gen, s.iterable)
         if _call_txt is None:
             _call_txt = gen._cpp_expr(s.iterable)
     except Exception:
@@ -10648,7 +10667,7 @@ def _cpf_param_call(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]
         declared[_wi] = 'MojoList *'
         gen._cpp_word_iter_locals.add(_wi)
         try:
-            _call_txt = _cpp_dyn_call_expr(gen, s.iterable)
+            _call_txt = _cpp_dyn_call_text(gen, s.iterable)
             if _call_txt is None:
                 _call_txt = gen._cpp_expr(s.iterable)
         except Exception:
@@ -10752,7 +10771,7 @@ def _cpf_simple_target_call_iterable(gen, s: 'ForStmt', declared: dict, indent: 
         lines = [_cpp_assign_line(f"MojoList *{_itvar}", "mojo_list_new()", indent)]
         # Build call through mojo_dyn_call preserving positional/keyword args.
         try:
-            _call_res = _cpp_dyn_call_expr(gen, s.iterable)
+            _call_res = _cpp_dyn_call_text(gen, s.iterable)
             if _call_res is None:
                 _parts = []
                 for _ae in _argstrs:
@@ -10877,7 +10896,7 @@ def _cpf_call_iterable(gen, s: 'ForStmt', declared: dict, indent: str, target) -
         gen._cpp_word_iter_locals.add(_wi)
         # Build call preserving positional/keyword args.
         try:
-            _call_txt = _cpp_dyn_call_expr(gen, s.iterable)
+            _call_txt = _cpp_dyn_call_text(gen, s.iterable)
             if _call_txt is None:
                 _call_txt = gen._cpp_expr(s.iterable)
         except Exception:
@@ -13106,7 +13125,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
     _yf_call = yf.value
     if (isinstance(_yf_call, gimple_ctypes.CallExpr)
             and isinstance(_yf_call.func, gimple_ctypes.IdentExpr)):
-        _yf_dyn = _cpp_dyn_call_expr(gen, _yf_call)
+        _yf_dyn = _cpp_dyn_call_text(gen, _yf_call)
         if _yf_dyn is not None:
             _yfl = gen._cpp_fresh_name("_mg_yfw")
             gen._cpp_word_iter_locals.add(_yfl)
