@@ -156,13 +156,23 @@ The same re-run then fails later, at a DIFFERENT file:
 
     build_config.py:840:48: error: unknown type name 'WordFacts'
 
-`build_config.py` is 487 lines and contains no `WordFacts`, so the reported
-position is the generated C's `#line` mapping pointing at the wrong source --
-the same unreliability recorded for the `FormatStruct` rows. `WordFacts` is
-defined at `mojo/middle/valueinfo.py:77` and used by `gimple_codegen.py:1747`
-and `emit_infra.py:1106`, so this is the SAME family as the declined-fold
-`FormatStruct` blocker: a type from another module referenced without its
-declaration. That family is now the live blocker for this entry, twice over.
+`build_config.py` is 487 lines and contains no `WordFacts`, and the largest
+`#line ... build_config.py` directive in the generated `fire.ci` is 480 -- so the
+reported `build_config.py:840` cannot come from that file's mapping at all.
+Keeping the self-host build's scratch (`FIRE_KEEP_SCRATCH`, a temporary probe,
+since reverted) shows `WordFacts` IS correctly declared there:
+
+    .fire.build/fire.ci:1727: typedef struct WordFacts {
+    .fire.build/fire.ci:1730: } WordFacts;
+    .fire.build/fire.ci:2460/2785: WordFacts * fs_words;  WordFacts * _words;
+
+and every use in it is a pointer or a helper (`_alloc_WordFacts`,
+`_mojo_sizeof_WordFacts`, `_init_WordFacts`, `_mojo_repr_WordFacts`). So the
+failing reference is in a DIFFERENT translation unit than `fire.ci`, not a
+missing declaration in this one -- and it is NOT established that this is the
+same family as the declined-fold `FormatStruct` blocker after all. The next
+probe needs the gcc invocation's file list (or all the closure's `.ci` units
+kept), not just the last scratch.
 
 ## Done when
 
