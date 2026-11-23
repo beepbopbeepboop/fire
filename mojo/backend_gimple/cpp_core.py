@@ -3657,7 +3657,7 @@ def _cpx_unary_op(gen, e) -> Ex:
     return _paren_ex(_un_ex(op, ex_text(gen._cpp_expr(e.operand))))
 
 
-def _cpx_binary_op(gen, e) -> str:
+def _cpx_binary_op(gen, e) -> Ex:
     """`BinaryOp` in `_cpp_expr`, other than the assignment expression.
 
     One arm of `_cpp_expr`, which tests the condition and calls this."""
@@ -3669,12 +3669,12 @@ def _cpx_binary_op(gen, e) -> str:
         if e.op in _NONE_ARITH_BINOPS:
             _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
             _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
-        return f"__mojo_floordiv({gen._cpp_expr(e.left)}, {gen._cpp_expr(e.right)})"
+        return _cpp_call_ex('__mojo_floordiv', [gen._cpp_expr(e.left), gen._cpp_expr(e.right)])
     if e.op == '**':
         if e.op in _NONE_ARITH_BINOPS:
             _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
             _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
-        return f"pow({gen._cpp_expr(e.left)}, {gen._cpp_expr(e.right)})"
+        return _cpp_call_ex('pow', [gen._cpp_expr(e.left), gen._cpp_expr(e.right)])
     if e.op == '+':
         # String concatenation (`current + part`, pprint.py's shape;
         # `path[:-len('.dylib')] + suffix`, dyld.py's `_inject`) →
@@ -3710,8 +3710,8 @@ def _cpx_binary_op(gen, e) -> str:
             # String concatenation: do not install numeric None-arith
             # guards, which would force tagged-word string operands
             # through an int64_t path and lose char* conversions.
-            return (f"mojo_str_cat((char *)({gen._cpp_expr(e.left)}), "
-                    f"(char *)({gen._cpp_expr(e.right)}))")
+            return (ex_text(f"mojo_str_cat((char *)({gen._cpp_expr(e.left)}), "
+                    f"(char *)({gen._cpp_expr(e.right)}))"))
         # `word + "literal"` / `"literal" + word`: Python's `+` with a str
         # on one side can only be concatenation (int + str is a TypeError),
         # so an unsolved word (a parameter OR a local, e.g. the boxed word a
@@ -3726,12 +3726,12 @@ def _cpx_binary_op(gen, e) -> str:
             # two unsolved words, one of which the body uses as a string
             # (sliced / str-method receiver): `int + str` is a TypeError, so
             # this `+` is a concatenation (`toppath + name`, os.fwalk).
-            return (f"mojo_str_cat((char *)(intptr_t)({gen._cpp_expr(e.left)}), "
-                    f"(char *)(intptr_t)({gen._cpp_expr(e.right)}))")
+            return (ex_text(f"mojo_str_cat((char *)(intptr_t)({gen._cpp_expr(e.left)}), "
+                    f"(char *)(intptr_t)({gen._cpp_expr(e.right)}))"))
         if ((isinstance(e.right, gimple_ctypes.StringLiteral) and _is_word_ident(e.left))
                 or (isinstance(e.left, gimple_ctypes.StringLiteral) and _is_word_ident(e.right))):
-            return (f"mojo_str_cat((char *)(intptr_t)({gen._cpp_expr(e.left)}), "
-                    f"(char *)(intptr_t)({gen._cpp_expr(e.right)}))")
+            return (ex_text(f"mojo_str_cat((char *)(intptr_t)({gen._cpp_expr(e.left)}), "
+                    f"(char *)(intptr_t)({gen._cpp_expr(e.right)}))"))
         _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
         _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
     elif e.op == '*':
@@ -3746,11 +3746,11 @@ def _cpx_binary_op(gen, e) -> str:
         # Falls through to the plain `*` below for a genuinely
         # all-numeric multiply (the overwhelmingly common case).
         if _cpp_is_str_expr(gen, e.left) and not _cpp_is_str_expr(gen, e.right):
-            return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.left)}), "
-                    f"(int64_t)({gen._cpp_expr(e.right)}))")
+            return (ex_text(f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.left)}), "
+                    f"(int64_t)({gen._cpp_expr(e.right)}))"))
         if _cpp_is_str_expr(gen, e.right) and not _cpp_is_str_expr(gen, e.left):
-            return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.right)}), "
-                    f"(int64_t)({gen._cpp_expr(e.left)}))")
+            return (ex_text(f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.right)}), "
+                    f"(int64_t)({gen._cpp_expr(e.left)}))"))
         _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
         _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
     else:
@@ -3769,11 +3769,11 @@ def _cpx_binary_op(gen, e) -> str:
         # Falls through to the plain `*` below for a genuinely
         # all-numeric multiply (the overwhelmingly common case).
         if _cpp_is_str_expr(gen, e.left) and not _cpp_is_str_expr(gen, e.right):
-            return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.left)}), "
-                    f"(int64_t)({gen._cpp_expr(e.right)}))")
+            return (ex_text(f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.left)}), "
+                    f"(int64_t)({gen._cpp_expr(e.right)}))"))
         if _cpp_is_str_expr(gen, e.right) and not _cpp_is_str_expr(gen, e.left):
-            return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.right)}), "
-                    f"(int64_t)({gen._cpp_expr(e.left)}))")
+            return (ex_text(f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.right)}), "
+                    f"(int64_t)({gen._cpp_expr(e.left)}))"))
     if e.op in ('and', 'or') and _cpp_and_or_is_tagged(gen, e):
         # Python's `and`/`or` yields an OPERAND. A tagged left operand is
         # tested by its kind (`mojo_truthy_word`: None is falsy, a box by
@@ -3789,15 +3789,15 @@ def _cpx_binary_op(gen, e) -> str:
                 _pick = f"mojo_truthy_word(_mojo_ao_l) ? _mojo_ao_l : (int64_t)(intptr_t)mojo_box_from_str((char *)({_rw_str}))"
             else:
                 _pick = f"mojo_truthy_word(_mojo_ao_l) ? (int64_t)(intptr_t)mojo_box_from_str((char *)({_rw_str})) : _mojo_ao_l"
-            return (f"[&]() {{ struct _W {{ int64_t w; "
+            return (ex_text(f"[&]() {{ struct _W {{ int64_t w; "
                     f"operator int64_t() const {{ return w; }} "
                     f"operator char *() const {{ return (char *)mojo_box_word(w); }} }}; "
                     f"int64_t _mojo_ao_l = {_lw}; "
-                    f"return _W{{{_pick}}}; }}()")
+                    f"return _W{{{_pick}}}; }}()"))
         _rw = _cpp_tagged_operand_word(gen, e.right)
         _pick = (f"mojo_truthy_word(_mojo_ao_l) ? _mojo_ao_l : ({_rw})" if e.op == 'or'
                  else f"mojo_truthy_word(_mojo_ao_l) ? ({_rw}) : _mojo_ao_l")
-        return f"[&]() -> int64_t {{ int64_t _mojo_ao_l = {_lw}; return {_pick}; }}()"
+        return ex_text(f"[&]() -> int64_t {{ int64_t _mojo_ao_l = {_lw}; return {_pick}; }}()")
     if e.op == 'or' and not isinstance(e.right, gimple_ctypes.BoolLiteral):
         # Python's `a or b` yields an OPERAND, not a bool: `suffix or ''`
         # is `suffix` when it is truthy and the string otherwise. Lowered
@@ -3809,16 +3809,16 @@ def _cpx_binary_op(gen, e) -> str:
                   else (_cpp_receiver_ctype(gen, e.right)
                         or _cpp_expr_static_ctype(gen, e.right)))
         if gimple_ctypes.TypeLattice.is_cstr(_or_rt) and gimple_ctypes.TypeLattice.is_word_or_cstr(_or_lt):
-            return (f"[&]() {{ struct _W {{ int64_t w; "
+            return (ex_text(f"[&]() {{ struct _W {{ int64_t w; "
                     f"operator int64_t() const {{ return w; }} "
                     f"operator char *() const {{ return (char *)w; }} }}; "
                     f"int64_t _l = (int64_t)(intptr_t)({gen._cpp_expr(e.left)}); "
                     f"return _W{{mojo_truthy_word(_l) ? _l : "
-                    f"(int64_t)(intptr_t)(char *)({gen._cpp_expr(e.right)})}}; }}()")
+                    f"(int64_t)(intptr_t)(char *)({gen._cpp_expr(e.right)})}}; }}()"))
     if e.op == '%':
         _pf = _cpp_percent_format(gen, e)
         if _pf is not None:
-            return _pf
+            return ex_text(_pf)
     if e.op in ('in', 'not in'):
         # `'x' not in s` is parsed as a BinaryOp (fire_compiler.py),
         # not a CompareChain — so the CompareChain 'in'/'not in' branch
@@ -3848,11 +3848,11 @@ def _cpx_binary_op(gen, e) -> str:
             if _fws:
                 _eq = ' || '.join(f"(_v == {_w})" for _w in _fws)
                 _neg = '!' if e.op == 'not in' else ''
-                return (f"[&]() {{ int64_t _v = (int64_t)(intptr_t)({gen._cpp_expr(e.left)}); "
-                        f"return {_neg}({_eq}); }}()")
+                return (ex_text(f"[&]() {{ int64_t _v = (int64_t)(intptr_t)({gen._cpp_expr(e.left)}); "
+                        f"return {_neg}({_eq}); }}()"))
         a = gen._cpp_expr(e.left)
         b = gen._cpp_expr(e.right)
-        return gen._cpp_in_link(a, e.left, b, e.right, negate=(e.op == 'not in'))
+        return ex_text(gen._cpp_in_link(a, e.left, b, e.right, negate=(e.op == 'not in')))
     op = gimple_ctypes._GD_BIN_OPS.get(e.op, e.op)
     _bl = gen._cpp_expr(e.left)
     _br = gen._cpp_expr(e.right)
@@ -3866,14 +3866,14 @@ def _cpx_binary_op(gen, e) -> str:
     # GIMPLE tail uses (emit_exprs.py), which also does the zero check.
     if (op == '%' and _cpp_is_int_operand(gen, e.left)
             and _cpp_is_int_operand(gen, e.right)):
-        return f"__mojo_floormod((int64_t)({_bl}), (int64_t)({_br}))"
+        return _cpp_call_ex('__mojo_floormod', [f"(int64_t)({_bl})", f"(int64_t)({_br})"])
     # Int / Int is true division (Float64), as in emit_exprs.py's tail. It
     # goes through mojo_div_double, not a bare C `/`, so a zero divisor
     # still raises ZeroDivisionError instead of answering inf.
     if (op == '/'
             and _cpp_is_int_operand(gen, e.left, gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES)
             and _cpp_is_int_operand(gen, e.right, gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES)):
-        return f"mojo_div_double((double)({_bl}), (double)({_br}))"
+        return _cpp_call_ex('mojo_div_double', [f"(double)({_bl})", f"(double)({_br})"])
     if op in ('/', '%') and _cpp_is_int_operand(gen, e.right):
         _br = f"mojo_int_divisor((int64_t)({_br}))"
     if op in ('==', '!=', '<', '<=', '>', '>='):
@@ -3882,7 +3882,7 @@ def _cpx_binary_op(gen, e) -> str:
         # header comparison that this fixes.
         _scmp = _cpp_str_compare(gen, op, e.left, e.right, _bl, _br)
         if _scmp is not None:
-            return _scmp
+            return ex_text(_scmp)
         # Mixed-pointerness guard — identical rationale to the
         # CompareChain branch's own copy above (this emitter's
         # single-comparison shape parses as a BinaryOp here, not a
@@ -3904,7 +3904,7 @@ def _cpx_binary_op(gen, e) -> str:
                 _bl = f"((char *)({_bl}))"
         else:
             _bl, _br = _cpp_word_vs_object_pointer(_lct, _rct, _bl, _br)
-    return f"({_bl} {op} {_br})"
+    return _paren_ex(ex_bin(ex_text(_bl), op, ex_text(_br)))
 
 
 def _cpx_compare_chain(gen, e) -> Ex:
@@ -6717,7 +6717,7 @@ def _cpp_expr_ex(gen, e):
         return (ex_text(f"({_cpp_untyped_word_truth(gen, e.condition, gen._cpp_expr(e.condition))}"
                 f" ? {gen._cpp_expr(e.then_val)} : {gen._cpp_expr(e.else_val)})"))
     if isinstance(e, gimple_ctypes.BinaryOp):
-        return ex_text(_cpx_binary_op(gen, e))
+        return _cpx_binary_op(gen, e)
     if isinstance(e, gimple_ctypes.CompareChain):
         return _cpx_compare_chain(gen, e)
     if isinstance(e, gimple_ctypes.DictExpr):

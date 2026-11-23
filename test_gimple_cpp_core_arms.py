@@ -57,7 +57,7 @@ TOOL = os.path.join(ROOT, 'tools', 'extract_arm.py')
 # line that could move, so the parent may only get shorter.
 # The expression arms still building C++ text (plan step 4 in the stage 6/7 doc).
 EXPR_ARMS_STILL_TEXT = {
-    '_cpx_lambda_expr', '_cpx_binary_op',
+    '_cpx_lambda_expr',
     '_cpx_member_expr', '_cpx_await_expr', '_cpx_call_expr',
 }
 PARENTS = [
@@ -318,6 +318,22 @@ def main() -> int:
     text_cases.append((_sub({'xs': 'MojoDict *'}, dictval={'xs': 'Node *'}), '(Node *)mojo_dict_get_int((MojoDict *)(xs), "1")'))
     text_cases.append((_sub({'xs': 'int64_t'}, objp=('xs',)), 'mojo_getitem_word((int64_t)(xs), (int64_t)(1))'))
     text_cases.append((_sub({'xs': 'char *'}), 'mojo_char_at_str_cp((char *)(xs), 1)'))
+    # The binary arm, through a stub. Expected strings are HEAD's arm output. The floormod
+    # and div branches are not reached by any stub input here, so their call text is pinned
+    # on the helper directly.
+    def _bin(op, decl, left=None, right=None):
+        n = _N.BinaryOp(op=op, left=left or _N.IdentExpr(name='x'), right=right or _N.IdentExpr(name='y'))
+        return _C._cpx_binary_op(_SGen(decl), n).show()
+
+    text_cases.append((_bin('//', {'x': 'int64_t', 'y': 'int64_t'}), '__mojo_floordiv(x, y)'))
+    text_cases.append((_bin('**', {'x': 'int64_t', 'y': 'int64_t'}), 'pow(x, y)'))
+    text_cases.append((_bin('+', {'x': 'int64_t', 'y': 'int64_t'}), '(x + y)'))
+    text_cases.append((_bin('+', {'x': 'char *', 'y': 'char *'}), 'mojo_str_cat((char *)(x), (char *)(y))'))
+    text_cases.append((_bin('%', {'x': 'int64_t'}, right=_N.IntLiteral(value=3)), '(x % mojo_int_divisor((int64_t)(3)))'))
+    text_cases.append((_C._cpp_call_ex('__mojo_floormod', ['(int64_t)(a)', '(int64_t)(b)']).show(),
+                       '__mojo_floormod((int64_t)(a), (int64_t)(b))'))
+    text_cases.append((_C._cpp_call_ex('mojo_div_double', ['(double)(a)', '(double)(b)']).show(),
+                       'mojo_div_double((double)(a), (double)(b))'))
     _xs = _N.IdentExpr(name='xs')
     _ints = lambda v: _N.IntLiteral(value=v)
     _lst = _slice({'xs': 'MojoList *'}, _xs, _ints(1), _ints(4), _ints(2))
