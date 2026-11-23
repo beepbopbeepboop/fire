@@ -196,6 +196,8 @@ class Instr:
             return 'for (' + self.rhs.show() + ') {'
         if k == 'break':
             return 'break;'
+        if k == 'continue':
+            return 'continue;'
         if k == 'coyield':
             # A C++ coroutine's `co_yield <expr>;` (the generator printer).
             return 'co_yield ' + self.rhs.show() + ';'

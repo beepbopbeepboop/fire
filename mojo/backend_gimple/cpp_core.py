@@ -7021,7 +7021,7 @@ def _cpp_assign_received_yield(gen, s, declared: dict, indent: str) -> list[str]
         return [f"{lead}{target} = {ln.lstrip()}"]
     # Any other yield shape (a tuple or delegated yield) keeps the None box:
     # it has no single co_yield to read the sent word from.
-    lines.append(f"{indent}{target} = mojo_box_none();")
+    lines.append(_cpp_assign_line(target, 'mojo_box_none()', indent))
     return lines
 
 
@@ -7277,7 +7277,7 @@ def _cpp_hoist_conditional_expression(gen, s, declared: dict, indent: str) -> li
 
         # The lines: _mg_t = lhs; if (cond _mg_t) { _mg_t = <hoisted_yield>; }
         indent2 = indent + '    '
-        lines = [f"{indent}{mg_t_name} = {lhs_cpp};"]
+        lines = [_cpp_assign_line(mg_t_name, lhs_cpp, indent)]
         lines.append(f"{indent2}if ({cond} ({mg_t_name}))) {{")
         
         # Now hoist the yield into this block. Since we're inside _cpp_hoist_conditional_expression,
@@ -7311,7 +7311,7 @@ def _cpp_hoist_conditional_expression(gen, s, declared: dict, indent: str) -> li
         indent2 = indent + '    '
         
         # Generate lines: _mg_t = <truthy_check>; if (c) { _mg_t = <a>; } else { _mg_t = <yield>; }
-        lines = [f"{indent}{mg_t_name} = {truthy_check};"]
+        lines = [_cpp_assign_line(mg_t_name, truthy_check, indent)]
         
         # Get C++ expressions for then_val and else_val
         then_cpp = gen._cpp_expr(value.then_val) if hasattr(gen, '_cpp_expr') else value.then_val.name
@@ -7650,7 +7650,7 @@ def _cpp_hoist_walrus_decls(gen, expr, declared: dict, indent: str) -> list[str]
             if vt is None:
                 vt = 'int64_t'
             declared[n.name] = vt
-            lines.append(f"{indent}{gimple_exprtypes._c_to_cpp_scalar_type(vt)} {n.name};")
+            lines.append(_cpp_ir_line(indent, 'decl', f"{gimple_exprtypes._c_to_cpp_scalar_type(vt)} {n.name}"))
     return lines
 
 
@@ -9013,7 +9013,7 @@ def _cps_while_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         loop_head = [_cpp_ir_line(indent, 'while', cond)]
     if s.else_body:
         brk_var = gen._cpp_fresh_name("_mg_brk")
-        lines.append(f"{indent}bool {brk_var} = false;")
+        lines.append(_cpp_ir_line(indent, 'decl', f"bool {brk_var} = false"))
         lines.extend(loop_head)
         for inner in s.body:
             lines.extend(gen._cpp_stmt_with_break_flag(inner, declared, indent + '    ', brk_var))
@@ -9301,9 +9301,9 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     if isinstance(s, gimple_ctypes.IfStmt):
         return _cps_if_stmt(gen, s, declared, indent)
     if isinstance(s, gimple_ctypes.BreakStmt):
-        return [f"{indent}break;"]
+        return [_cpp_ir_line(indent, 'break')]
     if isinstance(s, gimple_ctypes.ContinueStmt):
-        return [f"{indent}continue;"]
+        return [_cpp_ir_line(indent, 'continue')]
     if isinstance(s, gimple_ctypes.ReturnStmt):
         return _cps_return_stmt(gen, s, indent)
     if isinstance(s, gimple_ctypes.TryStmt):
@@ -13036,8 +13036,8 @@ def _cpy_handle_local(gen, indent: str, call) -> list[str]:
         _cpp_ir_line(indent + '    ', 'end'),
         _cpp_ir_line(indent + '    ', 'if', 'mojo_exc_pending_get()'),
         _cpp_call_line(indent + '        ', 'mojo_exc_pending_set', ['0']),
-        f"{indent}        throw _MojoCppExc{{ mojo_exc_type_get(), "
-        f"mojo_exc_msg_get(), mojo_exc_obj_get() }};",
+        _cpp_ir_line(indent + '        ', 'throw',
+                     "_MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), mojo_exc_obj_get() }"),
         _cpp_ir_line(indent + '    ', 'end'),
         _cpp_ir_line(indent, 'end'),
     ]
@@ -13715,8 +13715,8 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         # `from` with no special-casing beyond this one check.
         _cpp_ir_line(indent + '    ', 'if', 'mojo_exc_pending_get()'),
         _cpp_call_line(indent + '        ', 'mojo_exc_pending_set', ['0']),
-        f"{indent}        throw _MojoCppExc{{ mojo_exc_type_get(), "
-        f"mojo_exc_msg_get(), mojo_exc_obj_get() }};",
+        _cpp_ir_line(indent + '        ', 'throw',
+                     "_MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), mojo_exc_obj_get() }"),
         _cpp_ir_line(indent + '    ', 'end'),
         _cpp_ir_line(indent, 'end'),
     ]

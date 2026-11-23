@@ -951,3 +951,21 @@ by transcription and the helper pins only.
 
 Verified: `test_gimple_cpp_core_arms.py` 30 arms, 0 failures; `c_oracle check --base c1c60bdc3` identical on all 285
 pydiff programs and all 29 coroutine programs (the two new programs included).
+
+## Status 2026-11-23 (step 32): the one-line statement lines are IR statements (break, continue, decl, assign, throw)
+
+The single-line statement lines of the generator printers are built from statement kinds: `break`, the new
+`continue` kind (added to `mojo/ir/instr.py`), `decl` for the `while`/`else` break flag and scalar declarations,
+`assign` (`_cpp_assign_line`) for the hoisted-conditional targets and `mojo_box_none()`, and `throw` for the
+`yield from` exception re-raise (two sites with the same text).
+
+Coverage: `continue` (new corpus program `27`), the `while`/`else` break flag (new `28`) and the `yield from`
+`throw` (existing `03`) are reached. The `mojo_box_none()` assignment and the hoisted conditional-yield assignments
+are NOT reached by any compiling program (probed: a `None` assignment and a conditional yield both compile on the
+C++ path but do not reach these lines), so they are verified by transcription only.
+
+Still text statement lines (about 50 of 58): `_cpp_for_stmt` (10), `_cpf_call_iterable` (6), the named-target iterators
+(9), `_cpp_raise_stmt` (5), and the rest, several of which are multi-line lambda blocks.
+
+Verified: `c_oracle check --base be2daebd6` identical on all 285 pydiff programs and all 31 coroutine programs;
+`test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
