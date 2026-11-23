@@ -10955,7 +10955,7 @@ def _cpf_call_iterable(gen, s: 'ForStmt', declared: dict, indent: str, target) -
                 _call_txt = gen._cpp_expr(s.iterable)
         except Exception:
             _call_txt = gen._cpp_expr(s.iterable)
-        _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+        _pre = [_cpp_assign_line(f"MojoList *{_wi}", f"mojo_iter_word((int64_t)(intptr_t)({_call_txt}))", indent)]
         # Tuple-unpacking target shape over a callable-local mojo_iter_word
         # result: each drained element is itself a boxed row (MojoList *),
         # unpacked per slot as a word. Handle directly here instead of
@@ -10969,16 +10969,14 @@ def _cpf_call_iterable(gen, s: 'ForStmt', declared: dict, indent: str, target) -
             for _nm in _names:
                 if _nm not in declared:
                     declared[_nm] = 'int64_t'
-                    _lines.append(f"{indent}int64_t {_nm};")
-            _lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                         f"{_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
-            _lines.append(f"{indent}    MojoList *{_tup} = "
-                         + f"{gen._cpp_container_cast_prefix('MojoList', False)}mojo_list_get_int({_wi}, {_ctr});")
+                    _lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {_nm}"))
+            _lines.append(_cpp_ir_line(indent, 'for', f"int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++"))
+            _lines.append(_cpp_assign_line(f"MojoList *{_tup}", f"{gen._cpp_container_cast_prefix('MojoList', False)}mojo_list_get_int({_wi}, {_ctr})", indent + '    '))
             for _si, _nm in enumerate(_names):
-                _lines.append(f"{indent}    {_nm} = mojo_list_get_int({_tup}, {_si});")
+                _lines.append(_cpp_assign_line(_nm, f"mojo_list_get_int({_tup}, {_si})", indent + '    '))
             for inner in s.body:
                 _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            _lines.append(f"{indent}}}")
+            _lines.append(_cpp_ir_line(indent, 'end'))
             return _pre + _lines
         # Single-target iteration: bind element using table's element ctype.
         if isinstance(s.target, str):
@@ -11655,13 +11653,12 @@ def _cpf_named_target_call_iter(gen, s: 'ForStmt', declared: dict, indent: str, 
     # (e.g. assigned before the loop) is NOT redeclared.
     lines = []
     if not target_was_declared:
-        lines.append(f"{indent}int64_t {target};")
-    lines.append(f"{indent}for (int64_t {ctr} = {start_e}; "
-                 f"({ctr} < {stop_e}) == ({step_e} > 0); {ctr} += {step_e}) {{")
-    lines.append(f"{indent}    {target} = {ctr};")
+        lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {target}"))
+    lines.append(_cpp_ir_line(indent, 'for', f"int64_t {ctr} = {start_e}; ({ctr} < {stop_e}) == ({step_e} > 0); {ctr} += {step_e}"))
+    lines.append(_cpp_assign_line(target, ctr, indent + '    '))
     for inner in s.body:
         lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-    lines.append(f"{indent}}}")
+    lines.append(_cpp_ir_line(indent, 'end'))
     return lines
 
 
@@ -11675,20 +11672,18 @@ def _cpf_named_target_call_iter2(gen, s: 'ForStmt', declared: dict, indent: str,
         _rv_elem = 'char *'
     _rv_list = gen._cpp_fresh_name("_mg_rev")
     _rv_ctr = gen._cpp_fresh_name("_mg_i")
-    lines = [f"{indent}MojoList *{_rv_list} = mojo_list_reversed("
-             + _cpp_as('MojoList *', _rv_src) + ");"]
+    lines = [_cpp_assign_line(f"MojoList *{_rv_list}", f"mojo_list_reversed({_cpp_as('MojoList *', _rv_src)})", indent)]
     _rv_ct = _rv_elem if _rv_elem in ('char *', 'double') else 'int64_t'
     _rv_get = {'char *': 'mojo_list_get_str',
                'double': 'mojo_list_get_double'}.get(_rv_ct, 'mojo_list_get_int')
     if not target_was_declared:
         declared[target] = _rv_ct
-        lines.append(f"{indent}{_rv_ct} {target};")
-    lines.append(f"{indent}for (int64_t {_rv_ctr} = 0; "
-                 f"{_rv_ctr} < mojo_list_len({_rv_list}); {_rv_ctr}++) {{")
-    lines.append(f"{indent}    {target} = {_rv_get}({_rv_list}, {_rv_ctr});")
+        lines.append(_cpp_ir_line(indent, 'decl', f"{_rv_ct} {target}"))
+    lines.append(_cpp_ir_line(indent, 'for', f"int64_t {_rv_ctr} = 0; {_rv_ctr} < mojo_list_len({_rv_list}); {_rv_ctr}++"))
+    lines.append(_cpp_assign_line(target, f"{_rv_get}({_rv_list}, {_rv_ctr})", indent + '    '))
     for inner in s.body:
         lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-    lines.append(f"{indent}}}")
+    lines.append(_cpp_ir_line(indent, 'end'))
     return lines
 
 

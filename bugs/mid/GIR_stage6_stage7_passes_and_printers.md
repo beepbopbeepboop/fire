@@ -1001,3 +1001,21 @@ Still text statement lines: `_cpf_call_iterable` (6), the named-target iterators
 
 Verified: `c_oracle check --base adbd0cbda` identical on all 285 pydiff programs and all 34 coroutine programs;
 `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
+
+## Status 2026-11-23 (step 36): the call-iterable and named-target iterator lines are statements
+
+Fifteen text lines of `_cpf_call_iterable` and the two named-target iterators print from statement kinds: the
+`mojo_iter_word` copy and the element declarations and reads (`assign`, `decl`), the counted-loop headers (`for`),
+the reversed-list copy (`assign`), and the closing braces (`end`).
+
+Coverage: the range-loop named-target iterator (the `for` header, the target declaration and the assignment) is
+reached by 24-28 existing programs. The `reversed(...)` iterator (copy, declaration, loop header, element read) is
+reached by the new program `32`. The call-iterable lines (the `mojo_iter_word` copy, the element declaration, the
+counted-loop header, the tuple element read and the container-cast read) are NOT reached by any compiling program
+(probed: iterating a call result compiles but does not take that branch), so they are verified by transcription only.
+
+Still text statement lines: a few in `_cpf_named_target` and the rest of the 58; the call-iterable group needs a
+program that takes its branch before it can be checked.
+
+Verified: `c_oracle check --base d9a32f982` identical on all 285 pydiff programs and all 35 coroutine programs;
+`test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
