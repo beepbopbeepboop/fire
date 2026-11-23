@@ -145,6 +145,25 @@ other call site fixes the parameter's type.
 
 `mojoc` therefore stays in the OFF entry -- but for a known, narrow reason now.
 
+### 2026-11-22 (later): that reason is FIXED; the next one is `WordFacts`
+
+Annotating the parameter -- `def _decode(bits: Int, fmt):` -- removes all three
+`invalid operands` errors (measured: grep count 0 on a re-run, 739.0s). The body
+already assumed an integer; the self-host compile was inferring `double` from
+the parameter's use in `2.0 ** (bits - bias)`. Landed as `27809e6ef`.
+
+The same re-run then fails later, at a DIFFERENT file:
+
+    build_config.py:840:48: error: unknown type name 'WordFacts'
+
+`build_config.py` is 487 lines and contains no `WordFacts`, so the reported
+position is the generated C's `#line` mapping pointing at the wrong source --
+the same unreliability recorded for the `FormatStruct` rows. `WordFacts` is
+defined at `mojo/middle/valueinfo.py:77` and used by `gimple_codegen.py:1747`
+and `emit_infra.py:1106`, so this is the SAME family as the declined-fold
+`FormatStruct` blocker: a type from another module referenced without its
+declaration. That family is now the live blocker for this entry, twice over.
+
 ## Done when
 
 `python3 tools/memslot.py --gb 8 --label gate-off-doc -- python3 -m unittest test_gates_off_entries_name_a_doc.py -v`
