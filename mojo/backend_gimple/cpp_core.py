@@ -6200,7 +6200,16 @@ def _cpx_call_expr(gen, e) -> str:
         f"unsupported call expression in generator body")
 
 
-def _cpx_slice_expr(gen, e) -> str:
+def _cpp_call_ex(callee: str, args: list) -> Ex:
+    """`callee(a, b, ...)` as a `call` Ex, with each argument an `ex_text` leaf."""
+    e = Ex('call')
+    e.a = ex_text(callee)
+    e.tight = True
+    e.args = [ex_text(str(a)) for a in args]
+    return e
+
+
+def _cpx_slice_expr(gen, e) -> Ex:
     """`SliceExpr` in `_cpp_expr`.
 
     One arm of `_cpp_expr`, which tests the condition and calls this."""
@@ -6219,19 +6228,22 @@ def _cpx_slice_expr(gen, e) -> str:
         _st0 = start if e.start is not None else '0'
         _sp0 = stop if e.stop is not None else '0'
         if gimple_ctypes.TypeLattice.is_list(_sct):
-            return (f"mojo_list_slice_step({gen._cpp_container_cast_prefix('MojoList', False)}({gen._cpp_expr(_sx)}), {_hs}, "
-                    f"(int64_t)({_st0}), {_he}, (int64_t)({_sp0}), (int64_t)({step}))")
+            return _cpp_call_ex('mojo_list_slice_step', [
+                f"{gen._cpp_container_cast_prefix('MojoList', False)}({gen._cpp_expr(_sx)})", _hs,
+                f"(int64_t)({_st0})", _he, f"(int64_t)({_sp0})", f"(int64_t)({step})"])
         if gimple_ctypes.TypeLattice.is_word(_sct):
-            return (f"{gen._cpp_container_cast_prefix('MojoList', True)}mojo_word_slice_step((int64_t)({gen._cpp_expr(_sx)}), "
-                    f"{_hs}, (int64_t)({_st0}), {_he}, (int64_t)({_sp0}), (int64_t)({step}))")
-        return f"({start}, {stop}, {step})"
+            # The container cast prefix is a text leaf: it spells the cast, not a call.
+            return ex_text(gen._cpp_container_cast_prefix('MojoList', True) + _cpp_call_ex(
+                'mojo_word_slice_step', [f"(int64_t)({gen._cpp_expr(_sx)})", _hs,
+                f"(int64_t)({_st0})", _he, f"(int64_t)({_sp0})", f"(int64_t)({step})"]).show())
+        return ex_text(f"({start}, {stop}, {step})")
     # Python `s[i:j]` on a string (this emitter's `char *`) → the
     # substring, via the same mojo_cstr_slice helper the GIMPLE path's
     # _lower_slice uses for a char* slice (pprint.py's
     # `object[i: i+4]` shape). A tuple-typed slice result (real list
     # slicing) isn't representable in this scalar model, so the
     # char*-substring reading is the honest, useful lowering.
-    return f"mojo_cstr_slice((char *)({gen._cpp_expr(e.obj)}), {start}, {stop})"
+    return _cpp_call_ex('mojo_cstr_slice', [f"(char *)({gen._cpp_expr(e.obj)})", start, stop])
 
 
 def _cpx_subscript_expr(gen, e) -> str:
@@ -6721,7 +6733,7 @@ def _cpp_expr_ex(gen, e):
     if isinstance(e, gimple_ctypes.CallExpr):
         return ex_text(_cpx_call_expr(gen, e))
     if isinstance(e, gimple_ctypes.SliceExpr):
-        return ex_text(_cpx_slice_expr(gen, e))
+        return _cpx_slice_expr(gen, e)
     if isinstance(e, gimple_ctypes.SubscriptExpr):
         return ex_text(_cpx_subscript_expr(gen, e))
     if isinstance(e, gimple_ctypes.AwaitExpr):

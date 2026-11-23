@@ -57,7 +57,7 @@ TOOL = os.path.join(ROOT, 'tools', 'extract_arm.py')
 # line that could move, so the parent may only get shorter.
 # The expression arms still building C++ text (plan step 4 in the stage 6/7 doc).
 EXPR_ARMS_STILL_TEXT = {
-    '_cpx_slice_expr', '_cpx_unary_op', '_cpx_walrus', '_cpx_compare_chain',
+    '_cpx_unary_op', '_cpx_walrus', '_cpx_compare_chain',
     '_cpx_ident_expr', '_cpx_subscript_expr', '_cpx_lambda_expr', '_cpx_binary_op',
     '_cpx_member_expr', '_cpx_await_expr', '_cpx_call_expr',
 }
@@ -201,6 +201,33 @@ def main() -> int:
         (_C._cpp_ir_line('  ', 'if', 'c'), '  if (c) {'),
         (_C._cpp_call_line('  ', 'mojo_exc_pending_set', ['0']), '  mojo_exc_pending_set(0);'),
     ]
+    text_cases.append((_C._cpp_call_ex('f', ['a', '1']).show(), 'f(a, 1)'))
+    text_cases.append((_C._cpp_call_ex('mojo_cstr_slice', ['(char *)(s)', '0', 'MOJO_SLICE_STOP_OMITTED']).show(), 'mojo_cstr_slice((char *)(s), 0, MOJO_SLICE_STOP_OMITTED)'))
+    # The slice arm's three branches, through a stub generator: the list step,
+    # the word step and the plain cstr slice (the corpus does not reach them all).
+    import fire_compiler as _N
+
+    class _StubGen:
+        def __init__(self, decl):
+            self._cpp_declared = decl
+        def _cpp_expr(self, n):
+            return n.name if isinstance(n, _N.IdentExpr) else str(n.value)
+        def _cpp_container_cast_prefix(self, name, boxed):
+            return ''
+
+    def _slice(decl, obj, start, stop, step):
+        n = _N.SliceExpr(obj=obj, start=start, stop=stop, step=step)
+        return _C._cpx_slice_expr(_StubGen(decl), n).show()
+
+    _xs = _N.IdentExpr(name='xs')
+    _ints = lambda v: _N.IntLiteral(value=v)
+    _lst = _slice({'xs': 'MojoList *'}, _xs, _ints(1), _ints(4), _ints(2))
+    # Expected text is HEAD's arm output for the same stub (the operand is parenthesised).
+    text_cases.append((_lst, 'mojo_list_slice_step((xs), 1, (int64_t)(1), 1, (int64_t)(4), (int64_t)(2))'))
+    _wrd = _slice({'xs': 'int64_t'}, _xs, _ints(1), None, _ints(2))
+    text_cases.append((_wrd, 'mojo_word_slice_step((int64_t)(xs), 1, (int64_t)(1), 0, (int64_t)(0), (int64_t)(2))'))
+    _cst = _slice({'xs': 'char *'}, _xs, _ints(0), _ints(3), None)
+    text_cases.append((_cst, 'mojo_cstr_slice((char *)(xs), 0, 3)'))
     from mojo.ir.instr import Ex as _Ex
     _p = _Ex('paren'); _p.a = _ex('a + b')
     text_cases.append((_p.show(), '(a + b)'))
