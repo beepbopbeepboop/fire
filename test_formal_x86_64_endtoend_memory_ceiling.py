@@ -191,5 +191,38 @@ class TestHmemProofsAreCheap(unittest.TestCase):
         self._check("list_literal_index.mojo")
 
 
+class TestGeneratedStepTypesAreInferred(unittest.TestCase):
+    """The successor `hs{k+1}` and `hstep{k}` of a register-only step are typed
+    by the lemma, not re-spelled from the generator's own successor string.
+
+    A record update can elaborate to a different term shape in the lemma's
+    `.olean` than in the generated source (`have __src` vs `let __src`), and
+    Lean compares elaborated types, so the spelled-out `: nxt = succ` form
+    mismatched on `list_literal_index`.  This pins the inferred form, and the
+    raised `maxHeartbeats` the same change carries, against regression.
+
+    Fails before the fix (a spelled-out `have hs{k} : nxt = succ := by` /
+    `have hstep{k} : … :=` was emitted), passes after.
+    """
+
+    def _text(self):
+        return E.emit_terminates(os.path.join(E.HERE, "examples",
+                                              "list_literal_index.mojo"))
+
+    def test_heartbeats_raised_for_generated_proofs(self):
+        self.assertIn("set_option maxHeartbeats 20000000", self._text())
+
+    def test_hs_is_inferred_not_spelled(self):
+        typed = [line for line in self._text().split("\n")
+                 if re.match(r"\s*have hs\d+ : .* = .* := by\s*$", line)]
+        self.assertEqual(typed, [],
+                         "a `have hs{k} : nxt = succ := by` line re-spells the "
+                         "successor instead of inferring it from `hstep{k}`:\n  "
+                         + "\n  ".join(typed[:3]))
+        inferred = [line for line in self._text().split("\n")
+                    if re.match(r"\s*have hs\d+ := by\s*$", line)]
+        self.assertTrue(inferred, "no inferred `have hs{k} := by` was emitted")
+
+
 if __name__ == "__main__":
     unittest.main()
