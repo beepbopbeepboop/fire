@@ -77,6 +77,23 @@ CASES = {
         'x\n',
         'helper__mojo_global_get_NAME',
     ),
+    # A bool global: the accessor is a C `int`, but the imported VALUE must
+    # print as CPython's True/False (the importer's `print` reads the export's
+    # `py_bool` bit, not the accessor's C type), both the unannotated and the
+    # annotated spelling, both polarities.
+    'unannotated_bool': (
+        'FLAG = True\nOFF = False\n',
+        'from helper import FLAG, OFF\nprint(FLAG)\nprint(OFF)\n',
+        'True\nFalse\n',
+        'helper__mojo_global_get_FLAG',
+    ),
+    'annotated_bool': (
+        'FLAG: bool = True\nOFF: bool = False\n',
+        'from helper import FLAG, OFF\nprint(FLAG)\nprint(OFF)\n'
+        'print(FLAG == True)\n',
+        'True\nFalse\nTrue\n',
+        'helper__mojo_global_get_FLAG',
+    ),
     # The annotated forms the planner doc measured green.
     'annotated_scalars': (
         "CONST: int = 41\nRATIO: float = 1.5\nLABEL: str = 'tag'\n",
@@ -257,16 +274,15 @@ def test_scalar_lines_inside_a_multiline_string_are_not_exports():
 
 def test_bool_literal_export_is_int_typed_like_the_accessor():
     # `FLAG = True` is exported with the type its definer's accessor returns
-    # (`int`), so a truthiness read is right instead of the old silent 0.
-    # Printing it still renders `1` where CPython prints `True` -- the same
-    # pre-existing bool-rendering gap the ANNOTATED spelling has (measured:
-    # `FLAG: bool = True` prints 1 today), filed as
-    # bugs/CODEGEN_bool_global_prints_int_not_bool.md; this pin is the C-level
-    # export only, not that unrelated print rendering.
+    # (`int`), so a truthiness read is right instead of the old silent 0. The
+    # bool-ness travels as the export's `py_bool` bit and is what makes the
+    # importer's `print` render True (see the bool CASES above, which run it).
     with tempfile.TemporaryDirectory() as td:
-        _write(td, 'helper.py', 'FLAG = True\n')
+        helper_path = _write(td, 'helper.py', 'FLAG = True\n')
         main_path = _write(td, 'main.py',
                            'from helper import FLAG\nprint(FLAG)\n')
+        exports = module_loader.ModuleLoader().load_module_from_path(helper_path)
+        assert exports.get('FLAG', {}).get('py_bool') is True, exports
         main_c = compile_module_to_c(
             'from helper import FLAG\nprint(FLAG)\n', main_path, 'main')
         assert 'extern int helper__mojo_global_get_FLAG (void);' in main_c, main_c

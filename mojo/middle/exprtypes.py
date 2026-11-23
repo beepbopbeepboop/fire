@@ -812,6 +812,15 @@ def is_python_bool_expr(gen, node) -> bool:
         return True
     if isinstance(node, IdentExpr) and bool_param_in_scope(gen, _as_str(node.name)):
         return True
+    # A bare-imported module global whose defining value is a Python bool
+    # (`from helper import FLAG` with `FLAG = True`). Its accessor is a C
+    # `int`, so the bool-ness is recorded beside it. A same-named LOCAL
+    # shadows the import exactly as `_lower_IdentExpr` decides, so the local
+    # wins here too.
+    if (isinstance(node, IdentExpr)
+            and _as_str(node.name) in getattr(gen, '_imported_global_bool', ())
+            and _as_str(node.name) not in getattr(gen, 'var_types', {})):
+        return True
     if isinstance(node, MemberExpr):
         return _is_python_bool_field(gen, node)
     if isinstance(node, CallExpr):

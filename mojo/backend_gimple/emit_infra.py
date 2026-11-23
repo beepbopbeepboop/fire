@@ -2007,6 +2007,8 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
             accessor_csym = (f'{gimple_ctypes._c_field_name(_home_qual)}__mojo_global_get_'
                               f'{gimple_ctypes._c_field_name(name)}')
             gen._imported_global_accessors[sym] = (ctype, accessor_csym)
+            if info.get('py_bool'):
+                gen._imported_global_bool.add(sym)
             # The defining module's mangled name, the same one its own
             # `global_generator_key` uses: `accessor_csym` is built from it.
             gen._imported_global_home[sym] = gimple_ctypes._c_field_name(_home_qual or 'root')
