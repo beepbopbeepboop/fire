@@ -399,3 +399,41 @@ Next, in order: (1) the 60 movable lines of `_cpf_named_target`; (2) the `_cpf_n
 body (the bulk of the 80 sites) by target kind; (3) `_cpp_yield_from` and `_cpp_for_stmt` (both need the
 `for`/`while` shapes already added, plus `ifbody`); (4) the 11 `_cpx_*` expression arms, which need
 expression shapes for C++ casts, receivers and runtime-stub calls, not statement shapes.
+
+## Status 2026-11-22 (batches): the extracted arms, yield-from and most for-statement lines
+
+Landed since the previous status (each: arms 30/0 plus the helper checks; `c_oracle check --base HEAD`
+identical on 285 C and 13 C++ programs; `compile_stdlib.py` PASSED 592, FAILED 18 = 0 expected / 18
+unexpected, the same module set):
+
+- `6a369cab7`, `a35104a5b`: `_cpf_named_target` is `0 lines can be moved` (its arms are
+  `_cpf_named_target_call_iter`, `_cpf_named_target_call_iter2`, `_cpf_named_target_iter_expr`).
+- `21c39f43c`: the expression-iterable arm prints through the IR (tuple unpack, indexed element loops,
+  scalar stub, cached/sorted loops, for/else, plain range-for). Also FIXES a latent crash:
+  `_cpp_assign_line` now coerces string operands to `ex_text`. Several earlier call sites passed text, which
+  reached `Instr.show()` as a str on paths the corpus does not reach; the generator corpus found it. The
+  arm test now pins every IR helper with text operands directly.
+- `ac3a1a12a`: the simple lists of `_cpp_yield_from` (dyn-call and word-iterable cursor loops, for over a
+  collection, list-get range) print through assign/for/coyield/end.
+- `a2d1c304b`: most single-line declarations, loop headers, closers and scalar assigns in `_cpp_for_stmt`.
+
+Text sites per printer function now (`awk` over `{indent}`):
+
+    24 _cpp_yield_from(gen,
+    23 _cpf_named_target(gen,
+    17 _cpp_for_stmt(gen,
+    14 _cpp_yield_tuple(gen,
+    12 _cpp_container_literal_init(gen,
+    10 _cpp_for_generator_delegate(gen,
+    9 _cps_assign_stmt(gen,
+    9 _cpp_with_stmt(gen,
+    7 _cpp_async_for_stmt(gen,
+    6 _cpp_raise_stmt(gen,
+
+Still open: the multi-line concatenated assigns (`MojoList * x = ` split across lines) in `_cpp_for_stmt`
+and `_cpp_yield_from`; the sub-generator guard block in `_cpp_yield_from` (`{ ... }` + if/for(;;)/throw);
+`_cpp_yield_tuple`, `_cpp_container_literal_init`, `_cpp_for_generator_delegate`, `_cpp_with_stmt`,
+`_cps_assign_stmt`; and the 11 `_cpx_*` expression arms, which need expression shapes.
+
+Process note: the oracle does not reach every converted path. Each new helper or shape needs a direct check in
+`test_gimple_cpp_core_arms.py` (as the helper text-operand check now does), not only a byte-identical corpus run.
