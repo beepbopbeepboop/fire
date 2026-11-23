@@ -98,3 +98,16 @@ line is verified rather than unverified.
   module-qualified C symbol and pinned by `test_codegen_module_alias_function_value.py`).
   The value, class-body and class-as-value shapes of the same per-file read are fixed (pinned by
   `test_codegen_module_alias_function_value.py`).
+
+## Status 2026-11-23 (fix is on master; only the full chain is open)
+
+- The root-cause fix is on master: `111cf3afa` (CODEGEN: module-qualified CALL `h.f(...)` answers the
+  module) and the value path through `funcs_shared.register_module_member_function`. The
+  `work/bug-codegen-selfhost-stage2-attributeerr` branch named in the 2026-11-22 entry does not exist
+  here; read that entry's branch name as "master" instead.
+- Checked at HEAD: `mojo/middle/comptime.py:85` imports `_as_comptimevar_node` by name, and no
+  `_fc._as_comptimevar_node` read remains in the compiler. The quick pin
+  `python3 test_codegen_module_alias_function_value.py` PASSES (18 shapes, peak 0.2 GB, exit 0).
+- Still open: criterion 2 (`make bootstrap` past `bootstrap-stage2-dumps`, then `bootstrap-verify`
+  byte-identical). Integrator to run it once `bootstrap-stage1-transitive` and `bootstrap-stage2-cc`
+  are re-enabled. Delete this doc in the commit where that chain goes green.
