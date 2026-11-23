@@ -4336,8 +4336,8 @@ def _cpx_call_member(gen, e) -> Ex:
             f"{_cpp_self_struct}_{gimple_ctypes._safe_name(e.func.member)}",
             args)
         if f"{_cpp_self_struct}_{e.func.member}" in gen._static_methods:
-            return _cpp_call_ex(_sym, list(args))   # a staticmethod takes no receiver
-        return _cpp_call_ex(_sym, ['self'] + list(args))
+            return ex_text(f"{_sym}({', '.join(args)})")   # a staticmethod takes no receiver
+        return ex_text(f"{_sym}(self{', ' + ', '.join(args) if args else ''})")
     # `cls.method(...)` inside a @classmethod generator — the
     # SAME name-only resolution mechanism the ordinary
     # (non-coroutine) GIMPLE path's own CallExpr/MemberExpr
@@ -4381,7 +4381,7 @@ def _cpx_call_member(gen, e) -> Ex:
                 gen, _sym,
                 f"{_cpp_self_struct}_{gimple_ctypes._safe_name(_cls_method)}",
                 args)
-            return _cpp_call_ex(_sym, ['cls'] + list(args))
+            return ex_text(f"{_sym}(cls{', ' + ', '.join(args) if args else ''})")
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"cls.{_cls_method}(...): only a call to a real "
             "compiled classmethod/static method of the "
@@ -4403,8 +4403,8 @@ def _cpx_call_member(gen, e) -> Ex:
                 f"{_obj_struct}_{gimple_ctypes._safe_name(e.func.member)}",
                 args)
             if f"{_obj_struct}_{e.func.member}" in gen._static_methods:
-                return _cpp_call_ex(_sym, list(args))   # a staticmethod takes no receiver
-            return _cpp_call_ex(_sym, [e.func.obj.name] + list(args))
+                return ex_text(f"{_sym}({', '.join(args)})")   # a staticmethod takes no receiver
+            return ex_text(f"{_sym}({e.func.obj.name}{', ' + ', '.join(args) if args else ''})")
     # `SomeStruct.<method>(...)` — a CLASS-QUALIFIED method call,
     # where the receiver name is a known STRUCT NAME rather than a
     # value. The ordinary (non-coroutine) GIMPLE path has handled
@@ -4470,7 +4470,8 @@ def _cpx_call_member(gen, e) -> Ex:
             gen, _sym,
             f"{_cls_mangled}",
             args)
-        return _cpp_call_ex(_sym, ([_recv] + list(args)) if _recv is not None else list(args))
+        return ex_text(f"{_sym}({_recv}{', ' + ', '.join(args) if args else ''})" \
+            if _recv is not None else f"{_sym}({', '.join(args)})")
     # A member call on a MODULE-GLOBAL object whose member isn't a
     # statically-known function (os.py's `sys.audit(...)`,
     # compileall.py's `os.fspath(...)`, mimetypes.py's
@@ -4735,7 +4736,7 @@ def _cpx_call_member(gen, e) -> Ex:
         _dict_fn = {'copy': 'mojo_dict_copy', 'items': 'mojo_dict_items',
                     'keys': 'mojo_dict_keys',
                     'values': 'mojo_dict_values'}[e.func.member]
-        return _cpp_call_ex(_dict_fn, [_cpp_as('MojoDict *', gen._cpp_expr(e.func.obj))])
+        return ex_text(f"{_dict_fn}({_cpp_as('MojoDict *', gen._cpp_expr(e.func.obj))})")
     # `<self>.<opaque-field>.write(data)` / `.read()` / `.close()`
     # on a receiver whose resolved ctype is this model's opaque
     # int64_t box — mirror the ORDINARY GIMPLE path's own
