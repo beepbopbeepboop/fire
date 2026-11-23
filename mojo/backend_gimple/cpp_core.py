@@ -319,7 +319,7 @@ def _cpp_container_literal_init(gen, name: str, value_node, indent: str) -> list
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     "a nested dict/set literal has no representation as a "
                     "list element in this coroutine-body model")
-            boxed = _cpp_boxed_list_literal_expr(gen, value_node)
+            boxed = _cpp_boxed_list_literal_expr(gen, value_node).show()
             if elem_reg is not None:
                 elem_reg[name] = 'int64_t'
             return [_cpp_assign_line(name, boxed, indent)]
@@ -2541,7 +2541,7 @@ def _cpp_emit_generator_start_expr(gen, call, api) -> Ex:
     return _cpp_call_ex(f"{base}_start", cargs)
 
 
-def _cpp_boxed_list_literal_expr(gen, lit):
+def _cpp_boxed_list_literal_expr(gen, lit) -> Ex:
     """Build a `MojoList *` from a list/tuple LITERAL whose elements are NOT
     all one scalar type -- specifically the case where one or more elements
     is ITSELF a nested list/tuple literal (`stack = [(_fwalk_walk, (True,
@@ -2563,17 +2563,21 @@ def _cpp_boxed_list_literal_expr(gen, lit):
     this point, while one that pops-and-destructures still refuses later."""
     elems = lit.elements
     tmp = gen._cpp_fresh_name("_mg_box")
-    parts = [f"MojoList *{tmp} = mojo_list_new ();"]
+    parts = []
     for el in elems:
         if isinstance(el, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
-            child = _cpp_boxed_list_literal_expr(gen, el)
+            child = _cpp_boxed_list_literal_expr(gen, el).show()
             parts.append(f" mojo_list_append_int({tmp}, (int64_t)({child}));")
         elif isinstance(el, gimple_ctypes.StringLiteral):
             parts.append(f" mojo_list_append_str({tmp}, {gen._cpp_expr(el)});")
         else:
             parts.append(f" mojo_list_append_int({tmp}, (int64_t)({gen._cpp_expr(el)}));")
-    return (f"[&]() -> MojoList * {{ " + "".join(parts)
-            + f" return {tmp}; }}()")
+    lam = Ex('lambda')
+    lam.text = 'MojoList *'
+    lam.body = [_cpp_instr('decl', f"MojoList *{tmp} = mojo_list_new ()"),
+                _cpp_opaque("".join(parts).strip()),
+                _cpp_instr('return', ex_text(tmp))]
+    return lam
 
 
 def _cpp_is_struct_pointer_elem(gen, el) -> bool:
@@ -2642,11 +2646,11 @@ def _cpp_call_arg_expr(gen, a):
     C++), so it becomes a real MojoList* via `_cpp_list_literal_arg_expr`.
     Everything else is `_cpp_expr` unchanged."""
     if isinstance(a, gimple_ctypes.ListExpr):
-        return _cpp_list_literal_arg_expr(gen, a)
+        return _cpp_list_literal_arg_expr(gen, a).show()
     return gen._cpp_expr(a)
 
 
-def _cpp_list_literal_arg_expr(gen, lit):
+def _cpp_list_literal_arg_expr(gen, lit) -> Ex:
     """A list/tuple LITERAL at a call-argument position, as ONE MojoList*-
     valued C++ expression: `mojo_list_new ()` for the empty literal,
     otherwise an immediately-invoked lambda that constructs the list and
@@ -2666,7 +2670,7 @@ def _cpp_list_literal_arg_expr(gen, lit):
     own assignment RHS, which _cpp_container_literal_init already covers)."""
     elems = lit.elements
     if not elems:
-        return 'mojo_list_new ()'
+        return _as_ex('mojo_list_new ()')
     # A nested container literal as an element -> flat boxed representation
     # (see _cpp_boxed_list_literal_expr). So does a struct instance element
     # (`[Table(...)]`): it has no scalar accessor, and is stored as its boxed
@@ -2700,8 +2704,12 @@ def _cpp_list_literal_arg_expr(gen, lit):
     body = ''
     for _kk, _kv in kinds:
         body += f" {append_fn}({tmp}, {_kv});"
-    return (f"[&]() -> MojoList * {{ MojoList *{tmp} = mojo_list_new ();"
-            f"{body} return {tmp}; }}()")
+    lam = Ex('lambda')
+    lam.text = 'MojoList *'
+    lam.body = [_cpp_instr('decl', f"MojoList *{tmp} = mojo_list_new ()"),
+                _cpp_opaque(body.strip()),
+                _cpp_instr('return', ex_text(tmp))]
+    return lam
 
 
 def _cpp_instr(kind: str, rhs=None) -> Instr:
@@ -4288,7 +4296,7 @@ def _cpx_call_member(gen, e) -> Ex:
             # element of a list *literal*. Without this the generic
             # append branch below emitted `(char *)({3, 4})` -- a
             # raw C++ braced-init-list, invalid as a call argument.
-            _bl = _cpp_boxed_list_literal_expr(gen, e.args[0])
+            _bl = _cpp_boxed_list_literal_expr(gen, e.args[0]).show()
             _reg = getattr(gen, '_cpp_list_local_elem_types', None)
             if _reg is not None and _reg.get(_cont_name) is None:
                 _reg[_cont_name] = 'int64_t'
@@ -4681,7 +4689,7 @@ def _cpx_call_member(gen, e) -> Ex:
         # immediately-invoked-lambda convention already used for a
         # literal at a compiled-generator call-argument position.
         if isinstance(e.args[0], (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
-            _a0 = _cpp_list_literal_arg_expr(gen, e.args[0])
+            _a0 = _cpp_list_literal_arg_expr(gen, e.args[0]).show()
         else:
             _a0 = gen._cpp_expr(e.args[0])
         return (_cpp_cast_ex('char *', _cpp_call_ex('mojo_str_join', [f"(char *)({_obj_expr})", f"{_cpp_as('MojoList *', _a0)}"])))
@@ -6883,12 +6891,12 @@ def _cpp_expr_ex(gen, e):
     if isinstance(e, gimple_ctypes.SetExpr):
         return ex_text('{' + ', '.join(gen._cpp_expr(el) for el in e.elements) + '}')
     if isinstance(e, gimple_ctypes.ListExpr):
-        return ex_text(_cpp_list_literal_arg_expr(gen, e))
+        return _cpp_list_literal_arg_expr(gen, e)
     if isinstance(e, gimple_ctypes.TupleExpr):
         # A tuple value in this coroutine-body model is represented as a
         # MojoList* (boxed elements), the same runtime shape every other
         # tuple/list literal use in this emitter already assumes.
-        return ex_text(_cpp_list_literal_arg_expr(gen, e))
+        return _cpp_list_literal_arg_expr(gen, e)
     if isinstance(e, gimple_ctypes.WalrusExpr):
         # `x := expr` assigns x and yields the value
         name = e.name

@@ -786,3 +786,27 @@ inside the `sorted()` lambda.
 
 Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine programs;
 `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
+
+## Status 2026-11-23 (step 23): the list-literal lambdas are on the lambda shape
+
+- `_cpp_boxed_list_literal_expr` (a list or tuple literal whose elements are nested containers or struct
+  pointers): a declaration, the element statements (joined and trimmed, so the output is unchanged),
+  and `return`. It returns an `Ex`. Its nested recursion and its three text consumers (the assignment
+  printer, `_cpx_call_member`'s append path, and the nested element) take `.show()`.
+- `_cpp_list_literal_arg_expr` (a list literal at a call-argument position): the empty literal is an `Ex`
+  leaf; the nested case delegates to the boxed helper; the typed case is a lambda (declaration, the typed
+  `append` statements, `return`). It returns an `Ex`. `_cpp_call_arg_expr` (which feeds five text call-slot
+  sites) and the `_a0` site take `.show()` at that boundary; the two `ex_text` wrappers in the member and
+  identifier arms take the `Ex` directly.
+
+Empty literals are safe: the boxed helper always starts with its declaration, and the empty arg literal is
+`mojo_list_new ()` with no lambda.
+
+Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine programs.
+Coverage: the corpus has many list literals in assignments and nested tuples (the boxed path), but none that I
+found at a call-argument position, so the typed argument lambda is checked by the oracle only where it runs.
+
+Remaining text lambdas on the call paths: `_cpp_try_kwargs_forward_call`, and the comparator leaf inside the
+`sorted()` lambda.
+
+`test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
