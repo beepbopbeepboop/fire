@@ -378,6 +378,18 @@ def enqueue_proof_review(name, t, deleted):
             "build, never git stash. Finish with the REPORT block, naming which of TEST / NOTESTCASE / restored you chose, "
             "and a CONTROL-STATUS line."
             % (t["branch"], t["summary"][:150], ", ".join(deleted)))
+    if name.startswith("fix-proof-"):
+        # A repeat review. The first reviewer finished and was NOT accepted, and without being told so this one repeats it
+        # (2026-11-23: three reviewers in a row committed `NOTESTASE:`, each amending the last one's typo, until the depth
+        # cap fired; the landing check wants exactly `NOTESTCASE:` at the start of a line). Say what was seen and why it failed.
+        seen = C.git("log", "master.." + t["branch"], "--format=--- %h%n%B", check=False)[:3000]
+        task += ("\n\nTHIS IS A REPEAT REVIEW. A previous reviewer already finished on this branch and its result was NOT "
+                 "accepted: the commits below carry no changed test file, no line that begins exactly `NOTESTCASE:` "
+                 "(spelled N-O-T-E-S-T-C-A-S-E, a colon, then a non-empty reason, at the START of a line), and the doc(s) are "
+                 "not restored. Check the spelling of any marker below first. Do not amend: add a NEW commit, then confirm "
+                 "with `git log master..HEAD --format=%%B | grep -n '^NOTESTCASE:'`. If you cannot honestly name evidence "
+                 "that the bug is fixed, restore the doc instead; a doc that records an unresolved residual must be restored."
+                 "\nCommits on the branch that master lacks:\n" + seen)
     pname = C.free_task_name("fix-proof-" + name)
     C.cmd_enqueue(_ap.Namespace(name=pname, claim=t["claims"] or ["task:" + pname], task=task, task_file=None,
                                 file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls"),
