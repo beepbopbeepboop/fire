@@ -410,6 +410,15 @@ def main() -> int:
     text_cases.append((_p.show(), '(a + b)'))
     _u = _Ex('un'); _u.op = '!'; _u.a = _ex('x')
     text_cases.append((_u.show(), '!x'))
+    # A lambda with no return type, and an empty statement in a lambda body, which takes no separator.
+    from mojo.ir.instr import Instr as _Instr
+    _nol = _Ex('lambda'); _nol.body = [_Instr('decl')]
+    _nol.body[0].rhs = _ex('const int64_t v = 1')
+    _ret = _Instr('return'); _ret.rhs = _ex('v')
+    _nol.body.append(_ret)
+    _blank = _Instr('opaque'); _blank.text = ''
+    _nol.body.insert(1, _blank)
+    text_cases.append((_nol, '[&]() { const int64_t v = 1; return v; }()'))
     # The rethrow-pending lambda of a runtime raiser: the text it printed before it was an `Ex`.
     text_cases.append((_C._cpp_rethrow_pending('int64_t', 'mojo_none_unary_guard_pending((int64_t)(w), "-")'),
         '[&]() -> int64_t { int64_t _pr = mojo_none_unary_guard_pending((int64_t)(w), "-"); '
