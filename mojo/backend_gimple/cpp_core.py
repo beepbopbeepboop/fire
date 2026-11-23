@@ -43,7 +43,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.coro as coro_mod
-from mojo.ir.instr import Ex, ex_text
+from mojo.ir.instr import Ex, ex_bin, ex_text
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -3607,7 +3607,22 @@ def _cpx_lambda_expr(gen, e) -> str:
             f"([&]() -> int64_t {{ return (int64_t)({_body}); }}))")
 
 
-def _cpx_unary_op(gen, e) -> str:
+def _paren_ex(a: Ex) -> Ex:
+    """`(a)` as a `paren` Ex."""
+    e = Ex('paren')
+    e.a = a
+    return e
+
+
+def _un_ex(op: str, a: Ex) -> Ex:
+    """`op a` as a unary `un` Ex."""
+    e = Ex('un')
+    e.op = op
+    e.a = a
+    return e
+
+
+def _cpx_unary_op(gen, e) -> Ex:
     """`UnaryOp` in `_cpp_expr`.
 
     One arm of `_cpp_expr`, which tests the condition and calls this."""
@@ -3624,7 +3639,7 @@ def _cpx_unary_op(gen, e) -> str:
     if e.op == 'not':
         _not_ct = _cpp_expr_static_ctype(gen, e.operand)
         if gimple_ctypes.TypeLattice.is_cstr(_not_ct):
-            return f"(mojo_strlen((char *)({gen._cpp_expr(e.operand)})) == 0)"
+            return _paren_ex(ex_bin(_cpp_call_ex('mojo_strlen', [f"(char *)({gen._cpp_expr(e.operand)})"]), '==', ex_text('0')))
         # Likewise a container: an EMPTY list/dict/set is falsy, but it is
         # a valid non-NULL pointer, so a raw `!ptr` answered "not empty".
         if (_not_ct in ('MojoList *', 'MojoDict *', 'MojoSet *')
@@ -3637,9 +3652,9 @@ def _cpx_unary_op(gen, e) -> str:
                 # runtime's Python truthiness: `not (yield n)` is True for
                 # the None the consumer resumes it with.
                 or _cpp_is_tagged_word_expr(gen, e.operand)):
-            return (f"(!mojo_truthy_word((int64_t)(intptr_t)"
-                    f"({gen._cpp_expr(e.operand)})))")
-    return f"({op}{gen._cpp_expr(e.operand)})"
+            return _paren_ex(_un_ex('!', _cpp_call_ex('mojo_truthy_word',
+                    [f"(int64_t)(intptr_t)({gen._cpp_expr(e.operand)})"])))
+    return _paren_ex(_un_ex(op, ex_text(gen._cpp_expr(e.operand))))
 
 
 def _cpx_binary_op(gen, e) -> str:
@@ -6669,7 +6684,7 @@ def _cpp_expr_ex(gen, e):
     if isinstance(e, gimple_ctypes.LambdaExpr):
         return ex_text(_cpx_lambda_expr(gen, e))
     if isinstance(e, gimple_ctypes.UnaryOp):
-        return ex_text(_cpx_unary_op(gen, e))
+        return _cpx_unary_op(gen, e)
     if isinstance(e, gimple_ctypes.TernaryExpr):
         # `None if c else []` (Lib/os.py `_fwalk`'s `entries`): a list display
         # branch is a real `MojoList *` (a bare `{}` is not an expression), and

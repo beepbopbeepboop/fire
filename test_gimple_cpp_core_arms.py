@@ -57,7 +57,7 @@ TOOL = os.path.join(ROOT, 'tools', 'extract_arm.py')
 # line that could move, so the parent may only get shorter.
 # The expression arms still building C++ text (plan step 4 in the stage 6/7 doc).
 EXPR_ARMS_STILL_TEXT = {
-    '_cpx_unary_op', '_cpx_walrus', '_cpx_compare_chain',
+    '_cpx_walrus', '_cpx_compare_chain',
     '_cpx_ident_expr', '_cpx_subscript_expr', '_cpx_lambda_expr', '_cpx_binary_op',
     '_cpx_member_expr', '_cpx_await_expr', '_cpx_call_expr',
 }
@@ -219,6 +219,25 @@ def main() -> int:
         n = _N.SliceExpr(obj=obj, start=start, stop=stop, step=step)
         return _C._cpx_slice_expr(_StubGen(decl), n).show()
 
+    # The unary arm, through a stub: the strlen and truthy branches of `not`, and the
+    # plain operator. Expected strings are HEAD's arm output for the same stub.
+    class _UGen(_StubGen):
+        def __init__(self, decl, params=()):
+            super().__init__(decl)
+            self._cpp_param_names = params
+            self._cpp_none_guards = {}
+        def _cpp_expr_ex(self, n):
+            return _C._cpp_expr_ex(self, n)
+
+    def _unary(op, decl, params=()):
+        return _C._cpx_unary_op(_UGen(decl, params), _N.UnaryOp(op=op, operand=_N.IdentExpr(name='x'))).show()
+
+    text_cases.append((_unary('not', {'x': 'char *'}), '(mojo_strlen((char *)(x)) == 0)'))
+    text_cases.append((_unary('not', {'x': 'MojoList *'}), '(!mojo_truthy_word((int64_t)(intptr_t)(x)))'))
+    text_cases.append((_unary('not', {'x': 'int64_t'}, ('x',)), '(!mojo_truthy_word((int64_t)(intptr_t)(x)))'))
+    text_cases.append((_unary('not', {'x': 'int64_t'}), '(!x)'))
+    text_cases.append((_unary('~', {'x': 'int64_t'}), '(~x)'))
+    text_cases.append((_unary('-', {'x': 'MojoList *'}), '(-x)'))
     _xs = _N.IdentExpr(name='xs')
     _ints = lambda v: _N.IntLiteral(value=v)
     _lst = _slice({'xs': 'MojoList *'}, _xs, _ints(1), _ints(4), _ints(2))
