@@ -5822,7 +5822,7 @@ def _step_facts(w: int, idx: int) -> tuple:
     image-read ones below took it to 247 and moved the file's memory wall
     hundreds of lines later.  `decide` reduces the same closed proposition
     without a compiler process.  (The remaining wall is the machine half's
-    2^6 path certificates -- see `bugs/mid/FORMAL_eval_eq_mojo_bridge_red_on_head.md`.)
+    2^6 path certificates -- see `bugs/hard/FORMAL_eval_eq_mojo_bridge_red_on_head.md`.)
     """
     facts = []
     for j, (mask, b) in enumerate(_STEP_CONDS):
