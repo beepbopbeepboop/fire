@@ -544,3 +544,24 @@ stub input; their call text is pinned on the helper, not through the arm. (2) `t
 (2 passed, 1 failed) with 73 GCC errors, identical on HEAD (checked in a detached worktree; error sets equal
 after stripping the path). It predates this work and is not fixed here; it is the owner's gate. (3) The
 oracle reaches most arms but not every branch, which is why each migration carries a direct check.
+
+## Status 2026-11-22 (step 13): the last expression printers
+
+`0843cb5fa` ports `_cpx_call_callexpr` (129 lines, four returns) to `call` shapes; `_cpp_call_ex` now accepts
+`Ex` arguments. Its parent `_cpx_call_expr` takes the child's text with `.show()` until it is ported.
+
+**What is left in the expression printers:** `_cpx_call_member` (771 lines, 64 returns), `_cpx_call_ident`
+(1,231 lines, 58 returns), and the parent `_cpx_call_expr` (which only dispatches to the three children now).
+`EXPR_ARMS_STILL_TEXT` in `test_gimple_cpp_core_arms.py` names them.
+
+**Plan for the next round.** Do not port the 122 returns as one batch. Classify each return first, with a
+script that reads the AST and prints: callee name and whether the return is a plain f-string call (`call`
+shape), a `field`/`index` access, a `(a op b)` (`paren(bin)`), or a multi-line helper (text leaf). Port the
+call-shaped returns with the exact-count rewrites used for the subscript and binary arms; leave the multi-line
+helpers as `ex_text` leaves and say so in the commit. Then port the parent, which dispatches to the children
+through `.show()`, and remove the `.show()`. Each batch keeps the same proof: a stub or `GimpleGen`-based
+comparison against HEAD for the branches it reaches, the arm test, `c_oracle check --base HEAD`, and the
+`compile_stdlib.py` verdict.
+
+**Known from this round.** The `(c_ret)(call)` and double-return branches of the callee arm are not reached by
+any input built here; they share the call builder with the reached branch, so they are verified by reading.
