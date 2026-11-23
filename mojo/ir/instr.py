@@ -71,6 +71,9 @@ class Ex:
             return '*' + self.a.show()
         if k == 'un':
             return self.op + self.a.show()
+        if k == 'paren':
+            # A parenthesized operand: `(a)`.
+            return '(' + self.a.show() + ')'
         if k == 'cast':
             return '(' + self.ty.name + ')' + self.a.show()
         if k == 'call':

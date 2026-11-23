@@ -189,6 +189,11 @@ def main() -> int:
         (_C._cpp_ir_line('  ', 'if', 'c'), '  if (c) {'),
         (_C._cpp_call_line('  ', 'mojo_exc_pending_set', ['0']), '  mojo_exc_pending_set(0);'),
     ]
+    from mojo.ir.instr import Ex as _Ex
+    _p = _Ex('paren'); _p.a = _ex('a + b')
+    text_cases.append((_p.show(), '(a + b)'))
+    _u = _Ex('un'); _u.op = '!'; _u.a = _ex('x')
+    text_cases.append((_u.show(), '!x'))
     for got, want in text_cases:
         if got != want:
             failures.append(f'IR helper text: got {got!r}, want {want!r}')
