@@ -410,6 +410,45 @@ class TestBridgeSimpset(unittest.TestCase):
             f"certificate is emitted that no advance cites, or an advance "
             f"has no certificate to cite")
 
+    def test_the_block_prefix_is_not_reproved_per_self(self):
+        """Each `…_self{k}` cites its predecessor's facts by name, nothing more.
+
+        `self{k}` is `arm64_runs … k = some (qS{k} st)`, and its proof is the
+        prefix `self{k-1}` plus the ONE step `k-1`.  The earlier emission put
+        every earlier step's `hpc`/`hs` fact inside `self{k}` (2k `have` lines
+        for `self{k}`), so a block of length m re-elaborated about m^2 step
+        facts.  Now every step is one named theorem (`<S>_hpc{k}`,
+        `<S>_hs{k}`), each citing only its predecessor, and a self theorem
+        cites exactly the pair for the step before it.
+        """
+        text = _read(self.proofs["bigbody"])
+        n = 0
+        for m in re.finditer(r"^theorem (\w+)_self(\d+) [\s\S]*?"
+                             r"(?=^theorem |^def |\Z)", text, re.M):
+            S, k, body = m.group(1), int(m.group(2)), m.group(0)
+            n += 1
+            with self.subTest(theorem=f"{S}_self{k}"):
+                inline = re.findall(r"^  have (?:hs|hpc)\d+ ", body, re.M)
+                self.assertLessEqual(
+                    len(inline), 2,
+                    f"`{S}_self{k}` carries {len(inline)} step facts inline: "
+                    f"the prefix is being re-proved, not cited by name")
+                prev = k - 1
+                # Step 0 needs only its `hs`; every later step's `self` also
+                # cites the `hpc` its step's pc side condition reads.
+                cites = [f"have hs{prev} := {S}_hs{prev} st hpc"]
+                if prev > 0:
+                    cites.insert(0, f"have hpc{prev} := {S}_hpc{prev} st hpc")
+                for c in cites:
+                    self.assertIn(c, body,
+                                  f"`{S}_self{k}` does not cite its "
+                                  f"predecessor's fact by name: `{c}`")
+                    fact = c.split(" := ")[1].split()[0]
+                    self.assertIsNotNone(
+                        re.search(rf"^theorem {re.escape(fact)} ", text, re.M),
+                        f"`{fact}` is cited but never stated as a theorem")
+        self.assertGreater(n, 0, "no `…_self{k}` theorems generated")
+
 
 class TestBridgeTypechecks(unittest.TestCase):
     """The bridge must actually close, with no hole left behind."""
