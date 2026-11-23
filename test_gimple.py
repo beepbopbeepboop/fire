@@ -10419,15 +10419,22 @@ each("de")
         print(f"PASS  {name}")
         _PASS += 1
 
-    def test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses():
-        """The per-kind clone pass takes only LITERAL arguments. A str passed
-        to an iterated parameter through a variable, beside a list literal,
-        is still the mixed case the clone pass does not cover, and must keep
-        the compile-time refusal rather than a binary that reads the str as a
-        list. The caller here is a function, where the binding is seen.
+    def test_a_mixed_iterated_parameter_with_a_str_variable_runs_correctly():
+        """An UNANNOTATED parameter iterated in the body (`for x in xs:`) and
+        called with BOTH a list literal and a string is typed the kind-neutral
+        `int64_t` word, not the `MojoList *` guess, so the loop takes the
+        runtime word-dispatch arm (`mojo_iter_boxed_list`): a list iterates its
+        elements and a string its one-character strings. The mixed caller
+        therefore RUNS correctly. Before this fix the definer's body-only
+        inference committed the `MojoList *` guess and the loop read the string
+        as a list (a SIGSEGV), so this shape — the one the per-kind clone pass
+        does not cover, because it takes only LITERAL arguments and a str
+        through a variable is not a literal — was refused at compile time. The
+        refusal is obsolete now that the word dispatch answers both kinds at
+        run time; the caller here is a function, where the binding is seen.
         """
         global _PASS, _FAIL
-        name = "a_mixed_iterated_parameter_with_a_str_variable_still_refuses"
+        name = "a_mixed_iterated_parameter_with_a_str_variable_runs_correctly"
         src = '''\
 def each(xs):
     for x in xs:
@@ -10438,37 +10445,31 @@ def main():
     each(ys)
 main()
 '''
-        for mode in ('single-TU', 'link-mode'):
-            kwargs = ({'do_imports': True} if mode == 'single-TU'
-                      else {'link_mode': True})
-            try:
-                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
-            except RuntimeError as e:
-                msg = str(e)
-                if "'xs'" in msg and "'each'" in msg:
-                    continue
-                print(f"FAIL  {name} [{mode}]: refused, but not for the "
-                      f"mixed parameter: {msg[:300]}")
-                _FAIL += 1
-                return
-            print(f"FAIL  {name} [{mode}]: compiled, so the binary would read "
-                  "the str as a list (SIGSEGV)")
+        want = cpython_stdout(src)
+        got, _c_src, err = program_stdout(src)
+        if err or got != want:
+            print(f"FAIL  {name}: {err or 'printed ' + repr(got) + ' != ' + repr(want)}")
             _FAIL += 1
             return
         print(f"PASS  {name}")
         _PASS += 1
 
-    def test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses():
-        """Module-level version of the mixed iterated parameter test. A str passed
-        to an iterated parameter through a module-level variable, beside a list
-        literal, must still be refused rather than compiled to a binary that
-        reads the str as a list (SIGSEGV). The module-level caller slips
-        through because `_inferred_var_types` has no binding for a module-level
-        name, so `_arg_scalar_type` (consulted by `_is_noncontainer_arg`) did
-        not see the `char *` answer for a module-level str variable.
+    def test_module_level_mixed_iterated_parameter_with_str_variable_runs_correctly():
+        """Module-level version of the mixed iterated parameter case. A str
+        passed to an iterated parameter through a module-level variable, beside
+        a list literal, RUNS correctly: the parameter is the kind-neutral word
+        and the loop's runtime word-dispatch iterates a list its elements and a
+        string its characters. Before this fix the definer's `MojoList *` guess
+        made the loop read the string as a list (a SIGSEGV), so this shape was
+        refused — the module-level caller had slipped past the clone pass
+        because `_inferred_var_types` has no binding for a module-level name, so
+        `_arg_scalar_type` (consulted by `_is_noncontainer_arg`) never saw the
+        `char *` answer for the module-level str variable. The word dispatch
+        makes that distinction moot: the kind is decided at run time, not by a
+        call-site binding the inference could or could not see.
         """
         global _PASS, _FAIL
-        name = "test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses"
+        name = "test_module_level_mixed_iterated_parameter_with_str_variable_runs_correctly"
         src = '''\
 def each(xs):
     for x in xs:
@@ -10477,22 +10478,10 @@ ys = "de"
 each([4, 5])
 each(ys)
 '''
-
-        for mode in ('single-TU', 'link-mode'):
-            kwargs = ({'do_imports': True} if mode == 'single-TU'
-                      else {'link_mode': True})
-            try:
-                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
-            except RuntimeError as e:
-                msg = str(e)
-                if "'xs'" in msg and "'each'" in msg:
-                    continue
-                print(f"FAIL  {name} [{mode}]: refused, but not for the "
-                      f"mixed parameter: {msg[:300]}")
-                _FAIL += 1
-                return
-            print(f"FAIL  {name} [{mode}]: compiled, so the binary would read "
-                  "the str as a list (SIGSEGV)")
+        want = cpython_stdout(src)
+        got, _c_src, err = program_stdout(src)
+        if err or got != want:
+            print(f"FAIL  {name}: {err or 'printed ' + repr(got) + ' != ' + repr(want)}")
             _FAIL += 1
             return
         print(f"PASS  {name}")
@@ -10534,14 +10523,19 @@ def via_tuple(fn, is_method):
         print(f"PASS  {name}")
         _PASS += 1
 
-    def test_a_str_returned_in_a_tuple_slot_still_refuses_beside_a_list():
-        """The counterpart: `s, n = pair()` where `pair` returns a str literal
-        in slot 0, passed to an iterated parameter beside a list literal, must
-        keep the mixed-container refusal. The tuple-slot exemption applies only
-        to a slot the callee proves is a container.
+    def test_a_str_returned_in_a_tuple_slot_runs_correctly_beside_a_list():
+        """`s, n = pair()` where `pair` returns a str literal in slot 0, passed
+        to an iterated parameter beside a list literal, RUNS correctly: the
+        parameter is the kind-neutral word and the loop's runtime word-dispatch
+        iterates the string its one-character strings and the list its
+        elements. Before this fix the definer's `MojoList *` guess made the
+        loop read the string as a list (a SIGSEGV), so this shape was refused —
+        the tuple-slot exemption applied only to a slot the callee proves is a
+        container, and a str slot was the mixed case that did not qualify. The
+        word dispatch decides the kind at run time, so the str slot now runs.
         """
         global _PASS, _FAIL
-        name = "a_str_returned_in_a_tuple_slot_still_refuses_beside_a_list"
+        name = "a_str_returned_in_a_tuple_slot_runs_correctly_beside_a_list"
         src = '''\
 def pair():
     return "de", 1
@@ -10554,21 +10548,10 @@ def main():
     each([4, 5])
 main()
 '''
-        for mode in ('single-TU', 'link-mode'):
-            kwargs = ({'do_imports': True} if mode == 'single-TU'
-                      else {'link_mode': True})
-            try:
-                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
-            except RuntimeError as e:
-                msg = str(e)
-                if "'xs'" in msg and "'each'" in msg:
-                    continue
-                print(f"FAIL  {name} [{mode}]: refused, but not for the "
-                      f"mixed parameter: {msg[:300]}")
-                _FAIL += 1
-                return
-            print(f"FAIL  {name} [{mode}]: compiled, so the binary would read "
-                  "the str as a list (SIGSEGV)")
+        want = cpython_stdout(src)
+        got, _c_src, err = program_stdout(src)
+        if err or got != want:
+            print(f"FAIL  {name}: {err or 'printed ' + repr(got) + ' != ' + repr(want)}")
             _FAIL += 1
             return
         print(f"PASS  {name}")
@@ -15535,10 +15518,10 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements(), 'test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements')
     _run_isolated(lambda: test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list(), 'test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list')
     _run_isolated(lambda: test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind(), 'test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind')
-    _run_isolated(lambda: test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses(), 'test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses')
-    _run_isolated(lambda: test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses(), 'test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses')
+    _run_isolated(lambda: test_a_mixed_iterated_parameter_with_a_str_variable_runs_correctly(), 'test_a_mixed_iterated_parameter_with_a_str_variable_runs_correctly')
+    _run_isolated(lambda: test_module_level_mixed_iterated_parameter_with_str_variable_runs_correctly(), 'test_module_level_mixed_iterated_parameter_with_str_variable_runs_correctly')
     _run_isolated(lambda: test_a_list_returned_in_a_tuple_slot_is_not_a_mixed_str_observation(), 'test_a_list_returned_in_a_tuple_slot_is_not_a_mixed_str_observation')
-    _run_isolated(lambda: test_a_str_returned_in_a_tuple_slot_still_refuses_beside_a_list(), 'test_a_str_returned_in_a_tuple_slot_still_refuses_beside_a_list')
+    _run_isolated(lambda: test_a_str_returned_in_a_tuple_slot_runs_correctly_beside_a_list(), 'test_a_str_returned_in_a_tuple_slot_runs_correctly_beside_a_list')
     _run_isolated(lambda: test_a_returned_heterogeneous_list_keeps_its_slot_kinds(), 'test_a_returned_heterogeneous_list_keeps_its_slot_kinds (line 12721)')
     _run_isolated(lambda: test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not(), 'test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (line 12722)')
     _run_isolated(lambda: test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable(), 'test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable (line 12723)')

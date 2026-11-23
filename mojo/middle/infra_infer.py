@@ -1517,11 +1517,35 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                                 or pname in getattr(func, '_ptr_forwarded', ())):
                             _os_path_arg = True
                         _fallback = 'MojoList *'
-                        inferred[pname] = (_returned_param_containers(func)
-                                          .get(pname)
-                                          or _rebound_param_containers(gen, func)
-                                          .get(pname)
-                                          or ('char *' if _os_path_arg else _fallback))
+                        if not is_subscripted:
+                            # ITERATION-ONLY evidence (`for x in param:` with no
+                            # subscript anywhere) pins no container kind, and
+                            # the runtime kind is a caller-side fact, not a
+                            # body-side one: a SEPARATELY compiled definer
+                            # (`compile_module_to_c`, one instance per file)
+                            # never sees the call site, so the `MojoList *`
+                            # guess would commit a static list loop for a
+                            # parameter the caller fills with a string — a
+                            # SIGSEGV in the list accessors, plus a mangled
+                            # suffix the caller's own view cannot match
+                            # soundly (CODEGEN_separate_compile_definer_
+                            # signature_hash). Leaving the slot UNWRITTEN keeps
+                            # it the generic `int64_t` word: the loop takes
+                            # the runtime dispatch (emit_loops' word branch —
+                            # list / dict keys / set / str / bytes decided at
+                            # run time) and the committed signature is the
+                            # kind-neutral word every caller hashes identically.
+                            # The SUBSCRIPT case keeps the list guess unchanged:
+                            # an int-keyed `param[0]` is what this runtime's
+                            # subscript lowering defaults to.
+                            _fallback = None
+                        _anchor = (_returned_param_containers(func)
+                                   .get(pname)
+                                   or _rebound_param_containers(gen, func)
+                                   .get(pname)
+                                   or ('char *' if _os_path_arg else None))
+                        if _anchor is not None or _fallback is not None:
+                            inferred[pname] = _anchor or _fallback
 
             # If not subscripted, try to infer from function calls
             elif function_calls:

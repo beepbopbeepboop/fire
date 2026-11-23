@@ -227,6 +227,35 @@ CASES = {
         {'helper.py': 'class Widget:\n    pass\n',
          'main.py': 'import helper as h\nW = h.Widget\nprint(21)\n'},
         'main', '21\n', False),
+    # An UNANNOTATED parameter the definer types from its OWN body (`p` is a
+    # list: `for c in p`) called with a differently inferred value (a string
+    # literal). Each module compiles in its own GimpleGen, so the definer's
+    # committed `_home_def_param_types` entry (suffix of the emitted
+    # `helper_f_815e8f (MojoList * p)`) used to die with its instance and the
+    # importer hashed its OWN view of the parameter list (int64_t default) —
+    # `undefined symbol _helper_f_9f63a2` at link. The definer's committed
+    # signature is now published to the process-wide registry the export
+    # resolution reads, so the call names the symbol the definition emits.
+    'call_unannotated_param_definer_types_from_body': (
+        {'helper.py': ('def f(p):\n'
+                       '    for c in p:\n'
+                       '        pass\n'
+                       '    return 42\n'),
+         'main.py': 'import helper as h\nprint(h.f("abc"))\n'},
+        'main', '42\n', False),
+    # The same definer reached through the BARE spelling `from helper import
+    # f`: the call's suffix comes from `_imported_def_pts`'s tier order rather
+    # than `module_member_function_csym`, but the same committed signature
+    # must win over the importer's registration-time snapshot, and the extern
+    # prototype the preamble rebuilds from `_effective_param_types` must say
+    # `MojoList *`, the type the definition emits.
+    'from_import_unannotated_param_definer_types_from_body': (
+        {'helper.py': ('def f(p):\n'
+                       '    for c in p:\n'
+                       '        pass\n'
+                       '    return 42\n'),
+         'main.py': 'from helper import f\nprint(f("abc"))\n'},
+        'main', '42\n', False),
 }
 
 

@@ -60,7 +60,7 @@ from mojo.middle.funcs_shared import *  # noqa: F401,F403
 from mojo.middle.funcs_shared import (
     _SELFHOST_EXTRA_FIELD_CACHE, _as_dict, _as_funcdef_node, _as_str, _as_structdef_node, _find_generic_source,
     _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _module_attr_module, _note_struct_attr_alias, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
-    _home_signature_ctypes, _param_ctype, _parsed_import, _reexported_defining_qualifier, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
+    _home_signature_ctypes, _param_ctype, _parsed_import, _published_def_pts, _reexported_defining_qualifier, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
     _ris_collect, _scan_from_imports_flat, _selfhost_begin_compile, _selfhost_extracted_fn_index, _selfhost_files_key, _selfhost_gen_self_param_ctype, _selfhost_parsed_source, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
 )
@@ -2699,6 +2699,23 @@ def _imported_def_pts(gen, bare_name: str) -> list | None:
             pts = _def_store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
+        # A SEPARATELY compiled definer committed its signature into ITS OWN
+        # instance's store, which this gen never sees; its compile published
+        # it to the process-wide registry keyed by the definer's source file
+        # (`_published_def_pts`, same helper `_definer_committed_pts` uses
+        # for the module-member spelling). It outranks the registration-time
+        # snapshot below for the same reason the in-instance store does: it
+        # is the signature the emitted definition symbol was hashed from,
+        # while the snapshot is this importer's own view of the same
+        # FunctionDef (`_home_signature_ctypes`), which for an unannotated
+        # parameter can freeze a different type and hash a different suffix
+        # (the per-file `undefined symbol _helper_f_9f63a2` against the
+        # definition's `helper_f_815e8f`). `q` is the UNsanitized ref
+        # `_parsed_import` opens — the sanitizer is a display rule for the
+        # store keys, not part of file resolution.
+        pts = _published_def_pts(gen, q, bare_name)
+        if pts is not None:
+            return pts
         if store:
             pts = store.get(_pair_key(_sq, bare_name))
             if pts is not None:

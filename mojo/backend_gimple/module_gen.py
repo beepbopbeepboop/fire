@@ -14193,8 +14193,28 @@ def _gmp_emit_toplevel_function(self, func_parts: list[str], has_toplevel_code: 
                 func_parts.append("}")
                 func_parts.append('')
             init_fn = _module_init_name(self.module_name)
+            # Register THIS module's string-literal pool before its own
+            # top-level runs, NOT by relying on constructor ordering: in a
+            # per-file build (no `main()`; the harness supplies its own empty
+            # one) the module's top-level executes from THIS constructor, and
+            # constructors fire in file position — this `<mod>_toplevel_ctor`
+            # is emitted (in func_parts) BEFORE the `_mojo_register_str_pool`
+            # constructor (emitted after func_parts), so a top-level statement
+            # that dispatches a boxed string (`mojo_boxed_is_str`, the
+            # word-iteration arm of `for x in p:`) ran against an EMPTY pool
+            # and raised `TypeError: ... is not iterable` though the identical
+            # single-TU inline build (a real `main()` calling `_toplevel()`
+            # after every constructor) printed the right answer. The
+            # registration is idempotent (`_pr_add` early-returns a pointer
+            # already present), so the startup constructor that still runs is
+            # a harmless no-op. The forward declaration is emitted in the
+            # early decl block (`_gmp_emit_str_pool_registration`'s twin below)
+            # so this use of the still-undefined symbol is valid C.
             func_parts.append(f"__attribute__((constructor)) static void {sub_fn}_ctor (void)")
             func_parts.append("{")
+            if (hasattr(self, '_str_pool') and self._str_pool
+                    and self.emit_str_pool):
+                func_parts.append("  _mojo_register_str_pool ();")
             func_parts.append(f"  {sub_fn} ();")
             func_parts.append("}")
             func_parts.append('')
@@ -23173,6 +23193,22 @@ def gen_module_impl(self, stmts: list):
         parts.append("static MojoDict * _mojo_dispatch_asdict (void *);")
     parts.append("static int _mojo_dispatch_is_dataclass (void *);")
     parts.append("static int64_t _mojo_dispatch_shallow_copy (void *);")
+    # Forward declaration for the string-pool registration the per-file
+    # toplevel constructor calls FIRST (see `_gmp_emit_toplevel_function`):
+    # the registration is DEFINED after func_parts (so the constructor, which
+    # is in func_parts, sees this declaration first) and must be declared
+    # before that use or GCC implicitly declares it `int()`. Emitted in this
+    # early decl block — NOT next to the definition — so a generated-C reader
+    # walking a prototype to the next `}` stops at a real function body here,
+    # never at the registration constructor's `}` (see
+    # `_gmp_emit_str_pool_registration`'s placement note). Only emitted for a
+    # per-file module that both calls it (non-empty pool, emits the pool) —
+    # the identical guard to the call site, so the declaration is never orphan
+    # and the output is byte-stable across the bootstrap stages.
+    if (not self.emit_entry_points and not self.do_imports
+            and hasattr(self, '_str_pool') and self._str_pool
+            and self.emit_str_pool):
+        parts.append("static void _mojo_register_str_pool (void);")
     # The ungated path needs all cluster declarations that may be called
     # directly. `_mojo_repr_set` is named directly by `repr(<set>)` call sites
     # (emit_infra/emit_resolve lower it to `_mojo_repr_set`), so without a
@@ -23521,6 +23557,25 @@ def gen_module_impl(self, stmts: list):
         raise
     if result is None:
         raise RuntimeError("module generation failed")
+    # Publish this module's committed DEFINITION-side free-function signatures
+    # to the process-wide registry a SEPARATELY compiled importer (its own
+    # GimpleGen instance, do_imports=False — the `compile_module_to_c` per-file
+    # and `fire dylib` shapes) reads through `_published_def_pts`, because
+    # this instance's `_home_def_param_types` store dies with it and the
+    # importer's own view of an unannotated parameter hashes a different
+    # overload suffix than the definition emitted (the per-file `undefined
+    # symbol _helper_f_9f63a2` against the definition's `helper_f_815e8f`;
+    # see `funcs_shared._PUBLISHED_DEF_PTS` for the registry and the
+    # qualifier-spelling drift the path keying avoids). After `result` is
+    # known good, so a refused compile publishes nothing; the try/except keeps
+    # the cache from ever failing the artifact it caches for. In a do_imports
+    # compile this republishes what the shared instance store already holds
+    # (a strict subset — see the publisher's docstring), so the inline shape
+    # answers from tier 0 as before.
+    try:
+        funcs_shared.publish_definer_committed_pts(self)
+    except Exception:
+        pass
     return result
 
 def __getattr__(name):
