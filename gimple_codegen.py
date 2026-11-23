@@ -5682,6 +5682,8 @@ class GimpleGen:
         return gcc_._cpp_try_unpack_call(self, e)
     def _cpp_expr(self, e) -> str:
         return gcc_._cpp_expr(self, e)
+    def _cpp_expr_ex(self, e):
+        return gcc_._cpp_expr_ex(self, e)
     def _cpp_yield_tuple(self, tup: 'TupleExpr', declared: dict, indent: str) -> list[str]:
         return gcc_._cpp_yield_tuple(self, tup, declared, indent)
     def _cpp_hoist_walrus_decls(self, expr, declared: dict, indent: str) -> list[str]:
