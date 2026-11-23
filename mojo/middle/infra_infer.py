@@ -1538,7 +1538,12 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                             # The SUBSCRIPT case keeps the list guess unchanged:
                             # an int-keyed `param[0]` is what this runtime's
                             # subscript lowering defaults to.
-                            _fallback = None
+                            if not is_subscripted and not (getattr(gen, 'do_imports', True)
+                                                           or getattr(gen, 'link_imports', False)):
+                                # ITERATION-ONLY evidence pins no container kind;
+                                # leaving the slot UNWRITTEN keeps it the generic
+                                # int64_t word and the runtime dispatch decides.
+                                _fallback = None
                         _anchor = (_returned_param_containers(func)
                                    .get(pname)
                                    or _rebound_param_containers(gen, func)
