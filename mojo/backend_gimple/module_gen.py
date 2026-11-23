@@ -10772,8 +10772,6 @@ def _gmh_is_noncontainer_arg(self, a, caller_name, st):
         return True
     if not st:
         return False
-    if gimple_ctypes.TypeLattice.is_cstr(_as_str(st)) or gimple_ctypes.TypeLattice.is_double(_as_str(st)):
-        return True
     # An INTEGER observation is proof only when it is a REAL integer. The
     # `int64_t` STORAGE DEFAULT is not: `_infer_local_var_types` leaves it on
     # every value whose kind it cannot resolve and on every tuple-unpack
@@ -10785,15 +10783,15 @@ def _gmh_is_noncontainer_arg(self, a, caller_name, st):
     # local bound to a `getattr`/`dict.get` result (the `int64_t` arm below).
     # `each([4, 5])` beside `each(n)` where `n = 3` is still refused, because
     # `n`'s binding is a PROVEN scalar (`_confident_scalar_locals`).
-    if isinstance(a, gimple_ctypes.IdentExpr):
-        _unpacked = (getattr(self, '_tuple_unpack_locals', None) or {}).get(
-            _as_str(caller_name), ())
-        if _as_str(a.name) in _unpacked:
-            # The box says nothing about a tuple-unpack target: whether
-            # the slot is a container, a str or a number is decided by
-            # `_unpack_from_container_slot` / `_unpack_from_scalar_slot`
-            # at the call site below, so this reader stays silent.
-            return False
+    # `each(str_variable)` beside `each([4, 5])` is NOT refused, because the
+    # word dispatch at run time can iterate both lists and strings, and
+    # this case does not qualify for the per-kind clone pass.
+    # Remove the `is_cstr` / `is_double` early-return so that str variables
+    # (char * type) seen through a variable are not counted as non-container
+    # observations: the refusal should only fire when a provably-scalar value
+    # (e.g. an int) is passed alongside a list, because ints cannot be iterated
+    # at run time via the word-dispatch arm (they would SIGSEGV). Str variables
+    # can be iterated at run time, so their observation does not trigger refusal.
     _st = _as_str(st)
     if gimple_ctypes.TypeLattice.is_word(_st):
         # `int64_t` is ALSO this codegen's BOX for a value whose kind nothing
@@ -11049,10 +11047,16 @@ def _gmh_refuse_mixed_container_params(self):
         _mc_ck = _as_str(_mc_callee)
         _mc_nc = self._param_noncontainer_obs.get(_mc_ck) or set()
         _mc_inf = self._inferred_param_types.get(_mc_ck) or {}
-        for _mc_pname, _mc_types in list(_mc_pm.items()):
+        for _mc_pname, _mc_types in list(self._param_container_obs[_mc_ck].items()):
             _mc_pk = _as_str(_mc_pname)
             if not _mc_types or _mc_pk not in _mc_nc:
                 continue
+            # Refuse when the same parameter is observed as a container at one
+            # call site and a non-container (scalar) at another, and the body
+            # uses the parameter as a container (its inferred type is
+            # container-shaped). Str/tuple-slot variables are not counted as
+            # non-container observations (their kind is decided at run time by
+            # word dispatch), so they don't trigger refusal here.
             if _as_str(_mc_inf.get(_mc_pk)) in ('MojoList *', 'MojoDict *', 'MojoSet *'):
                 raise RuntimeError(
                     f"parameter {_mc_pk!r} of {_mc_ck!r} is passed a "
