@@ -3814,8 +3814,7 @@ def _cpx_binary_op(gen, e) -> Ex:
             # String concatenation: do not install numeric None-arith
             # guards, which would force tagged-word string operands
             # through an int64_t path and lose char* conversions.
-            return (ex_text(f"mojo_str_cat((char *)({gen._cpp_expr(e.left)}), "
-                    f"(char *)({gen._cpp_expr(e.right)}))"))
+            return (_cpp_call_ex('mojo_str_cat', [f"(char *)({gen._cpp_expr(e.left)})", f"(char *)({gen._cpp_expr(e.right)})"]))
         # `word + "literal"` / `"literal" + word`: Python's `+` with a str
         # on one side can only be concatenation (int + str is a TypeError),
         # so an unsolved word (a parameter OR a local, e.g. the boxed word a
@@ -3830,12 +3829,10 @@ def _cpx_binary_op(gen, e) -> Ex:
             # two unsolved words, one of which the body uses as a string
             # (sliced / str-method receiver): `int + str` is a TypeError, so
             # this `+` is a concatenation (`toppath + name`, os.fwalk).
-            return (ex_text(f"mojo_str_cat((char *)(intptr_t)({gen._cpp_expr(e.left)}), "
-                    f"(char *)(intptr_t)({gen._cpp_expr(e.right)}))"))
+            return (_cpp_call_ex('mojo_str_cat', [f"(char *)(intptr_t)({gen._cpp_expr(e.left)})", f"(char *)(intptr_t)({gen._cpp_expr(e.right)})"]))
         if ((isinstance(e.right, gimple_ctypes.StringLiteral) and _is_word_ident(e.left))
                 or (isinstance(e.left, gimple_ctypes.StringLiteral) and _is_word_ident(e.right))):
-            return (ex_text(f"mojo_str_cat((char *)(intptr_t)({gen._cpp_expr(e.left)}), "
-                    f"(char *)(intptr_t)({gen._cpp_expr(e.right)}))"))
+            return (_cpp_call_ex('mojo_str_cat', [f"(char *)(intptr_t)({gen._cpp_expr(e.left)})", f"(char *)(intptr_t)({gen._cpp_expr(e.right)})"]))
         _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
         _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
     elif e.op == '*':
@@ -3850,11 +3847,9 @@ def _cpx_binary_op(gen, e) -> Ex:
         # Falls through to the plain `*` below for a genuinely
         # all-numeric multiply (the overwhelmingly common case).
         if _cpp_is_str_expr(gen, e.left) and not _cpp_is_str_expr(gen, e.right):
-            return (ex_text(f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.left)}), "
-                    f"(int64_t)({gen._cpp_expr(e.right)}))"))
+            return (_cpp_call_ex('mojo_cstr_repeat', [f"(char *)({gen._cpp_expr(e.left)})", f"(int64_t)({gen._cpp_expr(e.right)})"]))
         if _cpp_is_str_expr(gen, e.right) and not _cpp_is_str_expr(gen, e.left):
-            return (ex_text(f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.right)}), "
-                    f"(int64_t)({gen._cpp_expr(e.left)}))"))
+            return (_cpp_call_ex('mojo_cstr_repeat', [f"(char *)({gen._cpp_expr(e.right)})", f"(int64_t)({gen._cpp_expr(e.left)})"]))
         _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
         _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
     else:
@@ -3873,11 +3868,9 @@ def _cpx_binary_op(gen, e) -> Ex:
         # Falls through to the plain `*` below for a genuinely
         # all-numeric multiply (the overwhelmingly common case).
         if _cpp_is_str_expr(gen, e.left) and not _cpp_is_str_expr(gen, e.right):
-            return (ex_text(f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.left)}), "
-                    f"(int64_t)({gen._cpp_expr(e.right)}))"))
+            return (_cpp_call_ex('mojo_cstr_repeat', [f"(char *)({gen._cpp_expr(e.left)})", f"(int64_t)({gen._cpp_expr(e.right)})"]))
         if _cpp_is_str_expr(gen, e.right) and not _cpp_is_str_expr(gen, e.left):
-            return (ex_text(f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.right)}), "
-                    f"(int64_t)({gen._cpp_expr(e.left)}))"))
+            return (_cpp_call_ex('mojo_cstr_repeat', [f"(char *)({gen._cpp_expr(e.right)})", f"(int64_t)({gen._cpp_expr(e.left)})"]))
     if e.op in ('and', 'or') and _cpp_and_or_is_tagged(gen, e):
         # Python's `and`/`or` yields an OPERAND. A tagged left operand is
         # tested by its kind (`mojo_truthy_word`: None is falsy, a box by

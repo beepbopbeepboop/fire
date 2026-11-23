@@ -922,3 +922,16 @@ The remaining expression text leaves are in `_cpx_binary_op` (10), `_cps_assign_
 
 Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 24 coroutine programs;
 `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
+
+## Status 2026-11-23 (step 30): the string concatenation and repetition calls are shapes
+
+`_cpx_binary_op` builds its seven `mojo_str_cat` and `mojo_cstr_repeat` leaves (a str on either side, with
+or without an intptr cast on a word operand) as `call` shapes, in the same left-to-right order the f-strings
+evaluated their operands. Two new C++ corpus programs (`23`, `24`) reach them; the generated C++ companion
+contains both calls, and the oracle is identical against the step-29 base on all 27 coroutine programs.
+
+Still text in `_cpx_binary_op`: three lambda-body returns (`_W{...}` in the `and`/`or` word forms and the
+`in` over words, lines around 3899, 3922, 3959), and the `mojo_cstr_repeat`/`%`/`in` branches that call
+helpers returning text. `_cpx_call_ident` (4) and `_cpp_expr_ex` (3) are next.
+
+Verified: `test_gimple_cpp_core_arms.py` 30 arms, 0 failures; `c_oracle check` identical as above.
