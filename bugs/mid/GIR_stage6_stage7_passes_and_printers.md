@@ -865,3 +865,18 @@ shape. `_cpp_assign_cast_type` and `_cps_assign_stmt` match `[&]` only in a docs
 Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine programs.
 As in step 25, the corpus does not confirm the `_cpx_lambda_expr` sites or the raise-tuple site; they are checked by
 transcription and the helper pin. `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
+
+## Status 2026-11-23 (step 27): no code-level text lambda is left in `cpp_core.py`
+
+The last one was the try printer's `finally` guard: `_MojoScopeExit <fin>([&]() {` and `});`, printed as two
+text lines around the `finally` statements. It is a statement, not an expression, so it became two statement kinds
+in the IR (`scope_open`, with the guard name as its operand, and `scope_close`), printed through `_cpp_ir_line`
+like the `if`/`end` blocks. The `finally` statements inside are unchanged. The arm test pins both lines; the
+corpus has four files with `finally:`, so the oracle covers this site.
+
+A scan of `cpp_core.py` for `[&]` outside docstrings and comments now finds no code line. The lambda work in this
+file is done. What remains of the lambda shape is the two statement kinds' use in the other try-printer lines,
+and the corpus programs that would confirm the expression sites without the oracle's coverage gap (steps 25 and 26).
+
+Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 13 coroutine programs;
+`test_gimple_cpp_core_arms.py` 30 arms, 0 failures, with the guard lines pinned.

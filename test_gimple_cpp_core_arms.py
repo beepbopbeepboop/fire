@@ -432,6 +432,9 @@ def main() -> int:
         'operator char *() const { return (char *)w; } op op op }; '
         'MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); a; '
         'return _W{mojo_dyn_call(F, _a, _k)}; }()'))
+    # The finally guard's opening and closing statement lines.
+    text_cases.append((_C._cpp_ir_line('    ', 'scope_open', '__mojofin3'), '    _MojoScopeExit __mojofin3([&]() {'))
+    text_cases.append((_C._cpp_ir_line('    ', 'scope_close'), '    });'))
     # Cast spellings: a name the type table canonicalises (intptr_t is int64_t there) must keep its own spelling.
     text_cases.append((_C._cpp_cast_ex('intptr_t', _ex('x')), '(intptr_t)x'))
     text_cases.append((_C._cpp_cast_ex('char *', _ex('x')), '(char *)x'))

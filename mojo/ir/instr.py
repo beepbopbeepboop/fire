@@ -34,6 +34,8 @@ Instr.kind
   'else'                              `else {`
   'elseif' rhs (condition)            `else if (c) {`
   'end'                               `}` -- closes a block
+  'scope_open' rhs (guard name)        `_MojoScopeExit <g>([&]() {` -- a finally guard opens
+  'scope_close'                       `});` -- the finally guard closes
   'ifbody' rhs (condition), body      `if (c) <body>` -- one-statement body
   'opaque' text                       not three-address; not checked
 """
@@ -212,6 +214,12 @@ class Instr:
             return 'else {'
         if k == 'elseif':
             return 'else if (' + self.rhs.show() + ') {'
+        if k == 'scope_open':
+            # `_MojoScopeExit <guard>([&]() {`: a scope guard whose body (a `finally`) is a capturing lambda.
+            return '_MojoScopeExit ' + self.rhs.show() + '([&]() {'
+        if k == 'scope_close':
+            # `});`: closes the guard's lambda and the guard call.
+            return '});'
         if k == 'end':
             return '}'
         if k == 'ifbody':

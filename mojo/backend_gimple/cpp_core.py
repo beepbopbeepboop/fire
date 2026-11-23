@@ -12869,9 +12869,9 @@ def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
         # hand-verification (a finally body that merely reads/writes an
         # outer local, an extremely ordinary shape, not an edge case).
         # A capturing lambda (`[&]`) fixes this outright.
-        lines.append(f"{indent}    _MojoScopeExit {fin_var}([&]() {{")
+        lines.append(_cpp_ir_line(indent + '    ', 'scope_open', fin_var))
         lines.extend(finally_lines)
-        lines.append(f"{indent}    }});")
+        lines.append(_cpp_ir_line(indent + '    ', 'scope_close'))
         body_indent = indent + '    '
         closing.append(f"{indent}}}")
 
