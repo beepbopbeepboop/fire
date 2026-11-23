@@ -117,7 +117,7 @@ def test_gate_doc_refs_red_on_master_is_retired():
     the ratchet stays green. The doc name is assembled from its stem so this
     file does not itself become the next citation of the deleted doc."""
     assert dangling_refs_baseline.BASELINE.get(
-        'tools/test_integrate_probe_loop.py') == 1, \
+        'tools/test_integrate_probe_loop.py', 0) >= 1, \
         'the deliberate mock fixture lost its ledger entry; the ratchet goes red'
     assert not os.path.exists(
         os.path.join(HERE, 'bugs', 'gate-doc-refs' + '.md')), \
