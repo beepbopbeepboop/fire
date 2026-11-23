@@ -106,6 +106,23 @@ Option 1 (teach `eval_const` the operators) is untested and has its own risk:
 `{**l, **r}` must be constructs that backend supports, which wants a
 `make bootstrap` byte-compare before it is trusted.
 
+### The 8 are one distinct cause, and it is latent
+
+All 8 carry the same GIMPLE diagnostic, `error: non-trivial conversion in
+'integer_cst'`, at a `raise "<string literal>"` that ends a word-returning
+function -- deque.mojo:798 is `raise "ValueError: Given element is not in
+deque"` at the end of an index-returning method. So this is one root cause, not
+eight.
+
+It is NOT reachable standalone: `def f() -> Int: raise "boom"`,
+`def f(): raise "boom"` and `def f() -> Int: raise ValueError("boom")` all build
+(rc 0) on this tree. The failure appears only once option 2's CONST_UNKNOWN
+emits the code that was previously pruned -- i.e. the newly-emitted arm contains
+a shape the backend cannot lower. That makes the next step concrete: reproduce
+it by forcing that arm to be emitted (or by compiling `std/collections/deque.mojo`
+with the option-2 patch applied) and find what the `raise`-terminates-a-word-
+function path emits wrong.
+
 ## Done when
 
 A module-level `if` over each row of the table above prints the CPython arm.
