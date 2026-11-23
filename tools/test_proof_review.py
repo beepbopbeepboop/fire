@@ -66,6 +66,13 @@ def main():
                 assert queued[0].claim == ["bug:DOC_a"] and "NOTESTCASE" in queued[0].task and "TEST" in queued[0].task
                 assert "Both TEST and NOTESTCASE are legitimate" in queued[0].task, "NOTESTCASE must be a legitimate outcome, not a last resort"
                 assert reg["bug-a"]["state"] == "superseded" and reg["bug-a"]["fixer"] == "fix-proof-bug-a"
+                assert "REPEAT REVIEW" not in queued[0].task, "the first review carries no repeat feedback"
+                reg["fix-proof-bug-a"] = dict(reg["bug-a"], state="exited-ok", branch="work/fix-proof-c")
+                with mock.patch.object(C, "retire_task", lambda n: True):
+                    I.enqueue_proof_review("fix-proof-bug-a", reg["fix-proof-bug-a"], ["bugs/DOC_a.md"])
+                rep = queued.pop().task
+                assert "REPEAT REVIEW" in rep and "NOTESTCASE: obsolete" in rep, "a repeat review is shown the commits it must fix"
+                del reg["fix-proof-bug-a"]
                 reg["fix-proof-fix-proof-bug-a"] = dict(reg["bug-a"], state="exited-ok")
                 orch = []
                 with mock.patch.object(C, "enqueue_orch_review", lambda n, kind, why: orch.append((n, kind))):
