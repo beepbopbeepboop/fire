@@ -3187,7 +3187,7 @@ def _cpx_ident_expr(gen, e) -> Ex:
     # dereference that pointer, not read the pointer's own address
     # as if it were the value.
     if e.name in gen._cpp_mut_capture_names:
-        return ex_text(f"(*{e.name})")
+        return _paren_ex(_cpp_unary_ex('deref', ex_text(e.name)))
     # Module-global reference: a name that isn't a declared local/
     # param/capture but IS a known module-level global (in
     # `_global_var_types`) resolves to the module globals struct
@@ -3245,7 +3245,7 @@ def _cpx_ident_expr(gen, e) -> Ex:
         if field in gimple_ctypes._CPP_KEYWORD_FIELDS:
             field = f"_kw_{field}"
         gen._cpp_module_global_refs.add((mod_key, e.name))
-        return ex_text(f"_{safe_mod}_globals.{field}")
+        return _field_ex(ex_text(f"_{safe_mod}_globals"), field, False)
     # A bare module-level function name referenced as a value (e.g.
     # tokenize.py's `encode = detect_encoding`) — the generator body
     # holds it as an opaque int64_t; the call site resolves the real
@@ -3255,7 +3255,7 @@ def _cpx_ident_expr(gen, e) -> Ex:
             and e.name in gen.func_param_types
             and e.name not in gen._global_var_types):
         gen._cpp_module_func_refs.add(e.name)
-        return ex_text(f"(int64_t)&{gen._func_csym(e.name)}")
+        return _cpp_cast_ex('int64_t', _cpp_unary_ex('addr', ex_text(gen._func_csym(e.name))))
     # A coroutine parameter whose Python name is a reserved C/C++
     # keyword (e.g. `default`) was renamed in the emitted
     # signature — see self._cpp_kw_param_renames's docstring.
@@ -3376,7 +3376,7 @@ def _cpx_member_expr(gen, e) -> Ex:
             # `Cls.x = v` / a metaclass): the run-time class table holds it, found through
             # the bases. A word of unknown kind.
             _ctag = gimple_exprtypes._struct_type_id(struct_name)
-            return ex_text(f'mojo_class_getattr({_ctag}LL, "{e.member}")')
+            return _cpp_call_ex('mojo_class_getattr', [f"{_ctag}LL", f'"{e.member}"'])
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"cls.{e.member}: only a class-level attribute assigned "
             "in the enclosing class's own body is supported for "
@@ -3419,7 +3419,9 @@ def _cpx_member_expr(gen, e) -> Ex:
             # `_cpp_param_struct_names` set that collection already
             # reads from, rather than inventing a second one.
             gen._cpp_param_struct_names.add(outer_ft[:-2])
-            return ex_text(f"(({outer_ft})(self->{gimple_ctypes._safe_field(e.obj.member)}))->{gimple_ctypes._safe_field(e.member)}")
+            return _field_ex(_paren_ex(_cpp_cast_ex(outer_ft, _paren_ex(
+                ex_text(f"self->{gimple_ctypes._safe_field(e.obj.member)}")))),
+                gimple_ctypes._safe_field(e.member), True)
         if gimple_ctypes.TypeLattice.is_c_scalar(outer_ft):
             # An attribute read on an OPAQUE scalar-typed self-field
             # (`self.parser.sep`, where `parser = os.path` — a
@@ -3505,7 +3507,7 @@ def _cpx_member_expr(gen, e) -> Ex:
             gen._cpp_class_attr_refs.add(_cn_gname)
             return ex_text(_cn_gname)
         _cn_tag = gimple_exprtypes._struct_type_id(e.obj.name)
-        return ex_text(f'mojo_class_getattr({_cn_tag}LL, "{e.member}")')
+        return _cpp_call_ex('mojo_class_getattr', [f"{_cn_tag}LL", f'"{e.member}"'])
     obj_expr = gen._cpp_expr(e.obj) if not isinstance(e.obj, gimple_ctypes.IdentExpr) else e.obj.name
     if isinstance(e.obj, gimple_ctypes.IdentExpr):
         _ptr_struct = gen._cpp_struct_ptr_local(e.obj.name)
@@ -3553,8 +3555,9 @@ def _cpx_member_expr(gen, e) -> Ex:
         # time - every module registers its struct reflection with `mojo_getattr_any`.
         _inner = (e.obj.name if isinstance(e.obj, gimple_ctypes.IdentExpr)
                   else gen._cpp_expr(e.obj))
-        return (ex_text(f'mojo_getattr_any((void *)(intptr_t)({_inner}), '
-                f'(char *)"{gimple_ctypes._safe_field(e.member)}")'))
+        return _cpp_call_ex('mojo_getattr_any', [
+            f"(void *)(intptr_t)({_inner})",
+            f'(char *)"{gimple_ctypes._safe_field(e.member)}"'])
     # A struct constructor call lowers to a `Struct *` (see
     # _cpp_is_struct_ctor_call), so a field read off it is `->`, the same
     # as a read off a struct-pointer local.
@@ -6397,6 +6400,13 @@ def _cpp_comma_ex(first, second) -> Ex:
     e = Ex('comma')
     e.a = _as_ex(first)
     e.b = _as_ex(second)
+    return e
+
+
+def _cpp_unary_ex(kind: str, inner) -> Ex:
+    """A prefix operator Ex over `inner` (`deref` renders `*x`, `addr` renders `&x`)."""
+    e = Ex(kind)
+    e.a = _as_ex(inner)
     return e
 
 

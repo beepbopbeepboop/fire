@@ -902,3 +902,23 @@ string right (needs a tagged left operand), the `in` over function values (`_cpp
 function-value membership are refused as generators), and `_cpp_lambda`'s word-left `and`/`or` (`_aol`). Those three
 sites remain verified by transcription and the helper pins only. Refused shapes found on the way: a bool yield, a
 multi-parameter lambda value, and a callable parameter yielded directly.
+
+## Status 2026-11-23 (step 29): seven expression text leaves are shapes
+
+`_cpx_ident_expr` and `_cpx_member_expr` now build seven of their text leaves as IR shapes: a dereference
+(`(*name)`, `_cpp_unary_ex`), a module-global field read (`_field_ex`), an address-of function
+(`(int64_t)&csym`), two class-attribute reads (`mojo_class_getattr(...)`), the self-field read through
+a cast (`((T)(self->f))->m`), and an attribute read on an opaque object (`mojo_getattr_any(...)`). Each
+renders the text of the f-string it replaced; the arm test pins four of the shapes.
+
+Coverage, measured with a line tracer over every C++ corpus program: only the self-field read (08) and
+the module-global read (new `22_module_global_read.py`) are reached. The dereference, the function-value
+address, the two class-attribute reads and `mojo_getattr_any` are NOT reached by any program I could
+make compile; they are verified by transcription and the helper pins.
+
+The remaining expression text leaves are in `_cpx_binary_op` (10), `_cps_assign_stmt` (5, statement),
+`_cpx_call_ident` (4), `_cpp_expr_ex` (3), and one each in `_cpx_slice_expr`, `_cpx_subscript_expr`,
+`_cpx_call_member`, `_cps_return_stmt` and `_cpp_dyn_word_lambda`.
+
+Verified: `c_oracle check --base HEAD -j 4` identical on all 285 pydiff programs and all 24 coroutine programs;
+`test_gimple_cpp_core_arms.py` 30 arms, 0 failures.

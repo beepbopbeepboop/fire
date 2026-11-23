@@ -435,6 +435,12 @@ def main() -> int:
     # The finally guard's opening and closing statement lines.
     text_cases.append((_C._cpp_ir_line('    ', 'scope_open', '__mojofin3'), '    _MojoScopeExit __mojofin3([&]() {'))
     text_cases.append((_C._cpp_ir_line('    ', 'scope_close'), '    });'))
+    # The identifier and member leaves ported to shapes: a dereference, an address, a field, a call.
+    text_cases.append((_C._paren_ex(_C._cpp_unary_ex('deref', _ex('x'))), '(*x)'))
+    text_cases.append((_C._cpp_cast_ex('int64_t', _C._cpp_unary_ex('addr', _ex('f_csym'))), '(int64_t)&f_csym'))
+    text_cases.append((_C._field_ex(_C._paren_ex(_C._cpp_cast_ex('Foo *', _C._paren_ex(_ex('self->a')))), 'b', True),
+        '((Foo *)(self->a))->b'))
+    text_cases.append((_C._cpp_call_ex('mojo_class_getattr', ['T LL', '"m"']), 'mojo_class_getattr(T LL, "m")'))
     # Cast spellings: a name the type table canonicalises (intptr_t is int64_t there) must keep its own spelling.
     text_cases.append((_C._cpp_cast_ex('intptr_t', _ex('x')), '(intptr_t)x'))
     text_cases.append((_C._cpp_cast_ex('char *', _ex('x')), '(char *)x'))
