@@ -25,3 +25,15 @@ NOT an exclusion (`formal/model/module.py:2037`, which names this exact line:
 "every one of the four enumerated rules was false about
 `formal/hostmods/time.mojo`, which declares no `now` at all"). The file is a
 69-byte deliberate negative case, and the model handles it explicitly. No fix.
+
+## 2026-11-22: rows 2, 7 and 11 contradict the sweep's own premise
+
+Their reason reads "not Mojo source", but `tools/formal_sweep.py`'s docstring is
+explicit that the sweep covers "`*.py` / `*.mojo`" because "Mojo is a Python
+superset, so .py files are valid inputs". So a `.py` file failing the arm64 build
+is a RESULT, not a reason to dismiss the row -- the same verdict appears in chunk
+b (rows 12, 13, 25) and chunk c (row 25). Either the premise or the verdict
+wording is wrong; until that is settled these rows should not be read as
+"dismissed". What is true is that the arm64 path does not implement Python-only
+constructs (annotations at those columns), which is a coverage statement, not a
+false positive.
