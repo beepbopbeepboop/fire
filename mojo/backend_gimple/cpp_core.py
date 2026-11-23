@@ -11417,6 +11417,65 @@ def _cpf_named_target_iter_expr(gen, s: 'ForStmt', declared: dict, indent: str, 
     return lines
 
 
+def _cpf_named_target_call_iter(gen, s: 'ForStmt', declared: dict, indent: str, target, target_was_declared: bool) -> list[str]:
+    """The named-target arm of _cpf_named_target when the iterable is a call (extracted, unchanged body).
+
+    One arm of `_cpf_named_target`, which tests the condition and calls this."""
+    rargs = [gen._cpp_expr(a) for a in s.iterable.args]
+    if len(rargs) == 1:
+        start_e, stop_e, step_e = '0', rargs[0], '1'
+    elif len(rargs) == 2:
+        start_e, stop_e, step_e = rargs[0], rargs[1], '1'
+    else:
+        start_e, stop_e, step_e = rargs[0], rargs[1], rargs[2]
+    ctr = gen._cpp_fresh_name("_mg_i")
+    # The loop variable must be a real C++ declaration (unlike
+    # the range-for path, where `for (auto i : ...)` declares it
+    # itself): emit `int64_t i;` up front — the first time, only
+    # — so both the in-loop assignment and any use AFTER the loop
+    # (Python loop variables escape the loop) reference a valid
+    # identifier. `declared` doubles as the "already declared in
+    # C++" tracker, so a target that was already a declared local
+    # (e.g. assigned before the loop) is NOT redeclared.
+    lines = []
+    if not target_was_declared:
+        lines.append(f"{indent}int64_t {target};")
+    lines.append(f"{indent}for (int64_t {ctr} = {start_e}; "
+                 f"({ctr} < {stop_e}) == ({step_e} > 0); {ctr} += {step_e}) {{")
+    lines.append(f"{indent}    {target} = {ctr};")
+    for inner in s.body:
+        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+    lines.append(f"{indent}}}")
+    return lines
+
+
+def _cpf_named_target_call_iter2(gen, s: 'ForStmt', declared: dict, indent: str, target, target_was_declared: bool) -> list[str]:
+    """The second call-iterable arm of _cpf_named_target (extracted, unchanged body).
+
+    One arm of `_cpf_named_target`, which tests the condition and calls this."""
+    _rv_src = s.iterable.args[0].name
+    _rv_elem = getattr(gen, '_cpp_list_local_elem_types', {}).get(_rv_src)
+    if _rv_elem is None and _cpp_body_str_evidence(target, s.body):
+        _rv_elem = 'char *'
+    _rv_list = gen._cpp_fresh_name("_mg_rev")
+    _rv_ctr = gen._cpp_fresh_name("_mg_i")
+    lines = [f"{indent}MojoList *{_rv_list} = mojo_list_reversed("
+             + _cpp_as('MojoList *', _rv_src) + ");"]
+    _rv_ct = _rv_elem if _rv_elem in ('char *', 'double') else 'int64_t'
+    _rv_get = {'char *': 'mojo_list_get_str',
+               'double': 'mojo_list_get_double'}.get(_rv_ct, 'mojo_list_get_int')
+    if not target_was_declared:
+        declared[target] = _rv_ct
+        lines.append(f"{indent}{_rv_ct} {target};")
+    lines.append(f"{indent}for (int64_t {_rv_ctr} = 0; "
+                 f"{_rv_ctr} < mojo_list_len({_rv_list}); {_rv_ctr}++) {{")
+    lines.append(f"{indent}    {target} = {_rv_get}({_rv_list}, {_rv_ctr});")
+    for inner in s.body:
+        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+    lines.append(f"{indent}}}")
+    return lines
+
+
 def _cpf_named_target(gen, s: 'ForStmt', declared: dict, indent: str, target) -> list[str]:
     """`for <name> in <iterable>` in `_cpp_for_stmt`, the shapes not claimed above.
 
@@ -11489,32 +11548,7 @@ def _cpf_named_target(gen, s: 'ForStmt', declared: dict, indent: str, target) ->
             and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
             and s.iterable.func.name == 'range'
             and len(s.iterable.args) in (1, 2, 3)):
-        rargs = [gen._cpp_expr(a) for a in s.iterable.args]
-        if len(rargs) == 1:
-            start_e, stop_e, step_e = '0', rargs[0], '1'
-        elif len(rargs) == 2:
-            start_e, stop_e, step_e = rargs[0], rargs[1], '1'
-        else:
-            start_e, stop_e, step_e = rargs[0], rargs[1], rargs[2]
-        ctr = gen._cpp_fresh_name("_mg_i")
-        # The loop variable must be a real C++ declaration (unlike
-        # the range-for path, where `for (auto i : ...)` declares it
-        # itself): emit `int64_t i;` up front — the first time, only
-        # — so both the in-loop assignment and any use AFTER the loop
-        # (Python loop variables escape the loop) reference a valid
-        # identifier. `declared` doubles as the "already declared in
-        # C++" tracker, so a target that was already a declared local
-        # (e.g. assigned before the loop) is NOT redeclared.
-        lines = []
-        if not target_was_declared:
-            lines.append(f"{indent}int64_t {target};")
-        lines.append(f"{indent}for (int64_t {ctr} = {start_e}; "
-                     f"({ctr} < {stop_e}) == ({step_e} > 0); {ctr} += {step_e}) {{")
-        lines.append(f"{indent}    {target} = {ctr};")
-        for inner in s.body:
-            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-        lines.append(f"{indent}}}")
-        return lines
+        return _cpf_named_target_call_iter(gen, s, declared, indent, target, target_was_declared)
     # `for x in itertools.repeat(value, times):` (finite 2-arg
     # form — see `_is_itertools_repeat2_call`'s docstring): the
     # analogous plain-`for`-loop sibling of `_cpp_yield_from`'s own
@@ -11646,27 +11680,7 @@ def _cpf_named_target(gen, s: 'ForStmt', declared: dict, indent: str, target) ->
             and gen._cpp_declared is not None
             and gimple_ctypes.TypeLattice.is_word_or_list(gen._cpp_declared.get(s.iterable.args[0].name))
             and isinstance(target, str) and not for_target_is_tuple(target)):
-        _rv_src = s.iterable.args[0].name
-        _rv_elem = getattr(gen, '_cpp_list_local_elem_types', {}).get(_rv_src)
-        if _rv_elem is None and _cpp_body_str_evidence(target, s.body):
-            _rv_elem = 'char *'
-        _rv_list = gen._cpp_fresh_name("_mg_rev")
-        _rv_ctr = gen._cpp_fresh_name("_mg_i")
-        lines = [f"{indent}MojoList *{_rv_list} = mojo_list_reversed("
-                 + _cpp_as('MojoList *', _rv_src) + ");"]
-        _rv_ct = _rv_elem if _rv_elem in ('char *', 'double') else 'int64_t'
-        _rv_get = {'char *': 'mojo_list_get_str',
-                   'double': 'mojo_list_get_double'}.get(_rv_ct, 'mojo_list_get_int')
-        if not target_was_declared:
-            declared[target] = _rv_ct
-            lines.append(f"{indent}{_rv_ct} {target};")
-        lines.append(f"{indent}for (int64_t {_rv_ctr} = 0; "
-                     f"{_rv_ctr} < mojo_list_len({_rv_list}); {_rv_ctr}++) {{")
-        lines.append(f"{indent}    {target} = {_rv_get}({_rv_list}, {_rv_ctr});")
-        for inner in s.body:
-            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-        lines.append(f"{indent}}}")
-        return lines
+        return _cpf_named_target_call_iter2(gen, s, declared, indent, target, target_was_declared)
     try:
         iter_expr = gen._cpp_expr(s.iterable)
     except gimple_exprtypes._UnsupportedGeneratorShape:
