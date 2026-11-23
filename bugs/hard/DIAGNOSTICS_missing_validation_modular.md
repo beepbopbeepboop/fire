@@ -373,6 +373,29 @@ The fix is therefore in the discriminator, not in the check: it needs the
 argument's real Mojo type (from the local's declared type) rather than the C
 type, so a genuine `S[NotMovable]` is distinguished from an erased scalar.
 
+### 2026-11-22: that chain is STALE -- neither `_elaborate_generic_call` nor the
+### discriminator is reached for this call on the current tree
+
+Re-probed the 30-line repro on today's master (`fire.py build` exits 0, still a
+miss, as the doc says). Instrumenting BOTH ends of the chain above shows neither
+is entered:
+
+* `emit_resolve._elaborate_generic_call` -- a print at its gate
+  (`source = gen._imported_generics.get(g)`, emit_resolve.py:4007) never fires,
+  so the function is not called for `needs_iterator(s)` at all. The doc's
+  "same-module generics ARE registered, so the inferred branch runs" no longer
+  holds.
+* `elaborate.elaborate_generic_call_inferred`'s `ConformanceError` handler --
+  a print at its discriminator never fires either.
+
+So the same-module call is lowered somewhere else entirely, and the discriminator
+fix described above, while still correct in principle, does NOT reach this case
+(a print at the discriminator plus a print at the gate, both reverted after
+measuring). The next probe should find where `needs_iterator(s)` actually goes:
+start from the caller of `_elaborate_generic_call` and ask why a same-module
+generic is not routed there (or which other path lowers an in-TU generic call),
+rather than assuming the wakeup-42/44 chain still holds.
+
 ## 2026-11-16 (wakeup 45): the rc=1 table is stale, and the real delta is the
 ## source-range prefix
 
