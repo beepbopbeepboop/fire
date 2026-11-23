@@ -2736,8 +2736,7 @@ test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'],
 # on a 96 GB budget), so the ratchet assigns 2.25 GB and the floor covers it.
 test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, mem='tiny',
      timeout=7200,
-     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree',
-     disabled='bugs/gate-stdlib-syntax.md')
+     desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree')
 
 # ── bootstrap: an ordered graph, not one recipe ─────────────────────────────
 # Every step below runs a compiler, or the compiler over a whole closure, so
