@@ -4963,7 +4963,10 @@ class TestTheComposedStateIsUnfoldedNotReduced(unittest.TestCase):
                       "class is about to be slow on")
 
     def test_no_pc_fact_is_proved_by_reducing_the_composed_state(self):
-        facts = re.findall(r"have (hpc\d+) : \((\w+ \w+)\)\.pc = (\d+) := (\S.*)$",
+        # `hpc{N}` is a named theorem: its statement is on one line and its
+        # proof is the first tactic on the line after `:= by`.
+        facts = re.findall(r"^theorem (\w+_hpc\d+) .*?\n    \((\w+ \w+)\)\.pc = "
+                           r"(\d+) := by\n  (\S.*)$",
                            self.text, re.M)
         self.assertTrue(facts, "no `hpc{N}` facts at all: the row would pass "
                                "by there being no side condition to get wrong")
@@ -4994,8 +4997,9 @@ class TestTheComposedStateIsUnfoldedNotReduced(unittest.TestCase):
 
     def test_the_pc_facts_also_unfold_rather_than_reduce(self):
         unfolded = re.findall(
-            r"have hpc(\d+) : \(\w+_qS(\d+) st\)\.pc = \d+ := by simp only \[",
-            self.text)
+            r"^theorem \w+_hpc(\d+) .*?\n    \(\w+_qS(\d+) st\)\.pc = \d+ := "
+            r"by\n  simp only \[",
+            self.text, re.M)
         self.assertTrue(unfolded,
                         "every `hpc{N}` past the first is proved by unfolding "
                         "the block's `def`s, and none of them reduces the "
