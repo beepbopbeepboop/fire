@@ -291,6 +291,10 @@ LEAN_THREADS = 4
 LEAN_MEMORY_MB = 6144          # one generated proof
 LIBRARY_MEMORY_MB = 12288      # one lib/*.olean build
 LEAN_HEARTBEATS = 200000
+#: Per-proof ceiling overrides: example stem -> `-M` in MB.
+#: Starts empty in part 1; part 3 fills the three memory-ceiling stems.
+#: `proof_memory_mb()` consults it; everything else keeps `LEAN_MEMORY_MB`.
+PROOF_MEMORY_MB: dict[str, int] = {}
 # How often each bound is checked. The wall clock is free, so it is read often;
 # the CPU walk costs one `ps` (~50-100 ms on this platform), so it is not.
 _WALL_POLL_S = 0.25
@@ -314,6 +318,20 @@ def lean_flags(mem_mb: int | None = None, heartbeats: int | None = None,
     return ["-j", str(LEAN_THREADS if threads is None else threads),
             "-M", str(LEAN_MEMORY_MB if mem_mb is None else mem_mb),
             "-T", str(LEAN_HEARTBEATS if heartbeats is None else heartbeats)]
+
+
+def proof_memory_mb(proof_path: str) -> int:
+    """The `-M` ceiling for ONE generated proof, by its stem.
+
+    `PROOF_MEMORY_MB[stem]` when the stem has an entry (a proof that measured
+    over the corpus default), else `LEAN_MEMORY_MB`.  This is the ONE place a
+    proof file is mapped to its `-M`: every `mem_mb is None` caller goes
+    through here, so a raised value cannot be replayed under an old ceiling
+    (`proof_verdict_key` folds it in) and an explicit `mem_mb` still wins
+    because callers resolve it themselves and never reach here.
+    """
+    stem = os.path.splitext(os.path.basename(proof_path))[0]
+    return int(PROOF_MEMORY_MB.get(stem, LEAN_MEMORY_MB))
 
 
 def library_bounds() -> tuple:
@@ -1880,7 +1898,7 @@ def _proof_search_digest(proof_path: str) -> bytes:
 def proof_verdict_key(proof_path: str, lib_dir: str, lean: str,
                        mem_mb: int | None = None) -> str:
     import cas
-    mb = LEAN_MEMORY_MB if mem_mb is None else int(mem_mb)
+    mb = proof_memory_mb(proof_path) if mem_mb is None else int(mem_mb)
     parts = [_VERDICT_VERSION, lean_version(lean).encode(), str(mb).encode()]
     for stem in LIBRARY_MODULES:
         parts.append(stem.encode())
@@ -2292,8 +2310,9 @@ def _run_lean(proof_path: str, lib_dir: str, lean: str, wall_s: float,
     # run; the key is the half that stops the wrong answer from outliving it.
     env["LEAN_PATH"] = os.pathsep.join(
         (os.path.dirname(os.path.abspath(proof_path)), os.path.abspath(lib_dir)))
+    mb = proof_memory_mb(proof_path) if mem_mb is None else mem_mb
     result = run_lean(lean, [os.path.basename(proof_path)], env=env,
-                      wall_s=wall_s, cpu_s=cpu_s, mem_mb=mem_mb,
+                      wall_s=wall_s, cpu_s=cpu_s, mem_mb=mb,
                       cwd=os.path.dirname(os.path.abspath(proof_path)))
     if result.exceeded:
         return False, result.exceeded, None, result.exceeded
