@@ -12346,17 +12346,18 @@ def _cpp_async_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[
     handle_var = f"__agen_h_{var}"
     has_var = f"__agen_has_{var}"
     lines = [
-        f"{indent}{base}_handle {handle_var} = {base}_impl ({call_args}).h;",
-        f"{indent}for (;;) {{",
-        f"{indent}    bool {has_var} = co_await {base}_AnextAwaiter{{{handle_var}}};",
+        _cpp_assign_line(f"{base}_handle {handle_var}", f"{base}_impl ({call_args}).h", indent),
+        _cpp_ir_line(indent, 'for', ';;'),
+        _cpp_assign_line(f"bool {has_var}", f"co_await {base}_AnextAwaiter{{{handle_var}}}", indent + '    '),
         f"{indent}    if (!{has_var}) break;",
-        f"{indent}    {gimple_exprtypes._c_to_cpp_scalar_type(value_ctype)} {var} = {handle_var}.promise().current_value;",
+        _cpp_assign_line(f"{gimple_exprtypes._c_to_cpp_scalar_type(value_ctype)} {var}",
+                         f"{handle_var}.promise().current_value", indent + '    '),
     ]
     declared[var] = value_ctype
     for inner in s.body:
         lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-    lines.append(f"{indent}}}")
-    lines.append(f"{indent}{handle_var}.destroy();")
+    lines.append(_cpp_ir_line(indent, 'end'))
+    lines.append(_cpp_ir_line(indent, 'expr', f"{handle_var}.destroy()"))
     return lines
 
 
