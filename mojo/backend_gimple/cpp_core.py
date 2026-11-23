@@ -11874,8 +11874,9 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {_nm}"))
             lines.append(_cpp_ir_line(indent, 'for', f"int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_cpp_as('MojoList *', _src)}); {_ctr}++"))
             lines.append(f"{indent}    {_idx_name} = ({_ctr} + ({_idx_start_expr}));")
-            lines.append(f"{indent}    MojoList * {_tup} = "
-                         + _cpp_as('MojoList *', f"mojo_list_get_int({_cpp_as('MojoList *', _src)}, {_ctr})") + ";")
+            lines.append(_cpp_assign_line(f"MojoList * {_tup}",
+                         _cpp_as('MojoList *', f"mojo_list_get_int({_cpp_as('MojoList *', _src)}, {_ctr})"),
+                         indent + '    '))
             for _si, _nm in enumerate(_nested_inner):
                 lines.append(f"{indent}    {_nm} = mojo_list_get_int({_tup}, {_si});")
             for inner in s.body:
@@ -11929,8 +11930,9 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {_nm}"))
             lines.append(_cpp_ir_line(indent, 'for', f"int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_cpp_as('MojoList *', _src)}); {_ctr}++"))
             lines.append(_cpp_assign_line(f"{_names[0]}", f"{_idx_expr}", indent + '    '))
-            lines.append(f"{indent}    {_names[1]} = "
-                         f"mojo_list_get_int({_cpp_as('MojoList *', _src)}, {_ctr});")
+            lines.append(_cpp_assign_line(f"{_names[1]}",
+                         f"mojo_list_get_int({_cpp_as('MojoList *', _src)}, {_ctr})",
+                         indent + '    '))
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(_cpp_ir_line(indent, 'end'))
@@ -11951,8 +11953,8 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             _zl = []
             for _a in s.iterable.args:
                 _zn = gen._cpp_fresh_name("_mg_zip")
-                lines.append(f"{indent}MojoList * {_zn} = "
-                             + _cpp_as('MojoList *', gen._cpp_expr(_a)) + ";")
+                lines.append(_cpp_assign_line(f"MojoList * {_zn}",
+                             _cpp_as('MojoList *', gen._cpp_expr(_a)), indent))
                 _zl.append(_zn)
             _ctr = gen._cpp_fresh_name("_mg_i")
             _len = ' && '.join(f"{_ctr} < mojo_list_len({z})" for z in _zl)
@@ -12080,11 +12082,11 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 if _nm not in declared:
                     declared[_nm] = _ct
                     lines.append(_cpp_ir_line(indent, 'decl', f"{gimple_exprtypes._c_to_cpp_scalar_type(_ct)} {_nm}"))
-            lines.append(f"{indent}MojoList *{_items} = "
-                         f"mojo_dict_items({_cpp_as('MojoDict *', _dsrc)});")
+            lines.append(_cpp_assign_line(f"MojoList *{_items}",
+                         f"mojo_dict_items({_cpp_as('MojoDict *', _dsrc)})", indent))
             lines.append(_cpp_ir_line(indent, 'for', f"int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_items}); {_ctr}++"))
-            lines.append(f"{indent}    MojoList *{_pair} = "
-                         + _cpp_as('MojoList *', f"mojo_list_get_int({_items}, {_ctr})") + ";")
+            lines.append(_cpp_assign_line(f"MojoList *{_pair}",
+                         _cpp_as('MojoList *', f"mojo_list_get_int({_items}, {_ctr})"), indent + '    '))
             lines.append(f"{indent}    {_names[0]} = mojo_list_get_str({_pair}, 0);")
             lines.append(f"{indent}    {_names[1]} = mojo_list_get_int({_pair}, 1);")
             for inner in s.body:
@@ -12144,13 +12146,13 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                     else 'int64_t')
                         declared[_nm] = _tct
                         lines.append(_cpp_ir_line(indent, 'decl', f"{_tct} {_nm}"))
-                lines.append(f"{indent}MojoList *{_tupvar}_list = "
-                             + _cpp_as('MojoList *', _giter_expr) + ";")
+                lines.append(_cpp_assign_line(f"MojoList *{_tupvar}_list",
+                             _cpp_as('MojoList *', _giter_expr), indent))
                 lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                              f"{_ctr} < mojo_list_len({_tupvar}_list); "
                              f"{_ctr}++) {{")
-                lines.append(f"{indent}    MojoList *{_tupvar} = "
-                             + _cpp_as('MojoList *', f"mojo_list_get_int({_tupvar}_list, {_ctr})") + ";")
+                lines.append(_cpp_assign_line(f"MojoList *{_tupvar}",
+                             _cpp_as('MojoList *', f"mojo_list_get_int({_tupvar}_list, {_ctr})"), indent + '    '))
                 for _si, _nm in enumerate(_names):
                     _nct = declared.get(_nm, 'int64_t')
                     if gimple_ctypes.TypeLattice.is_cstr(_nct):
@@ -13453,17 +13455,17 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         _fw_first = f"__mojo_gen_resume ((int64_t)(intptr_t){guard}.g, mojo_box_none())"
         _fw_step = f"__mojo_gen_resume ((int64_t)(intptr_t){guard}.g, {_fw})"
     return [
-        f"{indent}{{",
+        _cpp_ir_line(indent, 'block'),
         f"{indent}    _mojogen_sub_guard {guard}"
         f"{{ {sub_base}_start({args_text}), &{sub_base}_destroy }};",
         *_fw_decl,
-        f"{indent}    int64_t {_fw} = mojo_box_none();",
-        f"{indent}    if ({_fw_first}) {{",
-        f"{indent}        for (;;) {{",
-        f"{indent}            {_fw} = co_yield {sub_base}_value({guard}.g);",
+        _cpp_assign_line(f"int64_t {_fw}", "mojo_box_none()", indent + '    '),
+        _cpp_ir_line(indent + '    ', 'if', _fw_first),
+        _cpp_ir_line(indent + '        ', 'for', ';;'),
+        _cpp_assign_line(_fw, f"co_yield {sub_base}_value({guard}.g)", indent + '            '),
         f"{indent}            if (!{_fw_step}) break;",
-        f"{indent}        }}",
-        f"{indent}    }}",
+        _cpp_ir_line(indent + '        ', 'end'),
+        _cpp_ir_line(indent + '    ', 'end'),
         # Milestone D: the sub-generator's own `_resume` (same wrapper
         # every compiled generator gets — see _gen_cpp_generator_unit)
         # already translated any exception that escaped ITS body,
@@ -13488,12 +13490,12 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         # which repeats the exact same translation for ITS OWN
         # `_resume` boundary. Composes to any depth of nested `yield`
         # `from` with no special-casing beyond this one check.
-        f"{indent}    if (mojo_exc_pending_get()) {{",
-        f"{indent}        mojo_exc_pending_set(0);",
+        _cpp_ir_line(indent + '    ', 'if', 'mojo_exc_pending_get()'),
+        _cpp_call_line(indent + '        ', 'mojo_exc_pending_set', ['0']),
         f"{indent}        throw _MojoCppExc{{ mojo_exc_type_get(), "
         f"mojo_exc_msg_get(), mojo_exc_obj_get() }};",
-        f"{indent}    }}",
-        f"{indent}}}",
+        _cpp_ir_line(indent + '    ', 'end'),
+        _cpp_ir_line(indent, 'end'),
     ]
 
 
