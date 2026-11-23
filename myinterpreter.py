@@ -1207,6 +1207,42 @@ def _static_const(e, env):
     return None
 
 
+def _static_module_env(stmts):
+    """Top-level integer bindings of a module, for the static where-clause check.
+
+    `_static_call_records` builds its `env` from the callee's comptime
+    parameters alone, so a clause that names a module-level constant cannot be
+    resolved: `_static_cond_false` answers False (not provable), no record is
+    produced, and the call falls through to the compiler -- which words the
+    refusal differently, so the literal and alias spellings of one clause
+    disagreed.
+    Only integer literals are collected; anything else stays unprovable.
+    """
+    env = {}
+    stmts = list(stmts or [])
+    for s in stmts:
+        if isinstance(s, N.AssignStmt):
+            t = getattr(s, 'target', None)
+            v = getattr(s, 'value', None)
+            if isinstance(t, N.IdentExpr) and isinstance(v, N.IntLiteral):
+                env[t.name] = v.value
+        elif isinstance(s, N.VarDecl):
+            v = getattr(s, 'value', None)
+            if isinstance(v, N.IntLiteral):
+                env[s.name] = v.value
+    # `alias NAME = <int>` is not a keyword: the parser leaves a bare
+    # `ExprStmt(IdentExpr 'alias')` immediately before the AssignStmt.
+    for a, b in zip(stmts, stmts[1:]):
+        if (isinstance(a, N.ExprStmt) and isinstance(a.value, N.IdentExpr)
+                and a.value.name == 'alias'
+                and isinstance(b, N.AssignStmt)):
+            t = getattr(b, 'target', None)
+            v = getattr(b, 'value', None)
+            if isinstance(t, N.IdentExpr) and isinstance(v, N.IntLiteral):
+                env[t.name] = v.value
+    return env
+
+
 def _static_cond_false(cond, env):
     """True only when `cond` is a comparison of provable integers that is
     False."""
@@ -1539,6 +1575,7 @@ def _static_call_records(stmts, filename, source=''):
     binding in the enclosing function can shadow, candidates without
     decorators, no `*`/`**` arguments."""
     sc = _scope_from_stmts(stmts, filename)
+    _menv = _static_module_env(stmts)
     out = []
     for top in stmts:
         if not isinstance(top, N.FunctionDef):
@@ -1614,7 +1651,7 @@ def _static_call_records(stmts, filename, source=''):
                 if (len(elems) != len(c.comptime_params)
                         or not all(isinstance(e, N.IntLiteral) for e in elems)):
                     continue
-                env = {}
+                env = dict(_menv)
                 for pn, e in zip(c.comptime_params, elems):
                     env[pn] = e.value
                 clause = c.where_clause

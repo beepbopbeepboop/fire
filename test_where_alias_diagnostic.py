@@ -42,7 +42,8 @@ def test_function_where_alias_violated_fails():
         '    pass\n'
         'fn main():\n'
         '    f[5]()\n',
-        "requirement 'x < LIMIT' is not satisfied")
+        "invalid call to 'f': violated constraint",
+        "constraint declared here evaluated to False, expected '(x < LIMIT)'")
 
 
 def test_function_where_alias_satisfied_compiles():
@@ -123,7 +124,8 @@ def test_integer_literal_where_still_enforced():
         '    pass\n'
         'fn main():\n'
         '    f[5]()\n',
-        "requirement 'x < 2' is not satisfied")
+        "invalid call to 'f': violated constraint",
+        "constraint declared here evaluated to False, expected '(x < Int(2))'")
 
 
 def test_integer_literal_where_still_compiles():
