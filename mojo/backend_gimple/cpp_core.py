@@ -11507,13 +11507,12 @@ def _cpf_named_target(gen, s: 'ForStmt', declared: dict, indent: str, target) ->
         ctr = gen._cpp_fresh_name("_mg_i")
         lines = []
         if not target_was_declared:
-            lines.append(f"{indent}int64_t {target};")
-        lines.append(f"{indent}for (int64_t {ctr} = ({_stop_e}) - 1; "
-                     f"{ctr} >= ({_start_e}); {ctr}--) {{")
-        lines.append(f"{indent}    {target} = {ctr};")
+            lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {target}"))
+        lines.append(_cpp_ir_line(indent, 'for', f"int64_t {ctr} = ({_stop_e}) - 1; {ctr} >= ({_start_e}); {ctr}--"))
+        lines.append(_cpp_assign_line(target, ctr, indent + '    '))
         for inner in s.body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-        lines.append(f"{indent}}}")
+        lines.append(_cpp_ir_line(indent, 'end'))
         return lines
     # `for i in range(...)` → a plain indexed loop, mirroring the
     # GIMPLE path's _gen_for_range. The C++20-coroutine body can't
@@ -11544,14 +11543,14 @@ def _cpf_named_target(gen, s: 'ForStmt', declared: dict, indent: str, target) ->
         ctr = gen._cpp_fresh_name("_mg_i")
         lines = []
         if not target_was_declared:
-            lines.append(f"{indent}int64_t {target};")
-        lines.append(f"{indent}auto _rep_val = {val_expr};")
-        lines.append(f"{indent}int64_t _rep_n = {times_expr};")
-        lines.append(f"{indent}for (int64_t {ctr} = 0; {ctr} < _rep_n; {ctr}++) {{")
-        lines.append(f"{indent}    {target} = _rep_val;")
+            lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {target}"))
+        lines.append(_cpp_assign_line('auto _rep_val', val_expr, indent))
+        lines.append(_cpp_assign_line('int64_t _rep_n', times_expr, indent))
+        lines.append(_cpp_ir_line(indent, 'for', f"int64_t {ctr} = 0; {ctr} < _rep_n; {ctr}++"))
+        lines.append(_cpp_assign_line(target, '_rep_val', indent + '    '))
         for inner in s.body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-        lines.append(f"{indent}}}")
+        lines.append(_cpp_ir_line(indent, 'end'))
         return lines
     # `for x in <dict-typed expr>.keys()/.values()/.items():` and the
     # bare-dict sibling `for k in <dict-typed expr>:` — plain dict
@@ -11592,22 +11591,19 @@ def _cpf_named_target(gen, s: 'ForStmt', declared: dict, indent: str, target) ->
         lines = []
         if not target_was_declared:
             declared[target] = _dict_iter_elem
-            lines.append(f"{indent}{gimple_exprtypes._c_to_cpp_scalar_type(_dict_iter_elem)} {target};")
-        lines.append(f"{indent}MojoList *{_dlist} = "
-                     f"{_dict_iter_fn}({_cpp_as('MojoDict *', _dict_iter_src)});")
-        lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                     f"{_ctr} < mojo_list_len({_dlist}); {_ctr}++) {{")
+            lines.append(_cpp_ir_line(indent, 'decl', f"{gimple_exprtypes._c_to_cpp_scalar_type(_dict_iter_elem)} {target}"))
+        lines.append(_cpp_assign_line(f"MojoList *{_dlist}", f"{_dict_iter_fn}({_cpp_as('MojoDict *', _dict_iter_src)})", indent))
+        lines.append(_cpp_ir_line(indent, 'for', f"int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_dlist}); {_ctr}++"))
         if gimple_ctypes.TypeLattice.is_cstr(_dict_iter_elem):
             _rhs = f"mojo_list_get_str({_dlist}, {_ctr})"
             if declared.get(target) not in (None, 'char *'):
                 _rhs = f"(int64_t)(intptr_t){_rhs}"
-            lines.append(f"{indent}    {target} = {_rhs};")
+            lines.append(_cpp_assign_line(target, _rhs, indent + '    '))
         else:
-            lines.append(f"{indent}    {target} = "
-                         f"mojo_list_get_int({_dlist}, {_ctr});")
+            lines.append(_cpp_assign_line(target, f"mojo_list_get_int({_dlist}, {_ctr})", indent + '    '))
         for inner in s.body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-        lines.append(f"{indent}}}")
+        lines.append(_cpp_ir_line(indent, 'end'))
         return lines
     # `for x in <set-typed expr>:` — a single-name target over a
     # `MojoSet *` (a declared local/param, `self.<field>`, or a bare
@@ -11632,16 +11628,14 @@ def _cpf_named_target(gen, s: 'ForStmt', declared: dict, indent: str, target) ->
         lines = []
         if not target_was_declared:
             declared[target] = 'int64_t'
-            lines.append(f"{indent}int64_t {target};")
-        lines.append(f"{indent}MojoSetIter *{_sit} = "
-                     f"mojo_set_iter_new({_cpp_as('MojoSet *', _sexpr)});")
-        lines.append(f"{indent}for (int {_smore} = mojo_set_iter_next({_sit}); "
-                     f"{_smore}; {_smore} = mojo_set_iter_next({_sit})) {{")
-        lines.append(f"{indent}    {target} = mojo_set_iter_val_int({_sit});")
+            lines.append(_cpp_ir_line(indent, 'decl', f"int64_t {target}"))
+        lines.append(_cpp_assign_line(f"MojoSetIter *{_sit}", f"mojo_set_iter_new({_cpp_as('MojoSet *', _sexpr)})", indent))
+        lines.append(_cpp_ir_line(indent, 'for', f"int {_smore} = mojo_set_iter_next({_sit}); {_smore}; {_smore} = mojo_set_iter_next({_sit})"))
+        lines.append(_cpp_assign_line(target, f"mojo_set_iter_val_int({_sit})", indent + '    '))
         for inner in s.body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-        lines.append(f"{indent}}}")
-        lines.append(f"{indent}mojo_set_iter_free({_sit});")
+        lines.append(_cpp_ir_line(indent, 'end'))
+        lines.append(_cpp_call_line(indent, 'mojo_set_iter_free', [_sit]))
         return lines
     # `for x in reversed(<list local>):` -- Lib/os.py's `walk`
     # (`for dirname in reversed(dirs)`). The list is reversed ONCE into a
