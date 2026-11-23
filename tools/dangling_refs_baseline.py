@@ -146,10 +146,14 @@ BASELINE = {
     'test_silent_noop_iter.py': 1,
     'test_string_literal_lexing.py': 2,
     'test_struct_formal.py': 1,
-    'test_suite.py': 14,
+    'test_suite.py': 42,
     'test_zip_loop_target_rebind_regress.py': 1,
     'tools/dangling_doc_refs.py': 1,
     'tools/dataclass_reflection_sites.py': 2,
+    # 2026-11-20: two integrator/orchestrator pins name a doc-shaped
+    # FIXTURE (`LAND-x.md`) to drive the retire machinery; the name does
+    # not exist by construction, like the negative controls above.
+    'tools/test_integrate_probe_loop.py': 3,
     'tools/formal_chain_probe.py': 2,
     'tools/formal_fuzz.py': 26,
     'tools/formal_host_import_shapes.py': 1,
@@ -164,7 +168,6 @@ BASELINE = {
     'tools/formal_sweep_parity.py': 1,
     'tools/formal_template_call_census.py': 5,
     'tools/task_text.py': 4,
-    'tools/test_integrate_probe_loop.py': 1,
     'tools/test_orchestration_formal_unlanded_task_state.py': 1,
     'tools/test_proof_review.py': 2,
     'tools/test_swarm_class_refresh.py': 2,
@@ -224,7 +227,7 @@ BARE_BASELINE = {
     'test_mutable_async_capture.py': 1,
     'test_refusal_taxonomy.py': 1,
     'test_regress_split_coro.py': 1,
-    'test_suite.py': 13,
+    'test_suite.py': 39,
     'tools/control.py': 4,
     'tools/dangling_doc_refs.py': 2,
     'tools/formal_fuzz.py': 3,

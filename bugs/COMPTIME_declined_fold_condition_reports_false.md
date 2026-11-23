@@ -118,11 +118,18 @@ measurement with a hand-written variant of the same change instead produced
 `non-trivial conversion in 'integer_cst'` at a `raise "<string>"`; the point is
 unchanged -- one cause, and it only appears once the pruned arm is emitted.)
 
-The truncation is the harness's; the type name is `Format…`, i.e. `FormatSpec`,
-which the stdlib's formatting paths use. So the plausible mechanism is: emitting
-BOTH arms compiles a `FormatSpec`-using path whose IMPORT is not emitted (or is
-itself pruned), leaving the type undeclared. That is the lead to pull -- find the
-module-level import that the pruned arm was suppressing.
+The truncation is the harness's. The name is a `Format…` type, and the only one
+in the stdlib is `FormatStruct` (`std/format/_utils.mojo:287`), which
+`array.mojo:41` imports as `import std.format._utils as fmt`. So the plausible
+mechanism is: emitting BOTH arms compiles a `fmt.FormatStruct`-using path whose
+imported module's declarations are not emitted, leaving the type undeclared.
+Confirm with the generated C (`compile_stdlib.py --roots std/collections -v`
+prints the refusal detail and the `.c` path) and find which module-level import
+the pruned arm was suppressing. Note the reported position is unreliable: every
+failure is at `:33` of a `comptime` local line (array.mojo:588 is
+`comptime TRIVIAL_FAST_PATH_MAX_BYTES = 1024`), while the actual `FormatStruct`
+reference in that file is line 1130, `fmt.FormatStruct(writer, "Array")` -- the
+`#line` mapping in the generated C is pointing at the wrong source line.
 
 It is NOT reachable standalone: `def f() -> Int: raise "boom"`,
 `def f(): raise "boom"` and `def f() -> Int: raise ValueError("boom")` all build
