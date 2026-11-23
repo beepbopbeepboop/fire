@@ -1588,9 +1588,17 @@ class ModuleLoader:
                     _sgt = _ml_py_global_ctype(_sg[1], _sg[2], _callee_exports)
                     if _sgt == '':
                         continue
-                    exports[_sg[0]] = {
+                    # `FLAG = True` / `FLAG: bool = False`: the accessor is
+                    # `int` (a C word), but the VALUE is a Python bool, and
+                    # the importer's `print` must render True/False. Carried
+                    # as its own key so the C type stays what the definer's
+                    # accessor returns.
+                    _sg_entry = {
                         'kind': 'global_var', 'c_return_type': _sgt,
                         'home_module_path': path}
+                    if _sg[2] in ('True', 'False'):
+                        _sg_entry['py_bool'] = True
+                    exports[_sg[0]] = _sg_entry
                 # Re-exports: `from SIBLING import (a, b)` — a set global not
                 # defined locally but surfaced through this module carries the
                 # sibling's own home accessor.

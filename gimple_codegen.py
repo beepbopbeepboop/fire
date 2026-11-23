@@ -3148,6 +3148,12 @@ class GimpleGen:
         # `_reconcile_imported_global_accessors` to take the definer's final
         # C type once that module is compiled into this unit.
         self._imported_global_module: dict = {}
+        # Imported global names whose DEFINING value is a Python bool (`FLAG
+        # = True`). Their accessor is a C `int`, so the bool-ness has to ride
+        # beside it for `print` to render True/False. Set beside
+        # `_imported_global_accessors` by `_emit_imported_global_accessors`;
+        # read by `gimple_exprtypes.is_python_bool_expr`.
+        self._imported_global_bool: set = set()
         # Concrete imported structs used as parameter types here: their StructDefs
         # (so the layout typedef is emitted in dylib mode) and their names (so only
         # these — not local structs — get the authoritative struct-pointer param
