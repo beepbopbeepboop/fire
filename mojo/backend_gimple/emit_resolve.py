@@ -2947,10 +2947,10 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             # `_current_line` is rarely set; the statement the failing store
             # belongs to is named by the last `#line N "file"` directive
             # already emitted above it.
-            _bl = getattr(gen, 'body_lines', None) or []
+            _bl = ginf.body_text(gen)
             _k = len(_bl) - 1
             while _k >= 0 and _k > len(_bl) - 400:
-                _ln = _bl[_k].line()
+                _ln = _bl[_k]
                 if _ln.startswith('#line '):
                     _parts = _ln.split()
                     if len(_parts) >= 2 and _parts[1].isdigit():
@@ -2964,10 +2964,10 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         # The last few statements emitted for the failing store: the temps in
         # the message (`_t111`) only mean something next to the C that made them.
         _ctx = []
-        _bl2 = getattr(gen, 'body_lines', None) or []
+        _bl2 = ginf.body_text(gen)
         _k2 = len(_bl2) - 1
         while _k2 >= 0 and len(_ctx) < 6 and _k2 > len(_bl2) - 200:
-            _l2 = _bl2[_k2].line().strip()
+            _l2 = _bl2[_k2].strip()
             if _l2 and not _l2.startswith('#'):
                 _ctx.append(_l2)
             _k2 -= 1

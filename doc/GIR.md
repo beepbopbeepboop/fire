@@ -600,12 +600,47 @@ functions returning `str`; the three statement helpers have 186 (`_cpp_ir_line`)
 - [x] T2. The statement printers return `list[Instr]` (merged `cec0b197f`; verified on master 2026-11-23).
 - [x] T3. The `-> str` functions become `Ex` (or stay as text only at a named boundary). Done 2026-11-23, see the T3 status below.
 - [x] T4. The `.show()` calls are removed as their consumers take `Ex`/`Instr` (58 to 7; see the T4 status below).
-- [ ] T5. One rendering edge: the function-assembly site renders each `Instr` with `.line()` (the one `'\n'.join` site).
+- [x] T5. One rendering edge: the function-assembly site renders each `Instr` with `.line()` (the one `'\n'.join` site). Done 2026-11-23, see the T5 status below.
 - [ ] T6. Call-slot text lists (`_cpp_call_arg_expr` and its consumers) take `Ex`.
 - [ ] T7. Verify: `test_gimple_cpp_core_arms.py`; `c_oracle check` identical on all 285 pydiff and all coroutine
       programs; `compile_stdlib.py` `FAILED: 0`, no skips; the transcription-only sites (listed in the Status entries)
       probed until each is reached or its probe is recorded as impossible.
 - [ ] T8. Done criterion: delete this doc in the same commit, with `python3 tools/dangling_doc_refs.py --ratchet`.
+
+### Status 2026-11-23: T5 (one rendering edge)
+
+The rule `Instr -> text` now lives in one place: `render_lines(lines)` in `mojo/ir/instr.py` (next to `Instr.line()`,
+which it calls). It was previously a copy in `cpp_core.py` (`_cpp_render_lines`) and a second copy as the body of
+`emit_infra.body_text`. `cpp_core` no longer defines it; its callers import `render_lines`.
+
+Rendering edges after T5 (each statement line is rendered once, by `Instr.line()`, through `render_lines`):
+- `mojo/backend_gimple/emit_infra.py` `body_text(gen)`: the function-body edge for `emit_funcs.py` (3 assemblies) and
+  `emit_loops.py` (1 assembly). It delegates to `render_lines(gen.body_lines)`.
+- `mojo/backend_gimple/cpp_async.py`: the coroutine function bodies (`render_lines(gen._cpp_stmt(...))` for the body
+  text, then `'\n'.join(render_lines(lines))` at each of the 3 assemblies).
+- `mojo/backend_gimple/cpp_core.py` 3168: the one loop lambda that is joined into a single opaque block.
+
+Direct `.line()` calls outside the edge: before 6 (cpp_core render helper, `emit_funcs` main-return check,
+`emit_infra.body_text`, two `emit_resolve` diagnostics, `mojo/ir/build.py` `append`), after 2 (`render_lines` itself,
+and `build.py` `append`, which renders once to test whether a statement is blank or a `#` directive and prints nothing).
+
+Statement-to-text joins, measured by an AST pass over `mojo/backend_gimple/*.py` and `mojo/ir/*.py` (a `''`, `' '`,
+`'\n'` join whose argument names statement lines): 46 before, 44 after. The two removed in `cpp_core.py` are the
+statement-list joins: the `' '.join(stmts[:-1])` of the string-join lambda (12858) and the `' '.join(_pack_stmts)` of the
+`**kwargs` pack lambda (6018), which now pass one opaque statement each to the lambda body (its `show()` joins them with
+the same single space). The function-assembly `'\n'.join(lines)` sites in `emit_funcs`, `emit_loops`, `cpp_async` and
+`emit_infra` join text that is already rendered, so they are not counted as renders. Joins of text fragments that are
+not statement lists (`''.join(parts)` in `cpp_core`, C-text processing in `emit_infra`) are unchanged.
+
+Verification (worktree `work-t5`, branch `work/gir-stage7-t5`, base `9904b3b03`):
+- `test_gimple_cpp_core_arms.py`: `30 arm(s) pinned across 5 printer(s), 0 failure(s)`.
+- `c_oracle check --base master`: `all 285 programs generate identical C` and `all 35 coroutine programs generate
+  identical C++ companion`.
+- `compile_stdlib.py` (default parallelism): `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, `skips: 0`, exit 0.
+- Targeted: `test_gir_builder.py` (0 failures), `test_codegen_yield_from_walk_ast_memo.py` (PASS); the latter imports
+  `render_lines` directly now.
+
+T5 is T5-done. Still open: T6 to T8.
 
 ### Status 2026-11-23: T4 (`.show()` removed as consumers take `Ex`)
 

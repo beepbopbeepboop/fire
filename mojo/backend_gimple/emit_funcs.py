@@ -4392,8 +4392,9 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # `body_lines` has exactly one real entry, hit the crash). Length +
     # a plain, positive-index lookup is the established-safe replacement.
     if node.name == 'main' and gimple_ctypes.TypeLattice.is_int_word(ret_type):
-        _n_body_lines = len(gen.body_lines)
-        _last_body_line = (gen.body_lines[_n_body_lines - 1].line()
+        _body_text = ginf.body_text(gen)
+        _n_body_lines = len(_body_text)
+        _last_body_line = (_body_text[_n_body_lines - 1]
                            if _n_body_lines > 0 else '')
         if not _last_body_line.strip().startswith('return'):
             gen._ret('0')

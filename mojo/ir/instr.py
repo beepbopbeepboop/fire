@@ -282,6 +282,13 @@ class Instr:
         return ' ' * self.indent + self.show()
 
 
+def render_lines(lines) -> list[str]:
+    """The one rendering edge for a function body (doc/GIR.md, stage 7 T5): a mixed list of statement
+    `Instr` and raw C text lines, as the text lines a function body prints. An `Instr` is rendered by
+    `Instr.line()` (its own indent, a label at column 0); a `str` is already text and passes through."""
+    return [ln.line() if isinstance(ln, Instr) else ln for ln in lines]
+
+
 class Sig:
     """A function signature."""
 

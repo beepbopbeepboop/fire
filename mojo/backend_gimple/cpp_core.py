@@ -43,7 +43,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.coro as coro_mod
-from mojo.ir.instr import Ex, Instr, ex_bin, ex_cat, ex_text, ex_var
+from mojo.ir.instr import Ex, Instr, ex_bin, ex_cat, ex_text, ex_var, render_lines
 from mojo.ir.types import Type, type_named
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
@@ -3165,7 +3165,7 @@ def _cpp_build_container_from_iterable(gen, kind: str, iter_node, target_name: s
     # call inside the loop body is lowered.
     declared[acc] = res_ctype
     lines = gen._cpp_for_stmt(for_stmt, declared, '    ')
-    body_text = ' '.join(l.strip() for l in _cpp_render_lines(lines))
+    body_text = ' '.join(l.strip() for l in render_lines(lines))
     _cfi = Ex('lambda')
     _cfi.text = res_ctype
     _cfi.body = [_cpp_instr('decl', f"{res_ctype} {acc} = {new_fn} ()"),
@@ -6015,7 +6015,7 @@ def _cpx_call_ident(gen, e) -> Ex:
         _pck = Ex('lambda')
         _pck.text = 'int64_t'
         _pck.body = [
-            _cpp_opaque(' '.join(_pack_stmts)),
+            *[_cpp_opaque(_s) for _s in _pack_stmts],
             _cpp_instr('return', _cpp_cast_ex('int64_t', _cpp_cast_ex(
                 'intptr_t', _paren_ex(_cpp_call_ex(cpp_fname, _call_args))))),
         ]
@@ -9021,13 +9021,6 @@ def _cps_aug_assign(gen, s, declared: dict, indent: str) -> list[Instr]:
         lhs = ex_var(name)
         rhs = ex_bin(ex_var(name), op, ex_text(val))
     return [_cpp_assign_line(lhs, rhs, indent)]
-
-
-def _cpp_render_lines(lines) -> list[str]:
-    """The assembly edge: a mixed list of statement `Instr` and raw C text lines, as the text lines a
-    function body prints. An `Instr` is rendered by `Instr.line()` (its own indent, a label at column
-    0); a `str` is already text and passes through unchanged."""
-    return [ln.line() if isinstance(ln, Instr) else ln for ln in lines]
 
 
 def _cpp_ir_line(ind: str, kind: str, text: 'str | Ex' = '') -> Instr:
@@ -12855,7 +12848,7 @@ def _cpp_raise_tuple_msg_expr(gen, lit) -> Ex:
     stmts.append('return _s;')
     lam = Ex('lambda')
     lam.text = 'char *'
-    lam.body = [_cpp_opaque(' '.join(stmts[:-1])), _cpp_opaque(stmts[-1])]
+    lam.body = [_cpp_opaque(_s) for _s in stmts]
     return _paren_ex(lam)
 
 
@@ -12925,7 +12918,7 @@ def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[Instr]:
             finally_lines.extend(
                 gen._cpp_stmt(fs, declared, indent + '        '))
         if any('co_yield' in ln or 'co_await' in ln
-               for ln in _cpp_render_lines(finally_lines)):
+               for ln in render_lines(finally_lines)):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "`yield`/`yield from` inside a `finally:` block is not "
                 "supported in a generator body")
