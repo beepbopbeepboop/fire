@@ -469,7 +469,7 @@ MEASURED_PEAK_GB = {
     'native-dumpfull':             (10.4, 'measured'),
     'ab-native':                   (20.5, 'measured'),
     'selfhost':                    (7.9, 'measured'),
-    'mojoc':                       (4.9, 'measured'),
+    'mojoc':                       (9.5, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
     # 5.58 GB was this job's number until 2026-11-21, when the cause was found
     # rather than just measured: a single case compiled the compiler's WHOLE

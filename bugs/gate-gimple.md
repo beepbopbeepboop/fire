@@ -70,6 +70,31 @@ ambiguous, so `_infer_param_types`' `MojoList *` stands. The fix belongs there
 it is proof the parameter must be the kind-neutral word, since the runtime word
 dispatch iterates both.
 
+### 2026-11-23: FIXED (2 of the 3 cases)
+
+`_gmi_apply_call_site_param_evidence`'s not-unanimous branch now reads MIXED
+container+str evidence as the answer it is: the parameter is retyped to the
+kind-neutral `int64_t`, and the choice is recorded in a new
+`gen._mixed_kind_params[fname]` set. Recording it matters -- writing the table
+alone did nothing, because `_gmh_reconcile_param_container_kinds` runs later and
+promotes any int-word slot back to its container guess; both of its loops now
+skip a mixed-evidence slot.
+
+Measured on the repro above: prints `4`, `5`, `d`, `e` and exits 0 (was SIGSEGV
+139). Re-running the job with the switch off: the two SIGSEGV cases
+(`a_mixed_iterated_parameter_with_a_str_variable_runs_correctly` and its
+module-level twin) now PASS -- 3 failures -> 1.
+
+The remaining one,
+`a_str_returned_in_a_tuple_slot_runs_correctly_beside_a_list`, is a different
+shape: its str arrives through a TUPLE-UNPACK target (`s, n = pair()`), which is
+not a literal, so the mixed-evidence arm never sees a `char *` for it. It still
+raises the `_gmh_refuse_mixed_container_params` refusal -- whose stated reason
+("the `int64_t` box cannot tell a `MojoList *` from a `char *`") is now false,
+since the word dispatch does exactly that. Next step is to extend the tuple-slot
+exemption to a slot whose callee returns a str beside a scalar, or to drop the
+refusal for a param the call sites prove mixed.
+
 
 - **Last known working:** `128bc1eb82` integrate fix-proof-fix-gate-type-string-ratchet
 - **First known not working:** `8bc7bb14af` integrate bug-codegen-per-file-from-import-calls-m

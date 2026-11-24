@@ -332,6 +332,48 @@ def _gmi_apply_call_site_param_evidence(gen, stmts: list):
         pname = _as_str(_ekp[1])
         ctypes = _as_str(evidence[_ek]).split('\x1f')
         if len(ctypes) != 1:
+            # MIXED evidence is an ANSWER, not an absence of one. When one
+            # parameter is called with BOTH a container and a string, the
+            # use-derived collapse ("iterable" -> `MojoList *`) is provably
+            # wrong for half its callers, and leaving it standing makes the
+            # loop read a str's own bytes as a `MojoList` header. Measured:
+            #
+            #     def each(xs):
+            #         for x in xs:
+            #             print(x)
+            #     def main():
+            #         ys = "de"
+            #         each([4, 5])
+            #         each(ys)
+            #
+            # prints 4, 5 and then SIGSEGVs in `mojo_list_get_boxed` at address
+            # 0x6564 -- the ASCII bytes of "de". The runtime word dispatch
+            # iterates lists AND strings, so the kind-neutral word serves
+            # every caller; called with the str alone the same def already
+            # takes it and runs correctly. Only an UNANNOTATED parameter is
+            # retyped -- an annotation outranks every inference in this table.
+            #
+            # The choice is RECORDED as well as applied: `_gmh_reconcile_param_
+            # container_kinds` runs later and would otherwise overwrite any
+            # int-word slot with its unanimous-container guess, which is how
+            # the first version of this fix left the job still segfaulting.
+            _m_cont = False
+            _m_str = False
+            for _c in ctypes:
+                _cs = _as_str(_c)
+                if _cs in containers:
+                    _m_cont = True
+                elif gimple_ctypes.TypeLattice.is_cstr(_cs):
+                    _m_str = True
+            if _m_cont and _m_str:
+                _am = _as_dict(gen._annotated_params.get(fname))
+                if not (_am and pname in _am):
+                    ipt.setdefault(fname, {})[pname] = 'int64_t'
+                    _mk = getattr(gen, '_mixed_kind_params', None)
+                    if _mk is None:
+                        _mk = {}
+                        gen._mixed_kind_params = _mk
+                    _mk.setdefault(fname, set()).add(pname)
             continue  # not unanimous
         # `list(ctypes)[0]`, NOT `next(iter(ctypes))`: this function is part
         # of the self-host closure, and `next` is not one of the runtime
@@ -10334,8 +10376,17 @@ def _gmh_reconcile_param_container_kinds(self):
         # function exists to close. The guard reads the recorded set,
         # never the table value, so it holds after the record passes.
         _pbns = (getattr(self, '_param_box_names', None) or {}).get(_rn)
+        _mkns = (getattr(self, '_mixed_kind_params', None) or {}).get(_rn)
         for _rpn in list(_rp.keys()):
             if _pbns and _rpn in _pbns:
+                continue
+            # A slot the CALL SITES proved must be the kind-neutral word
+            # (`_gmi_apply_call_site_param_evidence`'s mixed container+str arm):
+            # the binding estimator sees only this body's bindings, never a
+            # caller, so its container answer is not evidence about the other
+            # callers. Overriding it here is exactly the declaration/definition
+            # split the box-name exemption above exists to close.
+            if _mkns and _rpn in _mkns:
                 continue
             _fixed = funcs_shared.param_binding_ctype(self, _rn, _rpn, _rp[_rpn])
             if _fixed != _rp[_rpn]:
@@ -10356,10 +10407,16 @@ def _gmh_reconcile_param_container_kinds(self):
         # exists to close. The guard reads the recorded set, never the table
         # value, so it holds for a slot the refiners below retyped.
         _pbns = (getattr(self, '_param_box_names', None) or {}).get(_fn)
+        _mkns = (getattr(self, '_mixed_kind_params', None) or {}).get(_fn)
         for _pname, _ctype in _pmap.items():
             if _ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                 continue
             if _pbns and _pname in _pbns:
+                continue
+            # Ditto the mixed-evidence exemption: this map is a container guess,
+            # and a slot the call sites proved kind-neutral must not be promoted
+            # back to a container the other callers cannot use.
+            if _mkns and _pname in _mkns:
                 continue
             _cur = self._inferred_param_types[_fn].get(_pname)
             if (gimple_ctypes.TypeLattice.is_int_word_or_none(_cur) or gimple_ctypes.TypeLattice.is_unsolved(_cur)):
