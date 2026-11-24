@@ -368,12 +368,12 @@ _MEMCAP_PEAK = re.compile(r'peak (?:observed before the kill: )?([\d.]+) GB')
 _MEMCAP_BREACH = 'memcap: BREACH'
 # memcap's banner: the one line it prints BEFORE it starts anything
 # (tools/memcap.py prints it, then starts the command, then polls). Every
-# outcome it can report starts with one of these words — BREACH, done,
+# outcome it can report starts with one of these words — BREACH, TIMEOUT, done,
 # interrupted, WATCHDOG FAILED — so a captured output that has the banner and
 # none of them is a wrapper that died before it could account for its run.
 _MEMCAP_BANNER = re.compile(r'^memcap: \S+ -- ceiling [\d.]+ GB across the '
                             r'process tree', re.M)
-_MEMCAP_OUTCOME = re.compile(r'^memcap: (?:BREACH|done|interrupted|'
+_MEMCAP_OUTCOME = re.compile(r'^memcap: (?:BREACH|TIMEOUT|done|interrupted|'
                              r'WATCHDOG FAILED)', re.M)
 
 

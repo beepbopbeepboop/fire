@@ -5784,8 +5784,14 @@ def build_cmd(job: Job, opts) -> list[str]:
         # tools/memcap.py` then resolves against THAT cwd and dies with
         # "can't open file .../stage1/tools/memcap.py" before the wrapped
         # command ever runs.
+        # The wall-clock limit is the job's OWN timeout, so every wrapped job
+        # names a real cap rather than inheriting memcap's 20-minute default:
+        # a job the suite allows an hour must not be killed at twenty minutes.
+        # It is the same number the runner arms, so the two agree.
+        time_s = getattr(spec, 'timeout', None) or opts.timeout or DEFAULT_JOB_TIMEOUT_S
         cmd = [PY, os.path.join(HERE, 'memcap.py'),
                '--limit-gb', str(limit),
+               '--time-limit-min', '%.4f' % (time_s / 60.0),
                '--label', job.key, '--'] + cmd
     elif not fanout or spec.mem:
         # A `cmd`/`make` job on the default class that resolves to 0 under

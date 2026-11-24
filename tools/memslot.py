@@ -493,6 +493,9 @@ def main(argv):
     ap.add_argument("--gb", type=float, required=True, help="memory to reserve, and the job's hard ceiling")
     ap.add_argument("--label", default=None)
     ap.add_argument("--budget-gb", type=float, default=None, help="machine-wide budget (default MEMSLOT_BUDGET_GB or 96)")
+    ap.add_argument("--minutes", type=float, default=None,
+                    help="wall-clock limit in minutes (default: memcap's 20). A job that "
+                         "runs longer must name its own number.")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     a = ap.parse_args(argv[1:])
     cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
@@ -507,8 +510,9 @@ def main(argv):
             print("memslot: refused: %s" % e, file=sys.stderr)
             return 126
     try:
-        proc = subprocess.Popen([sys.executable, os.path.join(HERE, "memcap.py"), "--limit-gb", str(a.gb),
-                                 "--label", label, "--"] + cmd)
+        tl = ["--time-limit-min", str(a.minutes)] if a.minutes is not None else []
+        proc = subprocess.Popen([sys.executable, os.path.join(HERE, "memcap.py"), "--limit-gb", str(a.gb)]
+                                + tl + ["--label", label, "--"] + cmd)
         if not covered:
             note_job(proc.pid)
         return proc.wait()
