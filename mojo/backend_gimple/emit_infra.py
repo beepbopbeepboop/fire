@@ -49,6 +49,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.float8_dtype as _float8_dtype
 import gimple_codegen
 import mojo.ir.build as build
+from mojo.ir.instr import render_lines
 from build_config import find_gxx, runtime_dir as _bc_runtime_dir
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
@@ -2659,10 +2660,7 @@ def body_text(gen) -> list:
     shape into what the body prints. The function-assembly sites spread this
     list into their line list, so none of them needs to know a statement's
     kind."""
-    out: list = []
-    for s in gen.body_lines:
-        out.append(s.line())
-    return out
+    return render_lines(gen.body_lines)
 
 
 def _elem_of(gen, name: str) -> str:

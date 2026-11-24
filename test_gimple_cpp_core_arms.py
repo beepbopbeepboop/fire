@@ -248,7 +248,7 @@ def main() -> int:
         def _cpp_struct_ptr_local(self, name):
             return False
         def _cpp_in_link(self, a, an, b, bn, negate=False):
-            return f"in({a},{b})"
+            return _C.ex_text(f"in({a.show()},{b.show()})")
 
     _iv = lambda v: _N.IntLiteral(value=v)
     _walrus_name = _N.BinaryOp(op=':=', left=_N.IdentExpr(name='q'), right=_iv(3))

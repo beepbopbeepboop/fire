@@ -598,14 +598,124 @@ functions returning `str`; the three statement helpers have 186 (`_cpp_ir_line`)
       `_cpp_call_line`, `_cpp_instr`, `_cpp_opaque`, `_cpp_if_break_line`. Consumers that test a line as text (for
       example `'co_yield' in ln` over `finally_lines`) must test the Instr's `show()`.
 - [x] T2. The statement printers return `list[Instr]` (merged `cec0b197f`; verified on master 2026-11-23).
-- [ ] T3. The 11 `-> str` functions become `Ex` (or stay as text only at a named boundary).
-- [ ] T4. The 24 `.show()` boundaries are removed as their consumers take `Ex`/`Instr`.
-- [ ] T5. One rendering edge: the function-assembly site renders each `Instr` with `.line()` (the one `'\n'.join` site).
-- [ ] T6. Call-slot text lists (`_cpp_call_arg_expr` and its consumers) take `Ex`.
+- [x] T3. The `-> str` functions become `Ex` (or stay as text only at a named boundary). Done 2026-11-23, see the T3 status below.
+- [x] T4. The `.show()` calls are removed as their consumers take `Ex`/`Instr` (58 to 7; see the T4 status below).
+- [x] T5. One rendering edge: the function-assembly site renders each `Instr` with `.line()` (the one `'\n'.join` site). Done 2026-11-23, see the T5 status below.
+- [x] T6. Call-slot text lists (`_cpp_call_arg_expr` and its consumers) take `Ex`. Done 2026-11-23, see the T6 status below.
 - [ ] T7. Verify: `test_gimple_cpp_core_arms.py`; `c_oracle check` identical on all 285 pydiff and all coroutine
       programs; `compile_stdlib.py` `FAILED: 0`, no skips; the transcription-only sites (listed in the Status entries)
       probed until each is reached or its probe is recorded as impossible.
 - [ ] T8. Done criterion: delete this doc in the same commit, with `python3 tools/dangling_doc_refs.py --ratchet`.
+
+### Status 2026-11-23: T6 (call-slot text lists take `Ex`)
+
+`_cpp_call_arg_expr(gen, a) -> Ex` now returns an `Ex` (the list-literal case already did): `_cpp_list_literal_arg_expr`
+or `gen._cpp_expr_ex(a)`, no `.show()`. Its consumers now take the Ex:
+- The slot binder `_cpp_generator_call_slot_pairs` returns `[(Ex, ctype), ...]`. Its leading, tail and default slots
+  are normalised there (`_as_ex`, `ex_text`), so no caller hands it text.
+- `_cpp_emit_generator_start_expr` and `_cpp_generator_start_kwargs_expr` build the `<base>_start` arguments with
+  `_cpp_cast_ex`/`_paren_ex` and `_cpp_call_ex`, not f-strings.
+- The `yield from` and `for ... in` consumers: the pointer and word casts are `_cpp_cast_ex`; the `', '.join(arg_exprs)`
+  joins are gone, and the `_mojogen_sub_guard` line is `ex_cat(..., _cpp_call_ex(<base>_start, arg_exprs), ...)`.
+  The `for ... in` `_mj_w(...)` wrap is `_cpp_call_ex`.
+- The builtin-call function (`args = [_cpp_call_arg_expr(gen, a) ...]`): its `f"(T)({args[N]})"` casts and
+  `(void *)(intptr_t)(...)` casts are `_cpp_cast_ex`/`_paren_ex`, the `ex_text(args[0])` wrappers are dropped, and the
+  `tuple`/`list` copy line is `_cpp_iter_word_ex`. The min/max result and the `mojo_reversed` wrap are `_cpp_call_ex`.
+
+Counts (the call-argument path; `.show()` and f-string sites over the argument lists, master `63e597a35` vs this round):
+- Call sites of `_cpp_call_arg_expr` whose result is text: 7 before (the 4 slot/cargs sites at 2315, 2343, 2439, 2442,
+  plus 4933, 10396, 13656), 0 after. Every one now feeds an Ex list.
+- f-string sites over an argument (`{args[...]}`, `{a}` of an argument list, the `(T)(...)` slot casts): 19 before, 2
+  after. Both are statement text (see below).
+- `.show()` calls in `cpp_core.py`: 8 before, 12 after. The one in `_cpp_call_arg_expr` is gone; the 5 added are the
+  text edges listed below, each rendering an argument once at the point it becomes statement text.
+
+Text consumers left in the call-argument path, each a text edge (statement or shape test), with the reason:
+1. The min/max statement body (`_body`, `_a = args[_ai].show()`, `args[0].show()`): built as a C statement string in the
+   reduction lambda. Moving it to `Instr` statements is the next step, not T6's.
+2. The `*args` pack (`_pack_stmts`, `args[_i].show()`): a text list of printed statements (see the T4 note on 5974).
+3. The rethrow argument text (`_cargs = ", ".join(...)` over `[x.show() for x in args]`), passed to
+   `_cpp_rethrow_pending`, which takes text.
+4. The `yield from` shape test (`re.fullmatch(r'-?\d+|true|false', arg_exprs[_ai].show().strip())`): a regex over the
+   printed argument, so it must read the text. The decision is unchanged.
+
+Verification (worktree `work-t6`, branch `work/gir-stage7-t6`, base `63e597a35`):
+- `test_gimple_cpp_core_arms.py`: `30 arm(s) pinned across 5 printer(s), 0 failure(s)`.
+- `c_oracle check --base master`: `all 285 programs generate identical C to 63e597a35a6e` and `all 35 coroutine programs
+  generate identical C++ companion to 63e597a35a6e`.
+- `compile_stdlib.py` (default parallelism): `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no `skip` lines, exit 0.
+  The run was a cold build (`Codegen CAS: 0/610 hits`, `GCC CAS: 0/610 hits`).
+
+T6 is T6-done. Still open: T7 to T8.
+
+### Status 2026-11-23: T5 (one rendering edge)
+
+The rule `Instr -> text` now lives in one place: `render_lines(lines)` in `mojo/ir/instr.py` (next to `Instr.line()`,
+which it calls). It was previously a copy in `cpp_core.py` (`_cpp_render_lines`) and a second copy as the body of
+`emit_infra.body_text`. `cpp_core` no longer defines it; its callers import `render_lines`.
+
+Rendering edges after T5 (each statement line is rendered once, by `Instr.line()`, through `render_lines`):
+- `mojo/backend_gimple/emit_infra.py` `body_text(gen)`: the function-body edge for `emit_funcs.py` (3 assemblies) and
+  `emit_loops.py` (1 assembly). It delegates to `render_lines(gen.body_lines)`.
+- `mojo/backend_gimple/cpp_async.py`: the coroutine function bodies (`render_lines(gen._cpp_stmt(...))` for the body
+  text, then `'\n'.join(render_lines(lines))` at each of the 3 assemblies).
+- `mojo/backend_gimple/cpp_core.py` 3168: the one loop lambda that is joined into a single opaque block.
+
+Direct `.line()` calls outside the edge: before 6 (cpp_core render helper, `emit_funcs` main-return check,
+`emit_infra.body_text`, two `emit_resolve` diagnostics, `mojo/ir/build.py` `append`), after 2 (`render_lines` itself,
+and `build.py` `append`, which renders once to test whether a statement is blank or a `#` directive and prints nothing).
+
+Statement-to-text joins, measured by an AST pass over `mojo/backend_gimple/*.py` and `mojo/ir/*.py` (a `''`, `' '`,
+`'\n'` join whose argument names statement lines): 46 before, 44 after. The two removed in `cpp_core.py` are the
+statement-list joins: the `' '.join(stmts[:-1])` of the string-join lambda (12858) and the `' '.join(_pack_stmts)` of the
+`**kwargs` pack lambda (6018), which now pass one opaque statement each to the lambda body (its `show()` joins them with
+the same single space). The function-assembly `'\n'.join(lines)` sites in `emit_funcs`, `emit_loops`, `cpp_async` and
+`emit_infra` join text that is already rendered, so they are not counted as renders. Joins of text fragments that are
+not statement lists (`''.join(parts)` in `cpp_core`, C-text processing in `emit_infra`) are unchanged.
+
+Verification (worktree `work-t5`, branch `work/gir-stage7-t5`, base `9904b3b03`):
+- `test_gimple_cpp_core_arms.py`: `30 arm(s) pinned across 5 printer(s), 0 failure(s)`.
+- `c_oracle check --base master`: `all 285 programs generate identical C` and `all 35 coroutine programs generate
+  identical C++ companion`.
+- `compile_stdlib.py` (default parallelism): `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, `skips: 0`, exit 0.
+- Targeted: `test_gir_builder.py` (0 failures), `test_codegen_yield_from_walk_ast_memo.py` (PASS); the latter imports
+  `render_lines` directly now.
+
+T5 is T5-done. Still open: T6 to T8.
+
+### Status 2026-11-23: T4 (`.show()` removed as consumers take `Ex`)
+
+`.show()` calls in `mojo/backend_gimple/cpp_core.py`: 58 on master `3a215425a` (`grep -c`, and 58 occurrences by
+`grep -o`; the T3 entry above said 60), 7 after this round. The statement sites that built their line as an f-string
+with an interpolated `.show()` are now `Ex` compositions rendered by the statement helper.
+
+What landed:
+- `mojo/ir/instr.py`: a concatenation kind `Ex('cat')` and `ex_cat(*parts)` (parts are Ex or text), so a line that is
+  partly text and partly an operand stays an Ex until the statement helper renders it.
+- `_cpp_ir_line` takes an Ex operand (as `_cpp_assign_line` and `_cpp_instr` already did); `_cpp_call_line` takes Ex args.
+- `_cpp_counted_loop_ex(ctr, lst)` (the `for` header over a list, 7 sites, was copy-pasted) and `_cpp_iter_word_ex(src)`
+  (`mojo_iter_word((int64_t)(intptr_t)(...))`, 5 sites).
+- The dynamic-call wrapper `_cpp_dyn_call_text` is gone; its 5 callers use `_cpp_dyn_call_expr` directly, which returns Ex.
+- `_cpp_module_global_field`'s literal string, `_cpp_boxed_list_literal_expr`, `_cpp_list_literal_arg_expr`, the
+  and/or word pick (`_cpp_cond_ex`), the `while` list/dict/set tests, the raise messages (`ex_cat` of the message Ex,
+  three throw sites), the `yield from` sorted/`sorted` lists, and the list/dict/set iteration reads now take Ex.
+
+Remaining `.show()` calls, each a text boundary, with the reason:
+- `cpp_core.py` 563 (`_kwfwd` lambda): its `lines` are `_cpp_opaque` text blocks (`_cpp_opaque(ln)`).
+- 2482 (generator spread lambda): a `_cpp_opaque` text block joined with text lines.
+- 2573 (boxed list literal): the element `parts` are joined into a `_cpp_opaque` text block.
+- 2653 (`_cpp_call_arg_expr`): returns text; its consumers are the call-slot text lists, which is T6.
+- 5334 (`next(<generator call>)`): the handle is tested with `.isidentifier()` in `_cpp_next_on_generator_expr`, so it is text.
+- 5974 (`**kwargs` literal key): the key goes into `_pack_stmts`, a text list of printed statements.
+- 7014 (`_cpp_expr`): the named text boundary (`_cpp_expr_ex(gen, e).show()`), with its 232 callers.
+
+Verification (worktree `work-t4`, branch `work/gir-stage7-t4`):
+- `test_gimple_cpp_core_arms.py`: `30 arm(s) pinned across 5 printer(s), 0 failure(s)`.
+- `c_oracle check --base master`: `all 285 programs generate identical C` and `all 35 coroutine programs generate
+  identical C++ companion`.
+- `compile_stdlib.py`: `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no `skip` lines, exit 0.
+
+T4 is T4-done. Still open: T5 to T8.
 
 ### Status 2026-11-23: T2 verified on master (merge `cec0b197f`)
 
@@ -614,7 +724,54 @@ T2 (statement printers return `list[Instr]`) was merged before verification and 
 - `c_oracle check --base 3dec79e25` (the commit before T2): identical C on all 285 pydiff programs and identical C++ on all 35 coroutine programs.
 - `compile_stdlib.py` (default parallelism): `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no skips. The run was served almost entirely from the content-addressed cache (100% codegen and GCC hits), so it confirms the same code compiles, not a fresh build.
 
-T2 is T2-done. Still open: T3 through T8.
+T2 is T2-done. Still open: T4 through T8.
+
+### Status 2026-11-23: T3 (`-> str` functions return `Ex`)
+
+The AST pass (`FunctionDef` whose `returns` unparses to `str`) finds 7 functions in `cpp_core.py`; the other 4 of
+the "11" are annotated `str | None` and are listed below as not converted.
+
+Converted:
+- `_cpp_as(ctype, expr) -> Ex`: `_cpp_cast_ex(ctype, _paren_ex(_as_ex(expr)))`, 87 call sites. 44 are f-string fields
+  now `{...show()}`, the text sinks for statement lines. The Ex consumers (`_cpp_call_ex` args, `_cpp_comma_ex`,
+  `ex_text(...)` wrappers) take the Ex directly.
+- `_cpp_in_link(gen, a: Ex, a_node, b: Ex, b_node, negate) -> Ex`: built from `_cpp_call_ex`, `_cpp_cast_ex`,
+  `_paren_ex`, `_cpp_not_ex`. The `in` branch of the compare-chain arm computes its operands as Ex; the other
+  comparisons keep the text boundary, because `_cpp_str_compare` takes text.
+- `_cpp_apply_fstring_spec(part_val: Ex, spec) -> Ex` and `_cpp_fstring_list_piece(gen, expr_node, v) -> Ex`
+  (unannotated before, now Ex because it feeds the same pieces).
+- `_cpp_string_literal_expr(gen, val, is_interp) -> Ex`: the pieces are Ex, the `mojo_str_cat` chain is
+  `_cpp_call_ex`. 3 call sites.
+- `_cpp_tagged_operand_word(gen, node) -> Ex`: `_cpp_cast_ex` chain. 1 call site.
+- `_cpp_build_container_from_iterable`: the annotation was `-> str` but the body already returned an Ex
+  (the lambda). Annotation corrected to `-> Ex`.
+
+Kept as text, on purpose:
+- `_cpp_expr(gen, e) -> str` is THE named text boundary (`_cpp_expr_ex(gen, e).show()`), 232 callers. Its callers
+  that need text are the sinks T4/T6 remove.
+
+Not converted (annotated `str | None`, outside the literal `-> str` pass):
+- `_cpp_percent_format`, `_cpp_fn_container_shape`, `_cpp_str_compare` (takes text operands),
+  `_cpp_literal_slot_ctype` (a C type spelling, not an expression). The first three are the next candidates.
+
+Irreducible text leaves (`ex_text`), recorded here:
+- C string literal spellings (`"..."`, `""`, `"True"`, `"False"`, `"fill"`) and the constants `'0'`, `'NULL'`,
+  `'-1'`, which are `ex_text` leaves with no shape.
+- `_cpp_word_of_kind(ctype, text)` (in `mojo/middle/exprtypes.py`, returns str): its result is an `ex_text` leaf
+  inside `_cpp_tagged_operand_word`. Converting it is that module's own step.
+
+Show count in `cpp_core.py`: 15 on master, 60 now. The new `.show()` calls are each a text sink (`_cpp_assign_line`,
+`_cpp_ir_line`, f-string conditions, `_cpp_instr` text). T4 removes them as those sinks take Ex.
+
+Verification (worktree `work-t3`, base `master` HEAD 051634f49):
+- `test_gimple_cpp_core_arms.py`: `30 arm(s) pinned across 5 printer(s), 0 failure(s)`. One fixture line changed:
+  the `_EGen` stub's `_cpp_in_link` takes and returns Ex, because the interface changed.
+- `c_oracle check --base master`: `all 285 programs generate identical C` and `all 35 coroutine programs generate
+  identical C++ companion`. A first run caught a leftover placeholder (`_cpp_marker_void`), fixed before the run
+  reported here.
+- `compile_stdlib.py`: `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no `skip` lines, exit 0.
+
+T3 is T3-done. Still open: T4 through T8.
 
 Status: stage 7 T1 (statement helpers return `Instr`) and T2 (statement printers return `list[Instr]`) are on
 master and verified. Still open: T3 to T8 below. This file is the only GIR document; the dated history of
