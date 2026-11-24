@@ -1023,6 +1023,18 @@ def register_imported_symbol(gen, name: str, info: dict,
     # re-dispatched bare call found nothing and emitted a weak 0-returning
     # stub), and master, which had no such registration, was green.
     _c_ret = _info.get('c_return_type')
+    # A `global_var` export is a module-level VARIABLE (`_SIGNED: dict = {..}`
+    # in generated_dispatch.py), not a function. Its `c_return_type` is the
+    # global's C type, and recording it here as a FUNCTION return type made
+    # `calls_shared._callable_value_symbol` answer "a function value" for every
+    # alias of it: `class TypeLattice: _FLOAT = _GD_FLOAT` emitted a
+    # file-scope `static void * _funcptr__FLOAT = (void *)_FLOAT;` in the
+    # whole-closure translation unit, where `_FLOAT` is not declared
+    # ("'_FLOAT' undeclared here", the three group D gcc errors). The global
+    # itself is typed through `imported_symbols` / `_global_var_types`, which
+    # this guard leaves alone.
+    if _info.get('kind') == 'global_var':
+        _c_ret = None
     if _c_ret and not _info.get('c_return_type_is_default'):
         if isinstance(_c_ret, str) and _c_ret.startswith('MojoTuple_'):
             # Part 4 (measured 2026-10-21 integration, `split`'s
