@@ -421,6 +421,34 @@ def test_span_param_binds_from_a_proven_span():
     print("PASS  span_param_binds_from_a_proven_span")
 
 
+def test_type_param_defaults_splits_only_at_a_top_level_equals():
+    """`elaborate.type_param_defaults` splits a bracket parameter at a
+    TOP-LEVEL `=` only. std's `Span` head carries `origin: Origin[mut=mut]`:
+    the `=` inside the annotation's brackets belongs to the annotation, so
+    `origin` has NO default (a plain partition gave it the text `mut]`, which
+    `_default_type_arg` rejects). A bracketed default keeps its whole text.
+
+    Pins the first split of the CODEGEN_prelude_sort_is_not_resolved bug
+    (the bracket-default defect in std's Span head, found while elaborating
+    `std.builtin.sort`); the fix is `elaborate._partition_top_level_eq`.
+    """
+    import elaborate
+    problems = []
+    span = ('struct Span[mut: Bool, //, T: AnyType, origin: Origin[mut=mut], *,\n'
+            '            address_space: AddressSpace = .GENERIC]:\n    pass\n')
+    got = elaborate.type_param_defaults(span)
+    if got != {'address_space': '.GENERIC'}:
+        problems.append(f'Span defaults {got!r}, want '
+                        f"{{'address_space': '.GENERIC'}}")
+    bracketed = 'def f[a: Int, x: Int = f[a=1]()]():\n    pass\n'
+    got = elaborate.type_param_defaults(bracketed)
+    if got.get('x') != 'f[a=1]()':
+        problems.append(f"bracketed default {got.get('x')!r}, want 'f[a=1]()'")
+    if problems:
+        raise AssertionError('; '.join(problems))
+    print("PASS  type_param_defaults_splits_only_at_a_top_level_equals")
+
+
 def test_boxed_span_arg_is_cast_to_a_span_only_when_proven():
     """A `Span *` parameter given a BOXED `int64_t` argument gets a
     `(Span *)` cast at the call site, but ONLY when the caller proved that
@@ -16528,6 +16556,8 @@ main()
                   'span_param_binds_only_from_a_proven_list')
     _run_isolated(test_span_param_binds_from_a_proven_span,
                   'span_param_binds_from_a_proven_span')
+    _run_isolated(test_type_param_defaults_splits_only_at_a_top_level_equals,
+                  'type_param_defaults_splits_only_at_a_top_level_equals')
     _run_isolated(test_boxed_span_arg_is_cast_to_a_span_only_when_proven,
                   'boxed_span_arg_is_cast_to_a_span_only_when_proven')
     _run_isolated(test_arity_overloads_mangle_to_distinct_symbols,
