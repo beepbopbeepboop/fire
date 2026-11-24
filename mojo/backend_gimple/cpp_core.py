@@ -8221,7 +8221,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     _boxed_names.add(el.name)
                 lines.append(_cpp_assign_line(
                     ex_text(el.name),
-                    ex_text(f"mojo_list_get_int({_cpp_as('MojoList *', _ubox)}, {i})"),
+                    _cpp_call_ex('mojo_list_get_int', [_cpp_as('MojoList *', _ubox), i]),
                     indent))
             return lines
         if (not _tup_is_list_val and not _tup_is_unresolved_call
@@ -8809,10 +8809,10 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         if val is None:
             val = gen._cpp_expr(s.value)
         if isinstance(val, str) and val.startswith('@@CSYM:'):
-            return [_cpp_assign_line(ex_text(cpp_name), ex_text(f"_mj_w({val})"), indent)]
+            return [_cpp_assign_line(ex_text(cpp_name), _cpp_call_ex('_mj_w', [val]), indent)]
         _acast0 = _cpp_assign_cast_type(gen, val)
         if _acast0 is not None and gimple_ctypes.TypeLattice.is_word(ctype) and _acast0 != ctype:
-            return [_cpp_assign_line(ex_text(cpp_name), ex_text(f"(int64_t)(intptr_t)({val})"), indent)]
+            return [_cpp_assign_line(ex_text(cpp_name), _cpp_cast_ex('int64_t', _cpp_cast_ex('intptr_t', _paren_ex(ex_text(val)))), indent)]
         return [_cpp_assign_line(ex_text(cpp_name), ex_text(val), indent)]
     if _rhs_tagged and (not gimple_ctypes.TypeLattice.is_cstr(declared.get(name))):
         _cpp_mark_tagged_word(gen, name)
@@ -8842,7 +8842,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     _decl_t = declared.get(name)
     if (isinstance(val, str) and val.startswith('@@CSYM:')
             and gimple_ctypes.TypeLattice.is_word_value(_decl_t)):
-        return [_cpp_assign_line(ex_text(cpp_name), ex_text(f"_mj_w({val})"), indent)]
+        return [_cpp_assign_line(ex_text(cpp_name), _cpp_call_ex('_mj_w', [val]), indent)]
     _acast = _cpp_assign_cast_type(gen, val)
     if (_acast is None and isinstance(s.value, gimple_ctypes.IdentExpr)
             and gen._cpp_declared is not None):
@@ -8852,7 +8852,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             _acast = _vt0
     if (_acast is not None and gimple_ctypes.TypeLattice.is_word_value(_decl_t)
             and _acast != _decl_t):
-        return [_cpp_assign_line(ex_text(cpp_name), ex_text(f"({_decl_t})(intptr_t)({val})"), indent)]
+        return [_cpp_assign_line(ex_text(cpp_name), _cpp_cast_ex(_decl_t, _cpp_cast_ex('intptr_t', _paren_ex(ex_text(val)))), indent)]
     # A `lambda *a, **k` assigned into a variable that already holds a
     # callable as a WORD (a parameter): the word is a runtime variadic
     # function value (`MojoVarargFn`), whose callee is a captureless
