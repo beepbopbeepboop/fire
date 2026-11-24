@@ -18,7 +18,7 @@ import swarm as S
 
 def running_task(name, claims):
     return {"state": "running", "pid": os.getpid(), "worktree": "/nonexistent", "branch": "work/" + name,
-            "claims": claims, "model": "m", "pool": "iceman", "started": "2026-11-10 00:00:00"}
+            "claims": claims, "model": "m", "pool": "mid-free", "started": "2026-11-10 00:00:00"}
 
 
 class ReclassBusySet(unittest.TestCase):

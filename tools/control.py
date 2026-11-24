@@ -1374,7 +1374,7 @@ def cmd_refill(a):
     items = sorted(items_all, key=refill_key)
     started = 0
     items = [i for i in items if i["name"].startswith(tuple(a.prefix.split(",")))]
-    # The FORMAL lane is the owner's: its Qwen runs formal* tasks by hand, and the swarm never starts one, on any slot
+    # The FORMAL lane is the owner's: its local Inkling runs formal* tasks by hand, and the swarm never starts one, on any slot
     # (2026-10-31: queued formal tasks were started on haiku, which is paid and not for the formal lane).
     for it in items:
         if live + started >= a.target and not it["name"].startswith("fix-landed"):
