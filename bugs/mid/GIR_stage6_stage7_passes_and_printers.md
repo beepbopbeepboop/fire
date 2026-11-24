@@ -1035,3 +1035,22 @@ Still open for the done criterion: about 24 `.show()` boundaries (the statement 
 their consumers splice; they need to return IR statements), the `+[]` vararg function-pointer statement (a closure
 form with a `+` unary and no capture), and the multi-line tuple-get in `_cpx_call_member` (`mojo_dict_get_int` with a
 runtime cast). The doc is NOT deleted: the done criterion needs an oracle-identical verified run first.
+
+## Status 2026-11-23 (step 40, branch `work/gir-stage7-rest`): the vararg statement and the dictionary-get cast are shapes
+
+The `*args`/`**kwargs` function-value statement is an assignment whose right-hand side is a cast over a
+call, with a unary `+` over a closure that has an empty capture (the closure kind now takes a `capture`, default
+`&`). The `mojo_dict_get_int` return with a runtime cast type is a cast over a call.
+
+Verified on the branch (step 40 runs): arm test 30 arms, 0 failures; `c_oracle check --base master` identical on
+all 285 pydiff programs and all 35 coroutine programs (before these two edits; see the run note below).
+
+Coverage: the `brace` sites reached by the existing corpus are the `_W` ternary (12), the reverse cast (03, 09), the
+globals field (22) and the dynamic call (21). The `_W` pick, the negated `in`, the tuple text, the dictionary-get cast,
+the self field, the value call, the pending throw, the sleep awaiter and the vararg statement are NOT reached and are
+checked by transcription only.
+
+Remaining for the done criterion: the statement printers still return text lists (`_cps_*`, `_cpf_*`, `_cpp_stmt`);
+the `.show()` boundaries are the rendering edge of those lists, and the call-slot consumers (`_cpp_call_arg_expr`,
+the list-literal call argument) still take text. Converting the statement printers to return IR statements is the
+next stage-7 step and the largest one left. The doc is NOT deleted.

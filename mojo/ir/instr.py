@@ -106,8 +106,8 @@ class Ex:
             return self.a.show() + ' ? ' + self.b.show() + ' : ' + self.c.show()
         if k == 'closure':
             # `[&](params) -> T { stmt }`: a lambda VALUE, passed on rather than called in place;
-            # `name` is its parameter list text, `text` its return type ('' = none).
-            head = '[&](' + self.name + ')' + (' -> ' + self.text if self.text else '')
+            # `name` is its parameter list text, `text` its return type ('' = none), `capture` its capture (default '&').
+            head = '[' + getattr(self, 'capture', '&') + '](' + self.name + ')' + (' -> ' + self.text if self.text else '')
             parts = [st.show() for st in self.body]
             return head + ' { ' + ' '.join(p for p in parts if p != '') + ' }'
         if k == 'lambda':

@@ -4817,8 +4817,8 @@ def _cpx_call_member(gen, e) -> Ex:
             return _cpp_call_ex("mojo_dict_get_double", [f"{_cpp_as('MojoDict *', _obj_expr)}", f"{_key_expr}"])
         if (isinstance(_dict_val_ct, str) and gimple_ctypes.TypeLattice.ends_in_star(_dict_val_ct)
                 and _dict_val_ct[:-2] in gen.struct_field_types):
-            return (ex_text(f"({_dict_val_ct})mojo_dict_get_int("
-                    f"{_cpp_as('MojoDict *', _obj_expr)}, {_key_expr})"))
+            return _cpp_cast_ex(_dict_val_ct, _cpp_call_ex("mojo_dict_get_int",
+                                [f"{_cpp_as('MojoDict *', _obj_expr)}", f"{_key_expr}"]))
         return _cpp_call_ex("mojo_dict_get_int", [f"{_cpp_as('MojoDict *', _obj_expr)}", f"{_key_expr}"])
     # `<dict-typed obj>.copy()/.items()/.keys()/.values()` — the
     # zero-argument collection-accessor siblings of the `.get(...)`
@@ -8879,10 +8879,19 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             and isinstance(s.value, gimple_ctypes.LambdaExpr)
             and val.startswith('((' + gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW + ')')):
         _sf = gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW
-        return [f"{indent}{cpp_name} = (int64_t)(intptr_t)mojo_vararg_fn_new("
-                f"(void *)+[](void *_self, MojoList *_a, MojoDict *_k) -> int64_t {{ "
-                f"return (*({_sf} *)_self)(_a, _k); }}, "
-                f"(void *)new {_sf}({val}), 0, 1, 1);"]
+        _vf = Ex('closure')
+        _vf.capture = ''
+        _vf.name = 'void *_self, MojoList *_a, MojoDict *_k'
+        _vf.text = 'int64_t'
+        _vf.body = [_cpp_instr('return', _cpp_call_ex(f"(*({_sf} *)_self)", ['_a', '_k']))]
+        _vfp = Ex('un')
+        _vfp.op = '+'
+        _vfp.a = _vf
+        _vf_call = _cpp_call_ex('mojo_vararg_fn_new', [
+            _cpp_cast_ex('void *', _vfp),
+            _cpp_cast_ex('void *', ex_text(f"new {_sf}({val})")),
+            '0', '1', '1'])
+        return [_cpp_assign_line(cpp_name, _cpp_cast_ex('int64_t', _cpp_cast_ex('intptr_t', _vf_call)), indent)]
     return [_cpp_assign_line(ex_text(cpp_name), ex_text(val), indent)]
 
 
