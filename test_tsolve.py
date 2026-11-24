@@ -217,6 +217,39 @@ class Origins(unittest.TestCase):
         self.assertIsNone(sol.ret_sty('/t/main.py', 'f'))
         self.assertEqual(sol.why_none('/t/main.py', 'f'), 'bot-return')
 
+    def test_isinstance_with_a_dotted_class_narrows(self):
+        files = {
+            'main': ('import m\ndef f(x):\n    if isinstance(x, m.C):\n        return x.name\n'
+                     '    return None\n'),
+            'm': 'struct C:\n    var name: String\n',
+        }
+        self.assertEqual(_ret(files, 'f'), 'str')
+
+    def test_isinstance_and_a_field_on_the_right(self):
+        src = ('struct Tok:\n    var name: String\n'
+               'def f(x):\n    if isinstance(x, Tok) and x.name:\n        return x.name\n'
+               '    return ""\n')
+        self.assertEqual(_ret({'main': src}, 'f'), 'str')
+
+    def test_a_ternary_narrows_each_arm(self):
+        src = 'def f(x):\n    return x if isinstance(x, str) else str(x)\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'str')
+
+    def test_the_early_return_idiom_narrows_the_rest_of_the_block(self):
+        src = 'def f(x):\n    if not isinstance(x, dict):\n        return None\n    return x\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'dict[dyn, dyn]')
+
+    def test_an_isinstance_tuple_narrows_to_the_join(self):
+        src = 'def f(x):\n    if isinstance(x, (int, float)):\n        return x\n    return 0\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'dyn')
+
+    def test_a_rebound_name_is_not_narrowed(self):
+        # The soundness guard: `x` is rebound in the branch, so the fact does not apply to it.
+        # Without the guard, `x` inside the branch would be narrowed to str, and the join of
+        # the two returns would be dyn. With it, both returns are int.
+        src = 'def f(x):\n    if isinstance(x, str):\n        x = 1\n        return x\n    return 0\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'int')
+
     def test_why_none_names_the_reason(self):
         self.assertEqual(_solve({'main': 'def f():\n    return 1\n'}).why_none('/t/main.py', 'f'), '')
         self.assertEqual(_solve({'main': 'def f() -> Int:\n    return 1\n'}).why_none('/t/main.py', 'f'),

@@ -64,7 +64,7 @@ class _Scope:
         self.fn: object = fn         # its FnSummary, else None (module level)
         self.parent: object = parent  # the enclosing _Scope, for a nested def/lambda
         self.locals: dict = {}       # name -> _Binding
-        self.narrow: dict = {}       # name -> class, inside `isinstance(name, C)`
+        self.narrow: dict = {}       # name -> STy, while a fact about it holds (4.2c)
         self.globals: dict = {}      # names declared `global`
         self.nonlocals: dict = {}    # names declared `nonlocal`
         self.deferred: list = []     # nested defs, summarized after this body
@@ -239,6 +239,24 @@ def _parse_expression(text: str):
         return N.Parser(N.py_tokenize(text))._parse_expr(0)
     except Exception:
         return None
+
+
+# The class a builtin name stands for as an isinstance target (4.2c); `None` for others.
+_BUILTIN_CLASS_STY = {
+    'str': sty.STR, 'int': sty.INT, 'float': sty.FLOAT, 'bool': sty.BOOL,
+    'list': sty.list_of(sty.DYN), 'tuple': sty.list_of(sty.DYN),
+    'dict': sty.dict_of(sty.DYN, sty.DYN), 'set': sty.set_of(sty.DYN),
+}
+
+
+def _exits(stmts: list) -> bool:
+    """True when the block cannot fall through: it returns, raises, breaks or continues."""
+    if not stmts:
+        return False
+    last = stmts[len(stmts) - 1]
+    if isinstance(last, (N.BreakStmt, N.ContinueStmt)):
+        return True
+    return _terminates(stmts)
 
 
 def _find_imports(obj, out: list) -> None:
@@ -602,8 +620,7 @@ class _Summarizer:
             idx = _param_slot(fs, pname)
             if idx >= 0:
                 self._flow(dterm, fs.params[idx])
-        for st in node.body:
-            self._stmt(scope, st)
+        self._block(scope, node.body)
         self._run_deferred(scope)
         if not _terminates(node.body):
             fall = const_term(sty.NONE)
@@ -653,8 +670,92 @@ class _Summarizer:
             scope.fn.decidable = False
 
     def _block(self, scope: _Scope, stmts: list) -> None:
-        for st in stmts:
+        # After `if c: <exits>` (no elif, no else), the rest of the block runs only when c
+        # was false: `if not isinstance(x, D): return ...` then `x` is a D (4.2c).
+        pushed = []
+        for idx in range(len(stmts)):
+            st = stmts[idx]
             self._stmt(scope, st)
+            if isinstance(st, N.IfStmt) and not st.elifs and st.else_body is None:
+                if _exits(st.then_body):
+                    rest = stmts[idx + 1:]
+                    neg = self._facts(scope, st.condition, False)
+                    pushed.append(self._push(scope, neg, rest))
+        for i in range(len(pushed)):
+            self._pop(scope, pushed[len(pushed) - 1 - i])
+
+    def _push(self, scope: _Scope, facts: list, region: list) -> list:
+        """Apply `facts` (each a [name, STy]) while the region's statements run. A fact about a
+        name the region rebinds is NOT applied: flows are flow-insensitive, so a rebound
+        name would narrow the new value too (the soundness guard, 4.2c)."""
+        rebound = {}
+        _assigned_names(region, rebound)
+        saved = []
+        for f in facts:
+            name = f[0]
+            if name in rebound:
+                continue
+            saved.append([name, scope.narrow.get(name)])
+            scope.narrow[name] = f[1]
+        return saved
+
+    def _pop(self, scope: _Scope, saved: list) -> None:
+        for i in range(len(saved)):
+            entry = saved[len(saved) - 1 - i]
+            if entry[1] is None:
+                scope.narrow.pop(entry[0], None)
+            else:
+                scope.narrow[entry[0]] = entry[1]
+
+    def _facts(self, scope: _Scope, cond, positive: bool) -> list:
+        """The [name, STy] facts that hold when `cond` is `positive` (4.2c).
+
+        `isinstance(name, K)` with K a class, a builtin type, a `module.Class` or a tuple of
+        those; `not`, `and` (when positive), `or` (when negative). Anything else proves nothing."""
+        if isinstance(cond, N.UnaryOp) and cond.op == 'not':
+            return self._facts(scope, cond.operand, not positive)
+        if isinstance(cond, N.BinaryOp):
+            if cond.op == 'and' and positive:
+                return self._facts(scope, cond.left, True) + self._facts(scope, cond.right, True)
+            if cond.op == 'or' and not positive:
+                return self._facts(scope, cond.left, False) + self._facts(scope, cond.right, False)
+            return []
+        if not positive or not isinstance(cond, N.CallExpr):
+            return []
+        if not isinstance(cond.func, N.IdentExpr) or cond.func.name != 'isinstance':
+            return []
+        if len(cond.args) != 2 or not isinstance(cond.args[0], N.IdentExpr):
+            return []
+        ty = self._class_sty(scope, cond.args[1])
+        if ty is None:
+            return []
+        return [[cond.args[0].name, ty]]
+
+    def _class_sty(self, scope: _Scope, node):
+        """The STy an `isinstance` second argument names, or None when it names nothing known."""
+        if isinstance(node, N.TupleExpr):
+            out = sty.BOT
+            for el in node.elements:
+                t = self._class_sty(scope, el)
+                if t is None:
+                    return None
+                out = sty.join(out, t)
+            return out
+        if isinstance(node, N.MemberExpr) and isinstance(node.obj, N.IdentExpr):
+            b = self._lookup(scope, node.obj.name)
+            if b is None or b.kind != 'module':
+                return None
+            mb = self.resolve_name(b.key, node.member)
+            if mb is None or mb.kind != 'class':
+                return None
+            return sty.struct_of(mb.key) if self.prog.class_is_unique(mb.key) else sty.DYN
+        if isinstance(node, N.IdentExpr):
+            b = self._lookup(scope, node.name)
+            if b is None:
+                return _BUILTIN_CLASS_STY.get(node.name)
+            if b.kind == 'class':
+                return sty.struct_of(b.key) if self.prog.class_is_unique(b.key) else sty.DYN
+        return None
 
     def _flow(self, src: Term, dst: int) -> None:
         self.prog.add_flow(src, dst, self.cur_origin)
@@ -704,25 +805,28 @@ class _Summarizer:
             scope.fn.ret_terms.append(term)
             self._flow(term, scope.fn.ret)
         elif isinstance(st, N.IfStmt):
-            self._term(scope, st.condition)
-            narrowed = self._isinstance_narrow(scope, st.condition)
-            if narrowed is None:
-                self._block(scope, st.then_body)
-            else:
-                name = narrowed[0]
-                cls = narrowed[1]
-                saved = scope.narrow.get(name)
-                scope.narrow[name] = cls
-                self._block(scope, st.then_body)
-                if saved is None:
-                    del scope.narrow[name]
-                else:
-                    scope.narrow[name] = saved
+            conds = [st.condition]
+            bodies = [st.then_body]
             for pair in st.elifs:
-                self._term(scope, pair[0])
-                self._block(scope, pair[1])
+                conds.append(pair[0])
+                bodies.append(pair[1])
+            pushed = []
+            for i in range(len(conds)):
+                self._term(scope, conds[i])
+                saved = self._push(scope, self._facts(scope, conds[i], True), bodies[i])
+                self._block(scope, bodies[i])
+                self._pop(scope, saved)
+                # Once cond i is false, its negative facts hold for the later conditions and bodies.
+                later = []
+                for j in range(i + 1, len(bodies)):
+                    later = later + bodies[j]
+                if st.else_body is not None:
+                    later = later + st.else_body
+                pushed.append(self._push(scope, self._facts(scope, conds[i], False), later))
             if st.else_body is not None:
                 self._block(scope, st.else_body)
+            for i in range(len(pushed)):
+                self._pop(scope, pushed[len(pushed) - 1 - i])
         elif isinstance(st, N.WhileStmt):
             self._term(scope, st.condition)
             self._block(scope, st.body)
@@ -798,22 +902,6 @@ class _Summarizer:
         fs = self._new_fn(scope.mod.path, node.name, '', node, '')
         fs.decidable = False
         scope.deferred.append((fs, node, scope.mod, scope.cs, scope))
-
-    def _isinstance_narrow(self, scope: _Scope, cond):
-        if not isinstance(cond, N.CallExpr):
-            return None
-        if not isinstance(cond.func, N.IdentExpr) or cond.func.name != 'isinstance':
-            return None
-        if len(cond.args) != 2:
-            return None
-        subject = cond.args[0]
-        klass = cond.args[1]
-        if not isinstance(subject, N.IdentExpr) or not isinstance(klass, N.IdentExpr):
-            return None
-        b = self._lookup(scope, klass.name)
-        if b is None or b.kind != 'class':
-            return None
-        return [subject.name, b.key]
 
     def _assign(self, scope: _Scope, target, value: Term) -> None:
         if isinstance(target, N.IdentExpr):
@@ -966,8 +1054,13 @@ class _Summarizer:
             return t
         if isinstance(e, N.TernaryExpr):
             self._term(scope, e.condition)
-            return op_term('join', '', [self._term(scope, e.then_val),
-                                        self._term(scope, e.else_val)])
+            saved = self._push(scope, self._facts(scope, e.condition, True), [])
+            then_t = self._term(scope, e.then_val)
+            self._pop(scope, saved)
+            saved = self._push(scope, self._facts(scope, e.condition, False), [])
+            else_t = self._term(scope, e.else_val)
+            self._pop(scope, saved)
+            return op_term('join', '', [then_t, else_t])
         if isinstance(e, N.LambdaExpr):
             return self._lambda(scope, e)
         if isinstance(e, N.MemberExpr):
@@ -1058,7 +1151,7 @@ class _Summarizer:
             if name in s.narrow:
                 b = self._lookup(scope, name)
                 var = b.var if b is not None and b.kind == 'var' else -1
-                return Term('narrow', None, var, s.narrow[name], [], [])
+                return Term('narrow', s.narrow[name], var, '', [], [])
             s = s.parent
         b = self._lookup(scope, name)
         if b is None:
@@ -1113,7 +1206,13 @@ class _Summarizer:
 
     def _binop(self, scope: _Scope, e) -> Term:
         left = self._term(scope, e.left)
-        right = self._term(scope, e.right)
+        if e.op == 'and' or e.op == 'or':
+            # The right operand runs only when the left one is true (and) or false (or).
+            saved = self._push(scope, self._facts(scope, e.left, e.op == 'and'), [])
+            right = self._term(scope, e.right)
+            self._pop(scope, saved)
+        else:
+            right = self._term(scope, e.right)
         op = e.op
         if op == '%' and isinstance(e.left, N.StringLiteral) and not e.left.is_bytes:
             return const_term(sty.STR)

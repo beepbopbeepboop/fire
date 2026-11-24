@@ -108,9 +108,17 @@ class _Solver:
         if op == 'var' or op == 'call':
             return self.read(t.var)
         if op == 'narrow':
-            if self.prog.class_is_unique(t.name):
-                return sty.struct_of(t.name)
-            return sty.DYN
+            # A fact: `isinstance(x, C)` proves x is a C (a unique class, else dyn). A container
+            # fact keeps the variable's own value when that already has the kind, since it has
+            # more detail than the fact (4.2c).
+            ty = t.ty
+            if ty.kind == 'struct':
+                return ty if self.prog.class_is_unique(ty.name) else sty.DYN
+            if t.var >= 0:
+                cur = self.read(t.var)
+                if cur.kind == ty.kind:
+                    return cur
+            return ty
         if op == 'join':
             out = sty.BOT
             for a in t.args:

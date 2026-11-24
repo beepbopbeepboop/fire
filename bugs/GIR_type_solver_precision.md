@@ -717,3 +717,11 @@ Closure acceptance: section 8.
   Verified: test_tsolve 53/0 (incl. CPython check of every FUNCS row), c_oracle identical vs
   db2a1cdba (286 + 35), compile_stdlib 610/0, test_import_cycle_sigs PASS.
   Still open in step 2: 4.2b, 4.2c, 4.2e, 4.2f, 4.2g, 4.2h, 4.2i.
+- 2026-11-24 (session 3, implementation): step 2, rule 4.2c (narrowing) LANDED: `_facts`
+  (isinstance with a class, a `module.Class`, a builtin type or a tuple; `not`, positive `and`,
+  negative `or`), `_push`/`_pop` with the soundness guard (no fact about a name the region rebinds),
+  `if`/`elif`/`else` under facts, the rest-of-block facts after `if c: <exit>` (`_block`), ternary
+  arms, and the right operand of `and`/`or`; the `narrow` term carries an STy. Verified: test_tsolve
+  59/0 (dotted class, and, ternary, early-return idiom, tuple, the guard), c_oracle identical vs
+  8bc44e1ed (286 + 35), compile_stdlib 610/0, test_import_cycle_sigs PASS.
+  Still open in step 2: 4.2b, 4.2e, 4.2f, 4.2g, 4.2h, 4.2i.
