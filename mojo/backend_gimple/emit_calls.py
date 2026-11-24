@@ -5518,7 +5518,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # same call written as a bare top-level statement (a separate,
         # unaffected code path). Only reachable as a *nested* call
         # (`sys.exit(main())`, `identity(main())`, ...) — found via
-        # mojolib BUG-2026-032's transpiler.mojo. Mirror the arity under
+        # mojolib BUG-2026-032's compiler.mojo. Mirror the arity under
         # the new key too, so the lookup below succeeds either way.
         if 'main' in gen.func_param_types and fname_raw not in gen.func_param_types:
             gen.func_param_types[fname_raw] = gen.func_param_types['main']

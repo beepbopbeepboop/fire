@@ -4480,7 +4480,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             # boxed-zero equivalent (`0`/NULL for every C type this
             # compiler uses — int64_t, char*, MojoList*, ... are all
             # represented as 0) rather than omitting the argument.
-            # Found via mojolib BUG-2026-032: transpiler.mojo's
+            # Found via mojolib BUG-2026-032: compiler.mojo's
             # `def main(args=None):`.
             call_args = ', '.join(['0'] * len(param_strs))
             # See the identical `ret_type == 'void'` guard above (`def

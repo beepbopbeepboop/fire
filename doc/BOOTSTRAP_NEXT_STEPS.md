@@ -8,10 +8,10 @@
 > that failure mode is worse than an obviously stale one, because it stops
 > being obvious.
 >
-> What it describes: `make transpile` running `apex py2mojo` to write a Mojo
+> What it describes: `make compile` running `apex py2mojo` to write a Mojo
 > compiler into `mojo/*.mojo`, compiled from there by a `build/mojo` binary
 > into `stage1/mojo` and `stage2/mojo`. None of that exists: there is no
-> `transpile:` rule in the Makefile, no `mojo/mojo_main.mojo`, no
+> `compile:` rule in the Makefile, no `mojo/mojo_main.mojo`, no
 > `mojo_compiler.mojo`, and `build/mojo` is written by `build_mojo_cli.py`,
 > which nothing runs (see the note in `doc/IMPL.md`).
 >
@@ -24,7 +24,7 @@
 ## Current Status
 - ✅ mojo/simple_compiler.mojo created (bootstrap entry point)
 - ✅ Parser enhanced (let keyword, slice support)
-- ✅ Transpiler partially fixed (? → AnyType, comment placement)
+- ✅ Compiler partially fixed (? → AnyType, comment placement)
 - 🔄 Agent: Fixing gimple_codegen.mojo parse errors (struct methods, decorators)
 
 ## When gimple_codegen.mojo Parses Successfully
@@ -52,7 +52,7 @@ make bootstrap
 ```
 
 This will:
-- Transpile gimple_codegen.py → mojo/gimple_codegen.mojo (now with valid syntax)
+- Compile gimple_codegen.py → mojo/gimple_codegen.mojo (now with valid syntax)
 - Compile stage1 using Python build/mojo
   - Dumps GIMPLE from mojo/simple_compiler.mojo
   - Links with compiler_main.c + mojo_runtime.c

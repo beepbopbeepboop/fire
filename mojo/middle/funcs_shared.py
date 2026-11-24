@@ -2492,13 +2492,13 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
     # identifier. _func_qualifier (the free-function analog of this
     # method) already sanitizes for exactly this reason (BUG-2026-049);
     # this struct-method sibling was missed at the time, so a struct
-    # DEFINED in a dotted-package module (e.g. `transpiler.ast_rewrite`)
-    # got an unsanitized qualifier like "transpiler.ast_rewrite" here,
+    # DEFINED in a dotted-package module (e.g. `compiler.ast_rewrite`)
+    # got an unsanitized qualifier like "compiler.ast_rewrite" here,
     # producing an invalid C function name
-    # (`transpiler.ast_rewrite_Rewriter__rewrite_param_list_ids`) that
+    # (`compiler.ast_rewrite_Rewriter__rewrite_param_list_ids`) that
     # GCC's parser chokes on at the literal '.' — and, once desynced,
     # goes on to misparse unrelated later lines in the same function
-    # (BUG-2026-052: the "'transpiler' undeclared" errors reported deep
+    # (BUG-2026-052: the "'compiler' undeclared" errors reported deep
     # inside a docstring are that parser desync, not a real reference to
     # an undefined symbol). See _func_qualifier's own comment for the
     # same fix applied to the free-function case.

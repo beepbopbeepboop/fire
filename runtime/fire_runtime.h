@@ -2632,7 +2632,7 @@ static inline int64_t __mojo_floormod(int64_t a, int64_t b) {
 /* ── Interpreter entry points ─────────────────────────────────────────────
  * Declared here because GENERATED code calls them and this header is what
  * generated code sees. Each one is defined by whoever links the image — for
- * `py_tokenize` that is the self-hosted compiler's own transpiled
+ * `py_tokenize` that is the self-hosted compiler's own compiled
  * `fire_compiler.py` (it is in `reflect._NO_MANGLE_FUNCS` and in
  * `GimpleGen._KNOWN_SIGS` for exactly that reason), NOT this runtime, which
  * is why the runtime dylib's reflection table must not advertise it. A

@@ -29,6 +29,65 @@ in `strdup`. So changing the representation touches the self-hosted compiler's o
 - `test_gimple_runner.py::test_none_argument_is_none_in_the_callee` still passes.
 - The owner runs `make bootstrap` (the self-hosted compiler must still compile itself).
 
+## DECISION (owner-delegated, 2026-11-23): how `None` is represented
+
+The owner delegated the representation decision. This is it, and it replaces "the representation
+question is still the owner's to answer" above.
+
+**Rule: a slot's representation of `None` follows the kinds of value the slot can hold.** A slot is any
+place a value lives: a local, a parameter, a struct field, a container element, or a return value.
+
+1. **References only, plus `None`.** The slot's non-`None` values are all references (struct pointers,
+   `str`, list, dict, set, bytes, generator, ...). `None` is the NULL word, exactly as today. This is
+   already exact, because a live reference is never NULL. The compiler's own code (`ptype is None`,
+   `x or default` over pointers) lives entirely here, so the self-hosted compiler is unaffected.
+   In 5b terms the slot is `Erased(T)`; this is the writer that `Erased` has lacked.
+2. **A scalar, plus `None`.** The slot's values include an int, float or bool AND `None`. `None` is the
+   shared box `mojo_box_none()` and the slot is a tagged word (5b `DynWord` / `Box`). Every read of the
+   slot handles the box:
+   - `is None` / `is not None` / `== None` read `mojo_word_is_none`;
+   - truthiness reads `mojo_truthy_word`;
+   - `print` / `str` / `repr` / f-strings read `mojo_repr_boxed`;
+   - a use as a number or reference unwraps with `mojo_box_word` / `mojo_box_int` first.
+   A store of a literal `None` writes the box (`box_mixed_store`).
+3. **No informative evidence.** Every non-`None` value is of unknown kind, for example an
+   unannotated parameter that no call site informs. Nothing changes from today. Boxing unknown slots
+   is what crashed the self-hosted compiler before (`emit_infra.py`'s `mojo_unbox_plain` note), so the
+   default stays the current word.
+
+**Evidence** is what is stored into or passed to the slot: literals, statically typed expressions, and,
+for an unannotated parameter, the kinds of the arguments at every call site, padded defaults included.
+An unannotated parameter that only ever receives references or `None` is a references-only slot
+(rule 1), so a field stored from it inherits rule 1. One that receives a scalar and `None`
+(`pick(0)` / `pick(None)`) is rule 2.
+
+**What this settles in the measured cases:**
+- `classes/03_none_field_later_set.py`: `session` gets `None` and an int, so rule 2: box. That is what
+  the stashed step 2-3 experiment did, and it is right for this case.
+- `classes/12_linked_list_nodes.py` / `13_binary_tree_inorder.py`: `next` gets `None` and
+  `next_node`, whose call sites pass only `Node(...)` pointers, `self.head` (a references-only
+  field) or the default `None`. That is rule 1, NULL, so no box and no change from today. The
+  experiment's mistake was treating an unannotated parameter as "may be scalar"; under this rule it
+  is classified by its call sites.
+- Never `x == None` as `x == 0` (unchanged).
+
+## Next slice (Sonnet): call-site evidence for the field and parameter classification
+
+1. Find where call-site argument kinds are already collected for unannotated parameters (the
+   machinery behind `_box_param_call_args` and the "passed a container at one call site and a str or
+   number at another" refusal). Expose one query: `param_value_class(func, param) -> 'refs' |
+   'scalar' | 'unknown'`, with `None` arguments ignored. Pin it with a test over the reductions.
+2. Make `mixed_field_names(struct)` (`emit_infra.py`) use it. A field whose non-`None` stores are all
+   `refs` (constructor calls, references-only fields, `refs` parameters) is NOT mixed. One with a
+   scalar literal or a `scalar` parameter is mixed. `unknown` does not make it mixed (rule 3).
+3. Re-apply the stashed step 2-3 experiment (store boxing plus the box-aware `is None` read) on top.
+   Then add the remaining box-aware reads for a mixed field: the constructor default
+   (`self.x = None` in `__init__`), truthiness, and printing.
+4. Acceptance: under `tools/pydiff.py`, `classes/03` goes OK and `classes/12` and `classes/13` stay
+   OK; `c_oracle check` changes C only for programs that store `None` into a scalar field (list them in
+   the status entry); `test_pydiff_ratchet.py` stays green; the closure check shows no new stubs;
+   stdlib-syntax shows no new failures.
+
 ## Status 2026-11-22: measured; the three repros now pass, the pool does not
 
 Re-measured on master (`9767d4c26`):

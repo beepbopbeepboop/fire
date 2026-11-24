@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# py2mojo.sh — transpile a .py file to .mojo via apex py2mojo
+# py2mojo.sh — compile a .py file to .mojo via apex py2mojo
 # Usage: scripts/py2mojo.sh <file.py>
 # Output: mojo/<basename>.mojo
 
@@ -38,4 +38,4 @@ fi
 
 mkdir -p "$MOJO_OUT"
 cp "$OUT_MOJO" "$MOJO_OUT/${STEM}.mojo"
-echo "  transpiled: mojo/${STEM}.mojo"
+echo "  compiled: mojo/${STEM}.mojo"

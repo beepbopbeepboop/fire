@@ -8,10 +8,10 @@
 > that failure mode is worse than an obviously stale one, because it stops
 > being obvious.
 >
-> What it describes: `make transpile` running `apex py2mojo` to write a Mojo
+> What it describes: `make compile` running `apex py2mojo` to write a Mojo
 > compiler into `mojo/*.mojo`, compiled from there by a `build/mojo` binary
 > into `stage1/mojo` and `stage2/mojo`. None of that exists: there is no
-> `transpile:` rule in the Makefile, no `mojo/mojo_main.mojo`, no
+> `compile:` rule in the Makefile, no `mojo/mojo_main.mojo`, no
 > `mojo_compiler.mojo`, and `build/mojo` is written by `build_mojo_cli.py`,
 > which nothing runs (see the note in `doc/IMPL.md`).
 >
@@ -33,7 +33,7 @@ Architecture mirrors GCC's bootstrap: stage1/, stage2/ binaries.
 ```
 Python compiler (mojo_compiler.py + gimple_codegen.py + ...)
         │
-        │  apex py2mojo  (make transpile)
+        │  apex py2mojo  (make compile)
         ▼
 mojo/*.mojo          ← Mojo compiler written in Mojo
         │
@@ -64,7 +64,7 @@ if os.path.exists(_venv) and os.path.realpath(sys.executable) != os.path.realpat
     os.execv(_venv, [_venv] + sys.argv)
 ```
 
-### 2. `scripts/py2mojo.sh` — transpile wrapper
+### 2. `scripts/py2mojo.sh` — compile wrapper
 
 Bash script that:
 1. Copies named `.py` file to `../apex/workspace/<basename>.py`
@@ -89,12 +89,12 @@ Same flags go in `mojo/mojo_main.mojo` so both stages support them.
 
 ### 4. `mojo/mojo_main.mojo` — hand-written entry point
 
-Imports from transpiled modules; provides full CLI (run/build/repl/--version/--help/--dump-*).
+Imports from compiled modules; provides full CLI (run/build/repl/--version/--help/--dump-*).
 This is the single file compiled into `stage1/mojo` and `stage2/mojo`.
 
 ---
 
-## Files to Transpile
+## Files to Compile
 
 | Source | Output | Deps |
 |--------|--------|------|
@@ -103,15 +103,15 @@ This is the single file compiled into `stage1/mojo` and `stage2/mojo`.
 | `mojo_compiler.py` | `mojo/mojo_compiler.mojo` | none |
 | `gimple_codegen.py` | `mojo/gimple_codegen.mojo` | mojo_compiler, module_loader, generated_dispatch |
 
-Not transpiled: `test_*.py`, `run.py`, `*_gen.py`, `fe_reader.py`, `lang_spec.py`, `build_mojo_cli.py`.
+Not compiled: `test_*.py`, `run.py`, `*_gen.py`, `fe_reader.py`, `lang_spec.py`, `build_mojo_cli.py`.
 
 ---
 
 ## Makefile Targets
 
 ```makefile
-make bootstrap   # full: preflight → transpile → stage1 → stage2 → verify
-make transpile   # apex py2mojo all four compiler .py files → mojo/*.mojo
+make bootstrap   # full: preflight → compile → stage1 → stage2 → verify
+make compile   # apex py2mojo all four compiler .py files → mojo/*.mojo
 make stage1      # build/mojo build mojo/mojo_main.mojo -o stage1/mojo
 make stage2      # stage1/mojo build mojo/mojo_main.mojo -o stage2/mojo
 make verify      # compare --dump-all output of stage1 vs stage2
@@ -139,7 +139,7 @@ All diffs empty = bootstrap verified.
 
 | Stage failure | Fix location |
 |--------------|-------------|
-| `make transpile` | Fix apex `skills/solver_py2fire.py`; re-run transpile |
+| `make compile` | Fix apex `skills/solver_py2fire.py`; re-run compile |
 | `make stage1` | Fix Mojo parser/compiler for syntax that broke; fix `mojo_main.mojo` |
 | `make stage2` | Fix determinism bug in compiler or entry-point |
 | `make verify` | Narrow via individual `--dump-*` flags; fix codegen nondeterminism |

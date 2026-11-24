@@ -20,8 +20,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from module_loader import STDLIB_PATH
 STDLIB_PATH = Path(STDLIB_PATH) / "std"
 
-def transpile_file(mojo_file):
-    """Transpile a single .mojo file and return error message if it fails."""
+def compile_file(mojo_file):
+    """Compile a single .mojo file and return error message if it fails."""
     try:
         with open(mojo_file, 'r') as f:
             source_code = f.read()
@@ -70,7 +70,7 @@ def main():
             print(f"  Processed {i+1}/{len(mojo_files)}...", flush=True)
 
         rel_path = mojo_file.relative_to(stdlib_std_path)
-        error = transpile_file(mojo_file)
+        error = compile_file(mojo_file)
 
         if error is None:
             passing.append(rel_path)

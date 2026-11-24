@@ -90,7 +90,7 @@ But these aren't actually imported - they're just documented. The code expects t
 
 **Short answer: Partially, yes.**
 
-The codegen.py in Python has all these defined. When we transpiled to codegen.mojo, these weren't properly included. 
+The codegen.py in Python has all these defined. When we compiled to codegen.mojo, these weren't properly included. 
 
 **To make codegen fully functional:**
 

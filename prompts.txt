@@ -1,7 +1,7 @@
 We are going to create something called formal english. We are only
   going to support a subset, and an example of this can be found in
   *.md. These files define a language called mojo, and we are going to
-  transpile the english into an ast, the ast will be used to make a
+  compile the english into an ast, the ast will be used to make a
   formal mojo compiler based upon the definition of the language from
   formal english. Your job isn't to write this mojo compiler, rather
   the system that can transiple from formal english into ast, and the
