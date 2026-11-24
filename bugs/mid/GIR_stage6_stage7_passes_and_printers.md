@@ -1106,6 +1106,44 @@ expression leaves in `_cpx_binary_op` (three lambda-body returns), `_cps_return_
 Verified: `c_oracle check --base 9b998053c` identical on all 285 pydiff programs and all 35 coroutine programs;
 `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
 
+## Status 2026-11-23 (T1, branch `work/gir-stage7-t1`): the statement helpers return `Instr`
+
+Landed: `_cpp_ir_line`, `_cpp_assign_line`, `_cpp_call_line` and `_cpp_if_break_line` in
+`mojo/backend_gimple/cpp_core.py` now return an `Instr` whose `indent` is `len(indent)`, not a string. Their
+signatures are unchanged, so the call sites (about 350: 187 `_cpp_ir_line`, 113 `_cpp_assign_line`, 53
+`_cpp_call_line`, 4 `_cpp_if_break_line`) are untouched and render byte-identically through `Instr.line()`.
+`_cpp_instr` and `_cpp_opaque` already returned `Instr` (opaque text carries its own indentation), so they needed no
+change. Deviation from the todo: the helper set is four functions, not six, because the other two were already
+`Instr` on master.
+
+Rendering edge: `_cpp_render_lines(lines)` in `cpp_core.py` turns a mixed list (`Instr` through `.line()`, `str`
+through unchanged). It is used at the places a cpp_core statement list becomes text or is text-inspected:
+- `cpp_async.py`: the six `lines.extend(gen._cpp_stmt(...))` / `body_lines.extend(...)` sites and the three
+  `'\n'.join(lines)` return sites of the generator, async and nested-async unit assemblies. The text passes
+  (`_cpp_tag_yield_sites`, `_box_word_yields`, the `'co_yield' in ln` scans) therefore see only text.
+- `cpp_core.py`: the `finally_lines` `co_yield`/`co_await` scan tests the rendered text, and the `body_text`
+  join of the for-statement lines in the reduce helper strips rendered text.
+- The one string concatenation on a helper result (`_cpp_assign_line(...) + (f" {_pset}")` in `_cps_aug_assign`)
+  now sets `Instr.note`, which `show()` prints after the `;`.
+
+Still text (T2+): the 39 statement printers still return `list[str]` with `indent + i.show()` (about 24 `.show()`
+boundaries), and the function-assembly `'\n'.join` sites in `emit_funcs.py`, `module_gen.py` and `gimple_codegen.py`
+are untouched because no cpp_core `Instr` reaches them on any measured path.
+
+Verified on this branch:
+- `python3 test_gimple_cpp_core_arms.py`: `30 arm(s) pinned across 5 printer(s), 0 failure(s)`. The pin loop now
+  renders an `Instr` with `.line()` before comparing; the expected texts are unchanged.
+- `python3 tools/memslot.py --gb 8 --label c-oracle -- python3 tools/c_oracle.py check --base master -j 4`:
+  `all 285 programs generate identical C` and `all 35 coroutine programs generate identical C++ companion`.
+- `python3 compile_stdlib.py`: `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no `skip` lines.
+
+The stdlib and oracle runs were made with a temporary `Instr.__str__` that raised, so any `Instr` reaching a text
+f-string or `str()` would have failed loudly (none did). The tripwire was removed before commit; it only raised, so
+its removal cannot change output.
+
+Not verified by these runs: the truthiness and equality uses of a line (an `Instr` is always truthy, so a filter
+like `[l for l in lines if l]` would keep it) were checked by grep only, not by a probe.
+
 ## Todo: what stage 7 still needs (measured 2026-11-23)
 
 Measured on master with an AST pass over `cpp_core.py`: 0 statement f-strings left; 0 expression f-string leaves left
@@ -1113,7 +1151,7 @@ Measured on master with an AST pass over `cpp_core.py`: 0 statement f-strings le
 functions returning `str`; the three statement helpers have 186 (`_cpp_ir_line`), 112 (`_cpp_assign_line`), 52
 (`_cpp_call_line`) and 60 (`_cpp_instr`) call sites, plus 20 `_cpp_opaque` and 3 `_cpp_if_break_line`.
 
-- [ ] T1. Statement helpers return `Instr` (with `indent` set), not `str`: `_cpp_ir_line`, `_cpp_assign_line`,
+- [x] T1. Statement helpers return `Instr` (with `indent` set), not `str`: `_cpp_ir_line`, `_cpp_assign_line`,
       `_cpp_call_line`, `_cpp_instr`, `_cpp_opaque`, `_cpp_if_break_line`. Consumers that test a line as text (for
       example `'co_yield' in ln` over `finally_lines`) must test the Instr's `show()`.
 - [ ] T2. The 39 statement printers return `list[Instr]`.
