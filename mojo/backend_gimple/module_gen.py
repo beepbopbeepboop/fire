@@ -12087,20 +12087,32 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
                 # states for the reverse case). No store entry — the
                 # definition never compiled in this closure, e.g. a dylib
                 # link — leaves the scan untouched, as before.
-                _home_ret_hit = _ggf_dup._home_def_return_type(
-                    self, _ggf_dup._func_home_qualifier(self, _sn), _sn)
-                if _home_ret_hit:
-                    # The return type is a POSSIBLY-MULTI-TOKEN prefix
-                    # (`char *`, `MojoList *`) ending where the function
-                    # NAME begins — `safe` — so replace up to the first
-                    # occurrence of the name, not just the first token.
-                    # NOT `_m`: the compiled path types a local by its bare
-                    # NAME across the function, and `_m` is a FunctionDef loop
-                    # variable elsewhere in `gen_module_impl`, so `_m.end()`
-                    # became a call to `FunctionDef_end` (undefined at link).
-                    _rt_match = re.match(r'.*?' + re.escape(safe), signature)
-                    if _rt_match and _rt_match.end() < len(signature):
-                        signature = (_home_ret_hit + ' ' + safe
+                # The return type is a POSSIBLY-MULTI-TOKEN prefix
+                # (`char *`, `MojoList *`) ending where the function NAME
+                # begins — `safe` — so replace up to the first occurrence of
+                # the name, not just the first token. NOT `_m`: the compiled
+                # path types a local by its bare NAME across the function, and
+                # `_m` is a FunctionDef loop variable elsewhere in
+                # `gen_module_impl`, so `_m.end()` became a call to
+                # `FunctionDef_end` (undefined at link).
+                # An UNANNOTATED definer's scanned `int64_t` is only a default:
+                # `extern_return_ctype` spells the definer's measured answer,
+                # or a placeholder resolved once the TU text is final (see
+                # emit_funcs.resolve_extern_return_placeholders). An annotated
+                # definer's return is used as scanned unless measured.
+                _rt_match = re.match(r'.*?' + re.escape(safe), signature)
+                if _rt_match and _rt_match.end() < len(signature):
+                    _qual_home = _ggf_dup._func_home_qualifier(self, _sn)
+                    if self._export_return_is_default(
+                            sym_info.get('module'), _sn, sym_info):
+                        _scan_ret = signature[:_rt_match.end() - len(safe)].strip()
+                        _ret_text = self._extern_return_ctype(
+                            _qual_home, _sn, _scan_ret)
+                    else:
+                        _ret_text = _ggf_dup._home_def_return_type(
+                            self, _qual_home, _sn)
+                    if _ret_text:
+                        signature = (_ret_text + ' ' + safe
                                      + signature[_rt_match.end():])
                 signature = gimple_ctypes.c_client_sanitize_signature_text(signature)
                 parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")

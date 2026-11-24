@@ -2581,6 +2581,77 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     return store.get(_pair_key(qualifier, bare_name))
 
 
+# An importer's `extern` prototype for an UNANNOTATED `def` cannot name the
+# definer's return type when it is written: the importer's preamble is emitted
+# while the definer's own body has not been generated yet, so the definer's
+# measured `_home_def_return_types` entry does not exist. Writing the scanned
+# `int64_t` default there made every such prototype conflict with the
+# definer's real prototype (`conflicting types for '..._9f63a2'`, the 30
+# selfhost errors). The prototype is therefore written as a placeholder token
+# and resolved once, when the translation unit's text is final, by
+# `resolve_extern_return_placeholders` (called at the end of
+# `GimpleGen.gen_module`, after every definer has recorded its answer).
+# The placeholder never reaches a logic path: func_return_types and every
+# call-site type still read the value at the time they are computed.
+_EXTERN_RET_TOKEN = 'MOJO_EXTERN_RET_'
+_PENDING_EXTERN_RETS: dict = {}
+_PENDING_EXTERN_RET_SEQ: list = [0]
+
+
+def export_return_is_default(gen, module, name, info) -> bool:
+    """True when the DEFINING `def` of `name` in `module` writes no return
+    annotation, so the export table's `c_return_type` is the scanned default.
+    Answered by `_resolved_export_entry`, which re-parses that definition and
+    records `c_return_type_is_default` (the same fact the re-export path
+    already trusts). Unknown or unparsed means False, the pre-fix behaviour."""
+    _entry = _resolved_export_entry(gen, module, name, info)
+    return isinstance(_entry, dict) and bool(_entry.get('c_return_type_is_default'))
+
+
+def extern_return_ctype(gen, qualifier: str, bare_name: str, default_ret: str):
+    """The return ctype an `extern` prototype for `bare_name` (defined under
+    `qualifier`) should spell, for an UNANNOTATED definition.
+
+    A measured answer already in `_home_def_return_types` wins at once. When
+    there is none yet, a placeholder token is returned and the default is kept
+    for `resolve_extern_return_placeholders` to fall back on. Callers use this
+    ONLY for prototype text; logic reads still use `_home_def_return_type` or
+    `func_return_types`."""
+    _hit = _home_def_return_type(gen, qualifier, bare_name)
+    if _hit:
+        return _hit
+    _n = _PENDING_EXTERN_RET_SEQ[0]
+    _PENDING_EXTERN_RET_SEQ[0] = _n + 1
+    _PENDING_EXTERN_RETS[_n] = (qualifier, bare_name, default_ret)
+    return _EXTERN_RET_TOKEN + str(_n) + '_'
+
+
+def resolve_extern_return_placeholders(gen, code: str) -> str:
+    """Replace every `extern_return_ctype` placeholder in `code` with the
+    definer's measured return (the final store entry), or the scanned default
+    when no definer in this compile measured one. Each placeholder is consumed
+    by the one compile whose text contains it, so a nested compile never
+    resolves an outer compile's token against the wrong store."""
+    if not code or _EXTERN_RET_TOKEN not in code:
+        return code
+    _pieces = code.split(_EXTERN_RET_TOKEN)
+    _out = [_pieces[0]]
+    for _chunk in _pieces[1:]:
+        _end = _chunk.find('_')
+        if _end <= 0 or not _chunk[:_end].isdigit():
+            _out.append(_EXTERN_RET_TOKEN + _chunk)
+            continue
+        _n = int(_chunk[:_end])
+        _entry = _PENDING_EXTERN_RETS.pop(_n, None)
+        if _entry is None:
+            _out.append(_EXTERN_RET_TOKEN + _chunk)
+            continue
+        _qual, _bare, _default = _entry
+        _hit = _home_def_return_type(gen, _qual, _bare)
+        _out.append((_hit if _hit else _default) + _chunk[_end + 1:])
+    return ''.join(_out)
+
+
 def _imported_def_pts(gen, bare_name: str) -> list | None:
     """BUG-2026-024 helper: the parameter ctypes recorded for `bare_name` by
     its HOME module at FromImportStmt registration time
