@@ -261,28 +261,69 @@ def _ml_triple_quote_state(line: str, open_q: str) -> str:
     return q
 
 
-def _ml_augmented_assign_target(line: str) -> str:
-    """The name a `NAME <augop>= ...` line rebinds, else ''. `x += 1`,
-    `x //= 2`, `x >>= 3` qualify; a plain `x = 1`, a comparison (`x == 1`),
-    a `#` comment and a name inside a string all answer '' (the name must be
-    the line's first token and the operator must follow it directly).
-    Indentation is deliberately ignored: a function-scope `global x` followed
-    by `x += 1` rebinds the same module global."""
+def _ml_augmented_assign(line: str) -> tuple:
+    """`(name, base_op, rhs)` for a `NAME <augop>= RHS` line, where `base_op`
+    is the operator without its `=` (`'/'` for `A /= 2`), else `('', '', '')`.
+    `x += 1`, `x //= 2`, `x >>= 3` qualify; a plain `x = 1`, a comparison
+    (`x == 1`), a `#` comment and a name inside a string all answer empty (the
+    name must be the line's first token and the operator must follow it
+    directly). Indentation is deliberately ignored: a function-scope `global x`
+    followed by `x += 1` rebinds the same module global."""
     n = len(line)
     i = 0
     while i < n and _ml_is_space(line[i]):
         i += 1
     e = _ml_ident_end(line, i)
     if e == i:
-        return ''
+        return ('', '', '')
     j = e
     while j < n and _ml_is_space(line[j]):
         j += 1
     for op in _AUG_OPS:
         if line.startswith(op, j):
             after = j + len(op)
-            return '' if after < n and line[after] == '=' else line[i:e]
+            if after < n and line[after] == '=':
+                return ('', '', '')
+            return (line[i:e], op[:-1], line[after:].strip())
+    return ('', '', '')
+
+
+def _ml_aug_value_ctype(rhs: str) -> str:
+    """The C type of an augmented assignment's RHS when it is a whole-RHS
+    number literal, else ''. An integer literal is `int64_t` here, not the
+    `int` `_ml_py_number_ctype` answers for a small one: that is the type
+    `resolve_shared._local_value_type` gives an `IntLiteral` operand, which is
+    what the defining module's widening pass joins with."""
+    n = _ml_py_number_ctype(rhs)
+    if n == 'int' or n == 'int64_t':
+        return 'int64_t'
+    if n == 'double':
+        return 'double'
     return ''
+
+
+def _ml_augmented_global_ctype(base: str, augs: list) -> str:
+    """The C type a module global ends up with after the augmented assignments
+    `augs` (`[(base_op, rhs), ...]`, in source order) rebind it, starting from
+    the type its one plain binding gave it (`base`). Mirrors
+    `module_gen._phase17_apply_augmented_global_types` step for step, with the
+    same `augmented_result_ctype` rule, so the export answers what the
+    defining module's accessor returns. Returns '' (withhold the export) when
+    the widening is not a numeric one the text scan can type: a non-numeric
+    base, or an RHS that is not a whole-RHS number literal (`A /= n`, `A +=
+    -1`, a string)."""
+    from mojo.middle.types import TypeLattice, augmented_result_ctype
+    if not TypeLattice.is_numeric(base):
+        return ''
+    cur = base
+    for base_op, rhs in augs:
+        rt = _ml_aug_value_ctype(rhs)
+        if rt == '':
+            return ''
+        cur = TypeLattice.join(cur, augmented_result_ctype(base_op, cur, rt))
+        if not TypeLattice.is_numeric(cur):
+            return ''
+    return cur
 
 
 def _ml_scalar_global(line: str) -> list[str]:
@@ -1544,19 +1585,22 @@ class ModuleLoader:
                 _callee_exports.update(exports)
                 # Names this module REBINDS with an augmented assignment
                 # (`X = 41` then `X /= 2`, at module scope or under `global
-                # X` in a body): the defining module's
-                # `_phase17_apply_augmented_global_types` runs AFTER its
-                # literal/annotation rows and re-types the accessor, measured
-                # as `double` for `A = 9; A /= 2` and `int64_t` for
-                # `C = 3; C += 1` (and `double` even for the ANNOTATED
-                # `A: int = 9; A /= 2`). Reproducing that widening here would
-                # be a second copy of the operator table, so the honest answer
-                # is to claim no type: an unexported global reads the same
-                # stub it always did, where a wrong-typed extern reads
-                # garbage. Over-approximated (a LOCAL `X += 1` in a function
-                # without `global X` also opts its module global out), because
-                # claiming too little only stays the old behaviour.
-                _aug_names = set()
+                # X` in a body). The defining module's
+                # `_phase17_apply_augmented_global_types` widens the accessor
+                # after its literal/annotation rows: `double` for `A = 9; A /=
+                # 2` (also for the ANNOTATED `A: int = 9; A /= 2`), `int64_t`
+                # for `C = 3; C += 1`. The widening is typed here by
+                # `_ml_augmented_global_ctype`, which applies the SAME
+                # `augmented_result_ctype` rule as the definer, so the export
+                # is the accessor's type rather than a guess. The one case the
+                # text scan cannot decide is a name with more than one plain
+                # binding (a second `X = ...`, or one under `global X` in a
+                # body): its base type is the definer's join of all of them,
+                # so it is withheld and reads the old stub, where a
+                # wrong-typed extern reads garbage. Over-approximated (a LOCAL
+                # `X += 1` in a function without `global X` also counts), which
+                # again only withholds.
+                _aug_stmts: dict = {}
                 # Lines that are real module-level code. A `NAME = 41` line
                 # inside a multi-line string is not code: this tree's own
                 # fixtures embed whole generated programs in `"""..."""` (e.g.
@@ -1574,29 +1618,43 @@ class ModuleLoader:
                     if _in_triple == '':
                         _code_lines.append(_line)
                 for _aline in _code_lines:
-                    _an = _ml_augmented_assign_target(_aline)
+                    _an, _aop, _arhs = _ml_augmented_assign(_aline)
                     if _an != '':
-                        _aug_names.add(_an)
+                        _aug_stmts.setdefault(_an, []).append((_aop, _arhs))
+                # Plain bindings of each name anywhere in the module, at any
+                # indentation (see the docstring: a `global` body binding
+                # rebinds the same global).
+                _plain_binds: dict = {}
+                for _line in _code_lines:
+                    _pb = _ml_scalar_global(_line.lstrip())
+                    if len(_pb) != 0:
+                        _plain_binds[_pb[0]] = _plain_binds.get(_pb[0], 0) + 1
                 for _line in _code_lines:
                     if not _line or _line[0] in ' \t#':
                         continue
                     _sg = _ml_scalar_global(_line)
                     if len(_sg) == 0 or _sg[0] in exports:
                         continue
-                    if _sg[0] in _aug_names:
-                        continue
                     _sgt = _ml_py_global_ctype(_sg[1], _sg[2], _callee_exports)
                     if _sgt == '':
                         continue
+                    if _sg[0] in _aug_stmts:
+                        if _plain_binds.get(_sg[0], 0) != 1:
+                            continue
+                        _sgt = _ml_augmented_global_ctype(_sgt, _aug_stmts[_sg[0]])
+                        if _sgt == '':
+                            continue
                     # `FLAG = True` / `FLAG: bool = False`: the accessor is
                     # `int` (a C word), but the VALUE is a Python bool, and
                     # the importer's `print` must render True/False. Carried
                     # as its own key so the C type stays what the definer's
-                    # accessor returns.
+                    # accessor returns. An augmented name is no longer a bool
+                    # (`FLAG = True; FLAG += 1` is an int), so it never carries
+                    # the flag.
                     _sg_entry = {
                         'kind': 'global_var', 'c_return_type': _sgt,
                         'home_module_path': path}
-                    if _sg[2] in ('True', 'False'):
+                    if _sg[2] in ('True', 'False') and _sg[0] not in _aug_stmts:
                         _sg_entry['py_bool'] = True
                     exports[_sg[0]] = _sg_entry
                 # Re-exports: `from SIBLING import (a, b)` — a set global not
