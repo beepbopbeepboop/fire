@@ -19499,6 +19499,20 @@ def gen_module_impl(self, stmts: list):
         if not _ctor_changed:
             break
 
+    # Stage 5c: the value class (refs / scalar / unknown) of every parameter's
+    # call-site arguments, for `emit_infra.mixed_field_names` and the field
+    # reads that follow its answer. After the ctor/method contracts above so
+    # their refined types are what `value_class_of` reads. Imported HERE for
+    # the circular-import reason given at the other function-local
+    # `emit_infra` import in this file.
+    import mojo.backend_gimple.emit_infra as _pv_ein
+    _pv_ein.collect_param_value_obs(self, all_functions,
+                                    [_as_structdef_node(_pv_s) for _pv_s in all_structs_for_methods
+                                     if isinstance(_pv_s, StructDef)],
+                                    _method_caller_bodies,
+                                    [_as_str(_pv_o.name) for _pv_o in stmts
+                                     if isinstance(_pv_o, StructDef)])
+
     for _gm_stmt in stmts:
         if isinstance(_gm_stmt, AssignStmt) and isinstance(_gm_stmt.target, IdentExpr):
             self._cpp_early_global_names.add(_gm_stmt.target.name)

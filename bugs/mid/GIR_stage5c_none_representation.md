@@ -249,3 +249,64 @@ is the wrong answer reaching a later dereference, not a runtime fault. The remai
 an unannotated parameter holds at each call site, which is a call-site (interprocedural) question.
 The experiment is stashed again (`stash@{0}`).
 
+
+## Status 2026-11-23 (Sonnet): the call-site classification and the mixed-field box landed
+
+Implements the "Next slice" steps 1-4 of the DECISION. The stash experiment was not visible from the worktree, so
+it was re-implemented from the description above.
+
+**Landed.**
+- `emit_infra.collect_param_value_obs` (called from `module_gen.gen_module_impl` after the constructor/method
+  contract passes) walks every call site of this module (free functions, `recv.method(...)`, `Struct(...)` as
+  `Struct___init__`; receivers resolved as the method-observation passes do, plus a syntactic `x = Struct(...)`
+  binding, because module-level code is not typed yet at that point) and records, per unannotated parameter, a
+  bitmask of the argument classes: refs / scalar / unknown. `None` arguments are skipped; an omitted argument
+  contributes its declared default (a `= None` default contributes nothing); a spread makes every parameter unknown.
+  Up to three rounds, each into a fresh table, so a forwarded parameter or a field stored from one settles.
+  `param_value_class(gen, callee, param)` is the query (`'refs' | 'scalar' | 'unknown'`; callee key is the bare name,
+  `Struct_method`, or `Struct___init__`). `value_class_of` is the one classifier for an expression: scalar literals
+  and their `-`/`+` forms are scalar; str/list/dict/set/tuple literals, `self`, and `Struct(...)` calls are refs;
+  a name is its parameter class, else its inferred type (`double` scalar, any pointer type refs, the `int64_t`
+  default unknown); `x.f` is the owning struct's `field_value_class`. Everything else is unknown.
+- `mixed_field_names(struct, gen=None)`: mixed iff the field gets a `None` store AND a scalar-class store. A
+  str/list literal, a constructor call, a refs-only field or a `refs` parameter is NOT scalar, and `unknown` is
+  silence. Without `gen` (the structure-only unit test) parameters are unknown, so only literal stores count.
+  `mixed_field_read(gen, struct, member)` is the cached emission-time query; it answers only for structs the module
+  itself defines (see the limitation below).
+- Store: a literal `None` stored into a mixed word-typed field writes `mojo_box_none()` (`box_word_value`), in the
+  MemberExpr arm of `_gen_stmt_AssignStmt`. That arm also covers the constructor default `self.x = None`.
+- Read: a field read of a mixed field is marked a Box with the new `FLAG_MIXED_FIELD` (`valueinfo.mark_mixed_field`,
+  `GimpleGen._word_is_mixed_field`). The existing box machinery then gives the box-aware truthiness
+  (`mojo_truthy_word`) and print/str/repr/f-string (`mojo_repr_boxed`); `_lbt_boxed_none_compare` takes the flag as
+  its "box-holding" signal so `is None` / `is not None` / `== None` read `mojo_word_is_none`. Arithmetic on such a
+  read is excluded from the kind-select (`_kind_arith_operand`): it holds an int or the None box, never a float
+  box, and the select form produced a gcc type mismatch.
+
+**Measured.**
+- Reduction (class `C` with `self.s`): prints `42` then `None` under `pydiff`. Saved as
+  `tools/pydiff_corpus/classes/41_none_field_reset.py`.
+- `pydiff` on 03: WRONG -> OK. 12 and 13: WRONG at the start commit and WRONG now, with identical output apart
+  from heap addresses (not worse; their C is byte-identical to the start commit, so the `next` field is correctly
+  classified refs-only and left alone). `classes/32_builder_chaining.py` also goes WRONG -> OK.
+  `tools/pydiff_ok.txt` gained 03, 32 and 41; `test_pydiff_ratchet.py`: 113 listed programs, 0 failures.
+- `c_oracle check --base be9e0b706`: C differs for exactly 03, 32 and 41, each a program that stores `None`
+  into a field that also receives a scalar (03: `session` gets `None` and the `open(42)` argument; 32: `limit`
+  gets `None` and an int from a call site; 41: the reduction). 283 programs and all 35 coroutine C++ companions are
+  byte-identical.
+- `c_oracle check --closure`: no new stubs (4, base 4); the corpus C differences are the same three programs.
+- `stdlib-syntax` (`compile_stdlib.py`): `FAILED: 0 (0 expected, 0 unexpected)` before and after.
+  `test_gimple_lint.py`, `test_type_string_ratchet.py`, `test_gimple_mixed_field_names.py` pass.
+  (`test_gimple_mixed_field_names.py` now also runs five end-to-end call-site cases through the real pass.)
+
+**Limitations and what remains.**
+- Only a struct defined in the module being compiled is mixed-aware. The decision rests on call sites, and the
+  defining module's compile sees only its own; an importer reading the same field with another decision would read
+  a box as a bare word. A cross-module scheme needs the decision published by the defining module (a per-struct
+  export next to `struct_field_types`); until then a mixed field read from another module keeps the old word read.
+- A mixed field stored into a dict/list container: `{"k": c.s}` still prints `0` where CPython prints `None`
+  (the container store unwraps the box); `[c.s]` prints correctly.
+- The kind of a plain local (`x = 5`) is unknown to `value_class_of` (the `int64_t` default is also the "cannot
+  tell" type), so `c.put(x)` with an int local is silence, not scalar evidence. Wiring the `_confident_scalar_locals`
+  proof in would widen the scalar side.
+- The None-related WRONG programs in the pool other than these (65 at the 2026-11-22 count) are not re-measured
+  here, so the doc stays open. Next measurement: rerun the corpus, regroup by first differing line.

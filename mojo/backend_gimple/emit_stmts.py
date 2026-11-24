@@ -2538,6 +2538,13 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 gen._emit_label(_bb_raise)
                 gen._rt_void('mojo_raise_attribute_error', [gen._intern_string(_msg)])
                 gen._emit_label(_bb_after)
+            # Stage 5c: a literal `None` stored into a MIXED field (a scalar
+            # beside `None`) is the shared None box, so a later read tells it
+            # from the integer 0. Every other store is the bare word.
+            if (ginf.is_none_literal_node(node.value)
+                    and gimple_ctypes.TypeLattice.is_word(field_type)
+                    and ginf.mixed_field_read(gen, struct_name, node.target.member)):
+                v, vtype = ginf.box_word_value(gen, node.value, vtype, v)
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
             gimple_ctypes.presence_set_emit(gen, gen._struct_name_owner.get(struct_name), node.target.member, ov, op)
             # PART 6 (2026-10-22, family C): the tagged-Optional side-band

@@ -6193,6 +6193,10 @@ class GimpleGen:
         return self._words.is_boxed_container(name)
     def _word_mark_boxed(self, name: str) -> None:
         self._words.mark_boxed(name)
+    def _word_is_mixed_field(self, name: str) -> bool:
+        return self._words.is_mixed_field(name)
+    def _word_mark_mixed_field(self, name: str) -> None:
+        self._words.mark_mixed_field(name)
     def _word_mark_tagged(self, name: str) -> None:
         self._words.mark_tagged(name)
     def _word_mark_dyn(self, name: str) -> None:
