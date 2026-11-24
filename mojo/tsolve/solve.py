@@ -15,7 +15,7 @@ lambdas, no `re`, no tuple unpacking, no `getattr`, no generators.
 from __future__ import annotations
 
 from mojo.tsolve import sty
-from mojo.tsolve.summary import Flow, Program, Term
+from mojo.tsolve.summary import FILE_KIND, Flow, Program, Term
 
 # How many flow evaluations a solve may take per flow before it is a bug.
 # The lattice is finite (`sty.cap`), so a correct fixpoint is far below this.
@@ -177,6 +177,8 @@ class _Solver:
         recv = self.ev(t.args[0])
         if recv.kind == 'bot' or recv.kind == 'none':
             return sty.BOT
+        if recv.kind == 'struct' and recv.name == FILE_KIND:
+            return builtin_method(recv, t.name, t, self)
         if recv.kind == 'struct':
             cs = self.prog.classes.get(recv.name)
             if cs is None or not cs.unique:
@@ -261,7 +263,9 @@ def slot_of(c, i: int):
     return sty.DYN
 
 
-_STR_TO_STR = ('strip', 'lstrip', 'rstrip', 'replace', 'lower', 'upper', 'join', 'format')
+_STR_TO_STR = ('strip', 'lstrip', 'rstrip', 'replace', 'lower', 'upper', 'join', 'format',
+               'zfill', 'center', 'ljust', 'rjust', 'title', 'capitalize', 'swapcase',
+               'casefold', 'expandtabs', 'removeprefix', 'removesuffix', 'translate')
 _STR_TO_BOOL = ('startswith', 'endswith', 'isdigit', 'isalpha', 'isalnum', 'isspace',
                 'isupper', 'islower')
 _STR_TO_INT = ('find', 'index', 'count')
@@ -278,10 +282,24 @@ def builtin_method(recv, name: str, t: Term, solver: _Solver):
             return sty.STR
         if name in _STR_TO_BOOL:
             return sty.BOOL
-        if name in ('split', 'splitlines'):
+        if name in ('split', 'splitlines', 'rsplit'):
             return sty.list_of(sty.STR)
-        if name in _STR_TO_INT:
+        if name in ('partition', 'rpartition'):
+            return sty.tuple_of([sty.STR, sty.STR, sty.STR])
+        if name in ('isidentifier', 'isnumeric', 'isdecimal', 'isprintable', 'isascii', 'istitle'):
+            return sty.BOOL
+        if name in _STR_TO_INT or name in ('rfind', 'rindex'):
             return sty.INT
+        return sty.DYN
+    if recv.kind == 'struct' and recv.name == FILE_KIND:
+        if name in ('read', 'readline'):
+            return sty.STR
+        if name == 'readlines':
+            return sty.list_of(sty.STR)
+        if name == 'write':
+            return sty.INT
+        if name == 'close':
+            return sty.NONE
         return sty.DYN
     if recv.kind == 'list':
         if name == 'pop':

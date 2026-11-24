@@ -20,8 +20,9 @@ lambdas, no `re`, no tuple unpacking, no `getattr`, no generators.
 from __future__ import annotations
 
 import fire_compiler as N
-from mojo.tsolve import sty
+from mojo.tsolve import externs, sty
 from mojo.tsolve.summary import (
+    FILE_KIND,
     ClassSummary, FnSummary, Program, const_term, func_key, op_term, var_term,
     Term,
 )
@@ -425,7 +426,7 @@ class _Summarizer:
                         if sub:
                             mod.submods[local] = sub
                     else:
-                        mod.names[local] = _Binding('dyn', '', -1, '', '')
+                        mod.names[local] = _Binding('extern', st.module + '.' + pair[0], -1, '', '')
             elif isinstance(st, N.AssignStmt):
                 if isinstance(st.target, N.IdentExpr):
                     self._declare_module_var(mod, st.target.name, st.type_ann)
@@ -437,12 +438,19 @@ class _Summarizer:
                         self._declare_module_var(mod, t.name, None)
 
     def _bind_import(self, names: dict, mod: _Mod, st) -> None:
-        """`import m` / `import m as x` binds the name to the module. A dotted
-        `import a.b` without an alias binds `a` to a package it does not model
-        as a module, so it is `dyn`."""
+        """`import m` / `import m as x` binds the name to the module. An EXTERNAL
+        module (not in the closure) binds an `extern` of its dotted name, whose members
+        have CPython's types (externs.py). `import a.b` without an alias binds `a`."""
         path = mod.imports.get(st.module, '')
+        if not path:
+            if st.alias:
+                names[st.alias] = _Binding('extern', st.module, -1, '', '')
+            else:
+                root = st.module.split('.', 1)[0]
+                names[root] = _Binding('extern', root, -1, '', '')
+            return
         name = st.alias if st.alias else st.module
-        if path and '.' not in name:
+        if '.' not in name:
             names[name] = _Binding('module', path, -1, '', '')
         else:
             names[name] = _Binding('dyn', '', -1, '', '')
@@ -744,7 +752,7 @@ class _Summarizer:
             for item in st.items:
                 self._term(scope, item.expr)
                 if item.alias:
-                    self._flow(const_term(sty.DYN), self._local_var(scope, item.alias))
+                    self._flow(self._with_value(scope, item.expr), self._local_var(scope, item.alias))
             self._block(scope, st.body)
         elif isinstance(st, N.RaiseStmt):
             if st.value is not None:
@@ -779,7 +787,7 @@ class _Summarizer:
             if path:
                 scope.locals[local] = _Binding('alias', '', -1, path, pair[0])
             else:
-                scope.locals[local] = _Binding('dyn', '', -1, '', '')
+                scope.locals[local] = _Binding('extern', st.module + '.' + pair[0], -1, '', '')
         if st.wildcard:
             self._undecidable(scope)
 
@@ -902,6 +910,14 @@ class _Summarizer:
         if isinstance(node, N.MemberExpr):
             return self._member_target_var(scope, node) or []
         return []
+
+    def _with_value(self, scope: _Scope, expr) -> Term:
+        """The value a `with` alias gets: the file object for the builtin `open`, else dyn
+        (`__enter__` is not modelled)."""
+        if isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr):
+            if expr.func.name == 'open' and self._lookup(scope, 'open') is None:
+                return const_term(sty.struct_of(FILE_KIND))
+        return const_term(sty.DYN)
 
     def _member_target_var(self, scope: _Scope, node):
         """The field variables a store to `node.member` writes, or None."""
@@ -1053,7 +1069,34 @@ class _Summarizer:
             return const_term(sty.FUNC)
         return const_term(sty.DYN)
 
+    def _dotted(self, scope: _Scope, node) -> str:
+        """The dotted name of `node` when its root is an external module (`os.path.join`),
+        else ''. A dotted name is never a field read (4.2a)."""
+        if isinstance(node, N.IdentExpr):
+            b = self._lookup(scope, node.name)
+            if b is not None and b.kind == 'extern':
+                return b.key
+            return ''
+        if isinstance(node, N.MemberExpr):
+            base = self._dotted(scope, node.obj)
+            if base == '':
+                return ''
+            return base + '.' + node.member
+        return ''
+
+    def _is_attr_method(self, scope: _Scope, func) -> bool:
+        """True for `os.environ.get`: a method of an external ATTRIBUTE value, which has the
+        attribute's type and so is an ordinary method call on that type."""
+        if not isinstance(func, N.MemberExpr):
+            return False
+        return self._dotted(scope, func.obj) in externs.ATTRS
+
     def _member(self, scope: _Scope, e) -> Term:
+        dotted = self._dotted(scope, e)
+        if dotted != '':
+            if dotted in externs.ATTRS:
+                return const_term(sty.from_annotation(externs.ATTRS[dotted], self.class_names))
+            return const_term(sty.DYN)
         if isinstance(e.obj, N.IdentExpr):
             b = self._lookup(scope, e.obj.name)
             if b is not None and b.kind == 'module':
@@ -1112,6 +1155,17 @@ class _Summarizer:
         return const_term(sty.DYN)
 
     def _call(self, scope: _Scope, e) -> Term:
+        dotted = self._dotted(scope, e.func)
+        if dotted in externs.FUNCS:
+            self._terms(scope, e.args)
+            for pair in e.kwargs:
+                self._term(scope, pair[1])
+            return const_term(sty.from_annotation(externs.FUNCS[dotted], self.class_names))
+        if dotted != '' and not self._is_attr_method(scope, e.func):
+            self._terms(scope, e.args)
+            for pair in e.kwargs:
+                self._term(scope, pair[1])
+            return const_term(sty.DYN)
         args = self._terms(scope, e.args)
         names = []
         kwvals = []
@@ -1200,6 +1254,20 @@ class _Summarizer:
             return op_term('join', '', args)
         if name == 'abs':
             return args[0] if args else const_term(sty.DYN)
+        if name in externs.INTERNAL:
+            return const_term(sty.from_annotation(externs.INTERNAL[name], self.class_names))
+        if name == 'open':
+            return const_term(sty.struct_of(FILE_KIND))
+        if name == 'enumerate' and args:
+            return op_term('cont', 'list', [op_term('cont', 'tuple',
+                                                    [const_term(sty.INT), op_term('elem', '', [args[0]])])])
+        if name == 'zip' and args:
+            slots = []
+            for a in args:
+                slots.append(op_term('elem', '', [a]))
+            return op_term('cont', 'list', [op_term('cont', 'tuple', slots)])
+        if name == 'reversed' and args:
+            return op_term('cont', 'list', [op_term('elem', '', [args[0]])])
         if name == 'range':
             return op_term('cont', 'list', [const_term(sty.INT)])
         if name == 'getattr' and len(arg_nodes) >= 2 and isinstance(arg_nodes[1], N.StringLiteral):

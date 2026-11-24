@@ -87,6 +87,9 @@ class ClassSummary:
 
 SEP = '\x1f'
 
+# The struct kind of a builtin file object (`open(...)`). No closure class has this name.
+FILE_KIND = '<file>'
+
 
 def func_key(path: str, name: str) -> str:
     """The FuncKey of a definition: the module's abspath, SEP, then 'f' or 'Cls.m'."""

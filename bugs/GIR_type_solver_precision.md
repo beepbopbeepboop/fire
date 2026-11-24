@@ -710,3 +710,10 @@ Closure acceptance: section 8.
   test_import_cycle_sigs PASS. Still open in step 2: 4.2a externs, 4.2b dotted annotations,
   4.2c narrowing, 4.2e static/class methods, 4.2f loose fields, 4.2g kind pins, 4.2h cast helpers,
   4.2i coverage.
+- 2026-11-24 (session 3, implementation): step 2, rule 4.2a (externs) LANDED. `mojo/tsolve/externs.py`
+  (FUNCS, ATTRS, INTERNAL), `_Binding('extern')` for external imports, `_dotted` names (never a
+  field read), `open` as `<file>` (and the `with` form), enumerate/zip/reversed, the wider str table.
+  The rewriter's `os.environ.get` lowering (`mojo_c_getenv`) is in INTERNAL, found by testing.
+  Verified: test_tsolve 53/0 (incl. CPython check of every FUNCS row), c_oracle identical vs
+  db2a1cdba (286 + 35), compile_stdlib 610/0, test_import_cycle_sigs PASS.
+  Still open in step 2: 4.2b, 4.2c, 4.2e, 4.2f, 4.2g, 4.2h, 4.2i.

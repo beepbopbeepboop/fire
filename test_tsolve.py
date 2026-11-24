@@ -226,6 +226,66 @@ class Origins(unittest.TestCase):
         self.assertEqual(_solve({'main': 'x = 1\n'}).why_none('/t/main.py', 'nope'), 'not-defined')
 
 
+class Externs(unittest.TestCase):
+    """bugs/GIR_type_solver_precision.md, 4.2a: external modules have CPython's types."""
+
+    def test_os_path_functions_have_their_types(self):
+        src = 'import os\ndef f(p):\n    return os.path.basename(p)\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'str')
+        src = 'import os\ndef f(p):\n    return os.path.splitext(p)[0]\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'str')
+
+    def test_a_from_import_of_an_external_function(self):
+        src = 'from os.path import join\ndef f(a, b):\n    return join(a, b)\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'str')
+
+    def test_open_and_read(self):
+        self.assertEqual(_ret({'main': 'def f(p):\n    return open(p).read()\n'}, 'f'), 'str')
+        src = 'def f(p):\n    with open(p) as fh:\n        return fh.read()\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'str')
+
+    def test_an_unknown_external_call_is_dyn(self):
+        src = 'import weird\ndef f(p):\n    return weird.thing(p)\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'dyn')
+
+    def test_os_path_is_never_a_field_read(self):
+        # A closure class with a `path: list` field must not answer for `os.path`.
+        src = ('import os\nstruct Resolver:\n    var path: List[Int]\n'
+               'def f(p):\n    return os.path.basename(p)\n')
+        self.assertEqual(_ret({'main': src}, 'f'), 'str')
+
+    def test_os_environ_get_with_a_default(self):
+        src = 'import os\ndef f():\n    return os.environ.get("K", "d")\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'str')
+
+    def test_enumerate_and_zip(self):
+        src = 'def f(xs):\n    for i, x in enumerate(xs):\n        return i\n    return 0\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'int')
+
+    def test_every_callable_row_agrees_with_cpython(self):
+        """Each row of externs.FUNCS is a fact about CPython: call the function on a sample
+        and compare the result's type name with the row's annotation (risk R4)."""
+        import importlib
+        from mojo.tsolve import externs
+        samples = {
+            'os.path.basename': ('a/b.txt',), 'os.path.dirname': ('a/b.txt',),
+            'os.path.join': ('a', 'b'), 'os.path.abspath': ('a',), 'os.path.normpath': ('a//b',),
+            'os.path.splitext': ('a.b',), 'os.path.split': ('a/b',), 'os.path.exists': ('/',),
+            'os.path.isfile': ('/',), 'os.path.isdir': ('/',), 'os.getcwd': (),
+            'json.dumps': ({'a': 1},), 'textwrap.dedent': ('  x',), 'textwrap.indent': ('x', '  '),
+            'shlex.quote': ('a b',), 'math.floor': (1.5,), 'math.ceil': (1.5,), 'math.sqrt': (4,),
+        }
+        py_name = {'str': 'str', 'bool': 'bool', 'int': 'int', 'float': 'float', 'tuple[str, str]': 'tuple'}
+        for dotted in externs.FUNCS:
+            self.assertIn(dotted, samples, 'add a sample for ' + dotted)
+            mod_name, rest = dotted.split('.', 1)
+            obj = importlib.import_module(mod_name)
+            for part in rest.split('.'):
+                obj = getattr(obj, part)
+            got = type(obj(*samples[dotted])).__name__
+            self.assertEqual(got, py_name[externs.FUNCS[dotted]], dotted)
+
+
 class Summaries(unittest.TestCase):
     """Small programs, summarized and solved; the answers are what the language means."""
 
@@ -357,7 +417,7 @@ class Summaries(unittest.TestCase):
 def main():
     suite = unittest.TestSuite()
     loader = unittest.TestLoader()
-    for case in (JoinTable, FromAnnotation, LowerRows, Origins, Summaries):
+    for case in (JoinTable, FromAnnotation, LowerRows, Origins, Externs, Summaries):
         suite.addTests(loader.loadTestsFromTestCase(case))
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     return 0 if result.wasSuccessful() else 1
