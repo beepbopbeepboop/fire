@@ -1,7 +1,11 @@
 """Types of the gimple IR.
 
-A type is an interned `Type` object, never a string.  Two types are the same
-type exactly when they are the same object, so `a is b` is the equality test.
+A type is an interned `Type` object, never a string.  Types are interned by C
+SPELLING: `char` and `int8_t`, `long` and `int64_t`, `bool` and `_Bool` are
+distinct objects, because the backend prints them differently.  Each carries
+`cls`, the semantic type it is an instance of (`long.cls is int64_t`), and the
+compatibility functions below compare classes.  `a is b` therefore means "the
+same spelling"; `a.cls is b.cls` means "the same GIMPLE type".
 
 The rules GCC's GIMPLE verifier applies (`useless_type_conversion_p`,
 gimple-expr.cc) live in `trivially_convertible`; `mismatch_class` names the
@@ -16,8 +20,13 @@ class Type:
     kind    'void' | 'bool' | 'int' | 'float' | 'ptr' | 'struct' | 'fn'
     bits    width for bool/int/float (bool is 1), else 0
     signed  for 'int'
-    name    canonical C spelling ('int64_t', 'MojoList *', ...)
+    name    the C spelling ('int64_t', 'long', 'MojoList *', ...)
     pointee for 'ptr'
+    cls     the semantic type this spelling is an instance of; `self` for the
+            canonical spelling of a class (`I64.cls is I64`, `C_LONG.cls is I64`)
+    ranked  the spelling is one the backend's usual-arithmetic lattice ranks
+            (`int`, `int8_t` ... `uint64_t`, `unsigned int`, `__fp16`, `float`,
+            `double`); `long`, `char`, `ssize_t` ... are scalars but not ranked
     """
 
     def __init__(self, kind: str, name: str, bits: int, signed: bool):
@@ -26,6 +35,8 @@ class Type:
         self.bits: int = bits
         self.signed: bool = signed
         self.pointee: Type = self  # replaced for 'ptr'; never None so it stays typed
+        self.cls: Type = self      # replaced for a non-canonical spelling
+        self.ranked: bool = False
 
     def is_int(self) -> bool:
         return self.kind == 'int'
@@ -47,6 +58,69 @@ class Type:
 
     def is_void_ptr(self) -> bool:
         return self.kind == 'ptr' and self.pointee.kind == 'void'
+
+    # The backend's spelling vocabulary (`TypeLattice.is_*` in
+    # mojo/middle/types.py adapts these).  Each answers for ONE spelling, by
+    # identity: types are interned by spelling, so `is` is exact.
+    def is_ranked_int(self) -> bool:
+        return self.ranked and self.kind == 'int'
+
+    def is_ranked_float(self) -> bool:
+        return self.ranked and self.kind == 'float'
+
+    def is_ranked_signed(self) -> bool:
+        return self.ranked and self.kind == 'int' and self.signed
+
+    def is_ranked_unsigned(self) -> bool:
+        return self.ranked and self.kind == 'int' and not self.signed
+
+    def is_word(self) -> bool:
+        return self is I64
+
+    def is_uword(self) -> bool:
+        return self is U64
+
+    def is_int_word(self) -> bool:
+        return self is INT or self is I64
+
+    def is_char(self) -> bool:
+        return self is I8
+
+    def is_u8(self) -> bool:
+        return self is U8
+
+    def is_c_long(self) -> bool:
+        return self is C_LONG
+
+    def is_c_bool(self) -> bool:
+        return self is BOOL
+
+    def is_cpp_bool(self) -> bool:
+        return self is CPP_BOOL
+
+    def is_double(self) -> bool:
+        return self is F64
+
+    def is_cstr(self) -> bool:
+        return self is CHARP
+
+    def is_mojo_str(self) -> bool:
+        return self is MOJOSTR_P
+
+    def is_mojo_span(self) -> bool:
+        return self is SPAN_P
+
+    def is_mojo_list(self) -> bool:
+        return self is MOJOLIST_P
+
+    def is_mojo_dict(self) -> bool:
+        return self is MOJODICT_P
+
+    def is_mojo_set(self) -> bool:
+        return self is MOJOSET_P
+
+    def is_mojo_bytes(self) -> bool:
+        return self is MOJOBYTES_P
 
     def __repr__(self) -> str:
         return self.name
@@ -87,6 +161,8 @@ def ptr_to(t: Type) -> Type:
         p = Type('ptr', name, 64, False)
         p.pointee = t
         _INTERN[name] = p
+        if t.cls is not t:
+            p.cls = ptr_to(t.cls)
     return p
 
 
@@ -103,6 +179,12 @@ def struct_named(name: str) -> Type:
 VOIDP: Type = ptr_to(VOID)
 CHARP: Type = ptr_to(I8)
 FNP: Type = ptr_to(FN)
+MOJOSTR_P: Type = ptr_to(struct_named('MojoStr'))
+SPAN_P: Type = ptr_to(struct_named('Span'))
+MOJOLIST_P: Type = ptr_to(struct_named('MojoList'))
+MOJODICT_P: Type = ptr_to(struct_named('MojoDict'))
+MOJOSET_P: Type = ptr_to(struct_named('MojoSet'))
+MOJOBYTES_P: Type = ptr_to(struct_named('MojoBytes'))
 
 # C spellings that are one of the scalar types above.  LP64 (darwin-arm64,
 # linux-x86_64): long == long long == 64 bits; they are distinct C types but
@@ -127,11 +209,34 @@ BASE_TYPES: dict[str, Type] = {
     'pid_t': INT, 'mode_t': U16, 'uid_t': U32, 'gid_t': U32, 'socklen_t': U32,
 }
 
+# The spellings the backend's rank tables know (generated_dispatch._SIGNED,
+# _UNSIGNED, _FLOAT); test_type_lattice_predicates.py pins the equality.
+RANKED_SPELLINGS: dict[str, bool] = {
+    'int8_t': True, 'int16_t': True, 'int32_t': True, 'int': True, 'int64_t': True,
+    'uint8_t': True, 'uint16_t': True, 'uint32_t': True, 'unsigned int': True,
+    'uint64_t': True, '__fp16': True, 'float': True, 'double': True,
+}
+
 BASE_WORDS: dict[str, bool] = {
     'void': True, '_Bool': True, 'bool': True, 'char': True, 'short': True,
     'int': True, 'long': True, 'signed': True, 'unsigned': True,
     'float': True, 'double': True, '__fp16': True, '_Float16': True,
 }
+
+
+def _spelled_scalar(name: str, base: Type) -> Type:
+    """The `Type` spelled `name` whose class is `base`.  A spelling that is
+    already the class's own name is `base` itself; any other (`long`,
+    `int8_t`, `bool`, `ssize_t` ...) is its own object that shares `base`'s
+    kind, bits and signedness, so the backend can still tell it apart."""
+    if base.name == name:
+        return base
+    t = Type(base.kind, name, base.bits, base.signed)
+    t.cls = base
+    _INTERN[name] = t
+    if name in RANKED_SPELLINGS:
+        t.ranked = True
+    return t
 
 
 def type_named(name: str) -> Type:
@@ -148,16 +253,49 @@ def type_named(name: str) -> Type:
         return t
     base = BASE_TYPES.get(name)
     if base is not None:
-        return base
+        return _spelled_scalar(name, base)
     if name.endswith('*'):
         return ptr_to(type_named(name[:-1].strip()))
     return struct_named(name)
 
 
+# The canonical spellings the rank tables name.  (The aliases among them,
+# `int8_t`, `int32_t`, `unsigned int`, are marked when `type_named` makes them.)
+INT.ranked = True
+I16.ranked = True
+I64.ranked = True
+U8.ranked = True
+U16.ranked = True
+U32.ranked = True
+U64.ranked = True
+F16.ranked = True
+F32.ranked = True
+F64.ranked = True
+
+# Spellings the backend distinguishes from their class (see `_spelled_scalar`).
+C_LONG: Type = type_named('long')
+CPP_BOOL: Type = type_named('bool')
+
+# The spelling with no meaning: what `spelled` answers for text that is not
+# already a type's own spelling.  Matches no predicate.
+OPAQUE: Type = struct_named('<opaque>')
+
+
+def spelled(name: str) -> Type:
+    """`type_named(name)` for text that must BE a spelling.  `type_named`
+    normalises (`char*` is `char *`, ` int` is `int`); the backend's
+    predicates answer for exact spellings only, so text that `type_named` would
+    rewrite is `OPAQUE` here."""
+    t = type_named(name)
+    if t.name != name:
+        return OPAQUE
+    return t
+
+
 def trivially_convertible(dst: Type, src: Type) -> bool:
     """May a `src` value be used where `dst` is expected with NO cast
     statement?  This is GIMPLE's `useless_type_conversion_p`."""
-    if dst is src:
+    if dst.cls is src.cls:
         return True
     if dst.kind != src.kind:
         return False
@@ -175,7 +313,7 @@ def trivially_convertible(dst: Type, src: Type) -> bool:
 def same_pointee(dst: Type, src: Type) -> bool:
     """Stricter than GIMPLE: are two pointers the same pointer type, or is one
     of them `void *` / `char *` (the two generic pointers the runtime uses)?"""
-    if dst is src:
+    if dst.cls is src.cls:
         return True
     if dst.kind != 'ptr' or src.kind != 'ptr':
         return False
@@ -200,7 +338,7 @@ def mismatch_class(dst: Type, src: Type) -> str:
     ptr-kind    two different pointer types; GIMPLE allows it, we do not
     kind        anything else (struct by value, void, ...)
     """
-    if dst is src:
+    if dst.cls is src.cls:
         return ''
     dk = dst.kind
     sk = src.kind
@@ -251,7 +389,7 @@ def cast_is_legal(dst: Type, src: Type) -> bool:
     dk = dst.kind
     sk = src.kind
     if dk == 'void' or sk == 'void' or dk == 'struct' or sk == 'struct':
-        return dst is src
+        return dst.cls is src.cls
     if dk == 'ptr' and sk == 'float':
         return False
     if dk == 'float' and sk == 'ptr':
