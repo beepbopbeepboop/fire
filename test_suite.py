@@ -2292,6 +2292,13 @@ STALE_PER_CHILD_BUDGETS = {
     'formal/x86_64_endtoend_test.py': 1,
     'formal/x86_64_model_test.py': 1,
     'scripts/bootstrap_full_test.py': 1,
+    # 2026-11-23: four `subprocess.run(..., timeout=N)` literals in regression
+    # pins added since the census was last synced. Each is a real child budget
+    # (a dump or a compile+run of one fixture); the count is the ast walk's.
+    'test_helper_dump_regression.py': 1,        # subprocess.run, timeout=60
+    'test_measure_proof_peaks.py': 1,           # subprocess.run, timeout=60
+    'test_t_func_dump_regression.py': 1,        # subprocess.run, timeout=60
+    'test_where_alias_diagnostic.py': 1,        # subprocess.run, timeout=120
     # `test_formal_admitted.py`'s row (5, 2026-10-26's c20bdf09e "5 remain as
     # data-table examples") is dropped 2026-10-27: the conversion landed, and
     # the walk now finds 0 real literals — the "data-table examples" are
@@ -4509,17 +4516,6 @@ _OPEN_STDLIB_DYLIB_PROBE_REASON = (
 
 UNREGISTERED = {
     'test_codegen_erased_container_values.py': _OPEN_PROBE_HARNESS_REASON,
-    # A predicate-only pin for `mixed_field_names` (GIR stage 5c): asserts the
-    # box-holding kind for a field stored a None literal AND a scalar literal.
-    # It changes no C, so it has no job of its own; run directly like the
-    # sibling analyzer pins below.
-    'test_gimple_mixed_field_names.py': _STANDALONE_TEST_REASON,
-    # Four more direct-run pins: two per-file module-alias/global-read codegen
-    # cases, the GIR stage 7 build-API pin, and the proof-peak measurement.
-    'test_codegen_module_alias_global_read.py': _STANDALONE_TEST_REASON,
-    'test_codegen_module_attr_module_value.py': _STANDALONE_TEST_REASON,
-    'test_gir_stage7_build_api.py': _STANDALONE_TEST_REASON,
-    'test_measure_proof_peaks.py': _STANDALONE_TEST_REASON,
     # The same per-file compile's UNANNOTATED scalar-global export (2026-11-23:
     # a bare `from helper import CONST` read 0 for `CONST = 41`). Added with
     # its fix and run directly (`python3 tools/memslot.py --gb 8 --label
