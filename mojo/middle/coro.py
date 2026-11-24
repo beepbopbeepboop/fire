@@ -698,7 +698,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     for _cpn in _pct_env:
         _cpp = _pct_env[_cpn]
         if isinstance(_cpp, tuple) and len(_cpp) >= 2 \
-                and _cpp[0] == 'MojoDict *':
+                and gimple_ctypes.TypeLattice.is_dict(_cpp[0]):
             env.setdefault(_cpn, ('dict', 'p'))
     # Lambda-bound locals: `f = lambda: <body>` makes `f()` answer the body's
     # kind, so `r = f()` / `yield f()` are typed the way `r = h()` for a named

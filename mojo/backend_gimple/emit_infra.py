@@ -3252,7 +3252,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             gen._copy(ip3, aval_local)
             gen._cast_into(pp, ptype, ip3)
             coerced_args.append(pp)
-        elif ptype == 'void *' and gimple_ctypes.TypeLattice.is_int_word_or_bool(actual_atype):
+        elif gimple_ctypes.TypeLattice.is_voidp(ptype) and gimple_ctypes.TypeLattice.is_int_word_or_bool(actual_atype):
             ip = gen._new_temp('int64_t')
             vp = gen._new_temp('void *')
             if gimple_ctypes.TypeLattice.is_word(actual_atype):
@@ -3264,7 +3264,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 gen._cast_into(ip, 'int64_t', f"{aval}")
             gen._cast_into(vp, 'void *', ip)
             coerced_args.append(vp)
-        elif ptype == 'void *' and gimple_ctypes.TypeLattice.ends_in_star(actual_atype):
+        elif gimple_ctypes.TypeLattice.is_voidp(ptype) and gimple_ctypes.TypeLattice.ends_in_star(actual_atype):
             vp = gen._cast('void *', f"{aval}")
             coerced_args.append(vp)
         elif gimple_ctypes.TypeLattice.is_word(ptype) and (actual_atype in ('int', '_Bool', 'char *', 'void *') or gimple_ctypes.TypeLattice.ends_in_star(actual_atype)):
@@ -3273,7 +3273,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 aval_local = gen._ensure_local('char *', aval)
                 ip2 = gen._cast('void *', aval_local)
                 gen._cast_into(ct, 'int64_t', ip2)
-            elif atype == 'void *':
+            elif gimple_ctypes.TypeLattice.is_voidp(atype):
                 aval_local = gen._ensure_local('void *', aval)
                 gen._cast_into(ct, 'int64_t', aval_local)
             elif gimple_ctypes.TypeLattice.ends_in_star(atype):
@@ -3303,13 +3303,13 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             # instrumented stage1.ci build: `_find_tstring_closing_
             # quote_7a972f (stmt, i, _t42)`'s `_t42` was exactly this
             # `(char *)(void *)qch` cast, not a real 1-char string.
-            if atype == 'char' or actual_atype == 'char':
+            if gimple_ctypes.TypeLattice.is_char(atype) or gimple_ctypes.TypeLattice.is_char(actual_atype):
                 # `aval` itself is still C-declared as whatever `atype`
                 # says (int64_t when widened) even though it's really a
                 # char — cast it to a real `char` lvalue first so the
                 # mojo_char_to_str call below isn't passing an int64_t
                 # variable where GIMPLE expects an exact `char` match.
-                cv = aval if atype == 'char' else gen._cast('char', f"{aval}")
+                cv = aval if gimple_ctypes.TypeLattice.is_char(atype) else gen._cast('char', f"{aval}")
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                 coerced_args.append(sv)
             else:
@@ -3505,11 +3505,11 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             gen._cast_into(ip, 'int64_t', f"{aval}")
             gen._cast_into(pp, ptype, ip)
             coerced_args.append(pp)
-        elif gimple_ctypes.TypeLattice.is_cstr(ptype) and atype == 'void *':
+        elif gimple_ctypes.TypeLattice.is_cstr(ptype) and gimple_ctypes.TypeLattice.is_voidp(atype):
             # void* to char* conversion
             cp = gen._cast('char *', f"{aval}")
             coerced_args.append(cp)
-        elif ptype == 'void *' and gimple_ctypes.TypeLattice.is_cstr(atype):
+        elif gimple_ctypes.TypeLattice.is_voidp(ptype) and gimple_ctypes.TypeLattice.is_cstr(atype):
             # char* to void* conversion
             vp = gen._cast('void *', f"{aval}")
             coerced_args.append(vp)
@@ -3660,7 +3660,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         # illegal `void t; t = f();`). A 'void' entry here is a shadow — e.g. a
         # Mojo wrapper that shares a name with a value-returning libc symbol
         # reached via external_call — so the caller's explicit ret_type wins.
-        if fn_ret != ret_type and fn_ret != 'void':
+        if fn_ret != ret_type and not gimple_ctypes.TypeLattice.is_void(fn_ret):
             imported_ret = fn_ret
     if result_var and imported_ret and imported_ret != ret_type:
         call_tmp = gen._new_temp(imported_ret)
@@ -3812,7 +3812,7 @@ def _release_transient_cstr_args(gen, arg_pairs: list, fname: str = '') -> None:
     if not gen._cstr_key_src:
         return
     _dict = (arg_pairs[0][1] if (arg_pairs
-              and arg_pairs[0][0] == 'MojoDict *') else None)
+              and gimple_ctypes.TypeLattice.is_dict(arg_pairs[0][0])) else None)
     for _apair in arg_pairs:
         _k = _as_str(_apair[1])
         if _k in gen._cstr_key_src:
@@ -3932,7 +3932,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
     Returns (new_type, new_val) — if typ is 'char', calls mojo_char_to_str.
     If typ is 'int64_t' and actual type isn't a pointer, also converts.
     Otherwise casts through (char *)(int64_t) for boxed pointers."""
-    if typ == 'char':
+    if gimple_ctypes.TypeLattice.is_char(typ):
         return 'char *', gen._call_expr('char *', 'mojo_char_to_str', [('char', val)])
     if gimple_ctypes.TypeLattice.is_int_word(typ):
         _td = _tagged_dyn_read(gen, val, 'str')
@@ -3954,7 +3954,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
                 gen._cstr_key_src[_dk] = val
             return 'char *', _dk
         actual = gen._actual_types.get(val)
-        if actual == 'char':
+        if gimple_ctypes.TypeLattice.is_char(actual):
             cv = gen._cast('char', val)
             return 'char *', gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
         if actual is not None and gimple_ctypes.TypeLattice.ends_in_star(actual):
@@ -4145,7 +4145,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         # with `_cstr_key_src`, whose `mojo_cstr_or_int_release` frees a
         # content key outright rather than pooling it, because it is a repr
         # walker's heap string and not a pool block.
-        if word_ok and (gimple_ctypes.TypeLattice.ends_in_star(typ) or typ == 'void *'):
+        if word_ok and (gimple_ctypes.TypeLattice.ends_in_star(typ) or gimple_ctypes.TypeLattice.is_voidp(typ)):
             word = gen._new_val('int64_t', f'(int64_t)(intptr_t){val}')
             key = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                  [('int64_t', word)])
@@ -4950,28 +4950,8 @@ def boxed_param_names(gen) -> set:
     return out
 
 
-def _literal_store_kind(value):
-    """The scalar kind a LITERAL value stores, or None (no evidence).
-
-    Only literals count: a call or a name says nothing this pass can rely on,
-    so it is silence, not a second kind (doc/GIR.md stage 5c)."""
-    if isinstance(value, gimple_ctypes.NoneLiteral) \
-            or (isinstance(value, gimple_ctypes.IdentExpr) and value.name == 'None'):
-        # The parser spells `None` either way (infra_infer checks both too).
-        return 'none'
-    if isinstance(value, gimple_ctypes.BoolLiteral):
-        return 'bool'
-    if isinstance(value, gimple_ctypes.IntLiteral):
-        return 'int'
-    if isinstance(value, gimple_ctypes.FloatLiteral):
-        return 'float'
-    if isinstance(value, gimple_ctypes.StringLiteral):
-        return 'str'
-    return None
-
-
 def _self_field_stores(node, out: list) -> None:
-    """Append `(field, literal kind)` for every `self.<field> = <value>` under
+    """Append `(field, value node)` for every `self.<field> = <value>` under
     `node` (a statement, a list of statements, or a nested block)."""
     if isinstance(node, (list, tuple)):
         for item in node:
@@ -4982,7 +4962,7 @@ def _self_field_stores(node, out: list) -> None:
         if isinstance(t, gimple_ctypes.MemberExpr) \
                 and isinstance(t.obj, gimple_ctypes.IdentExpr) \
                 and t.obj.name == 'self':
-            out.append((t.member, _literal_store_kind(node.value)))
+            out.append((t.member, node.value))
     if dataclasses.is_dataclass(node):
         for f in dataclasses.fields(node):
             v = getattr(node, f.name, None)
@@ -4990,21 +4970,449 @@ def _self_field_stores(node, out: list) -> None:
                 _self_field_stores(v, out)
 
 
-def mixed_field_names(struct) -> frozenset:
-    """The fields of `struct` that hold a `None` literal AND a scalar literal
-    across the struct's methods (`self.<f> = None` beside `self.<f> = 42`).
+# The value classes of doc/GIR.md stage 5c ("DECISION"): what a slot can hold
+# decides how `None` is spelled in it. A bitmask per (callee, parameter), keyed
+# by one flat string so the table has no tuple key.
+_PV_REFS = 1       # a struct pointer, str, list, dict, set, bytes, ...
+_PV_SCALAR = 2     # an int, float or bool
+_PV_UNKNOWN = 4    # an argument whose kind nothing here proves
+_PV_SEP = '\x1f'
 
-    Such a field is the box-holding kind: a bare word would read the `None`
-    back as the integer 0 (the 2026-11-22 corpus group, doc/GIR.md stage 5c).
-    This is the predicate only; the stores and reads do not consult it yet."""
-    kinds: dict = {}
+
+def param_value_key(func_name, param_name) -> str:
+    """The flat key of one parameter in `gen._param_value_obs`."""
+    return _as_str(func_name) + _PV_SEP + _as_str(param_name)
+
+
+def param_value_class(gen, func_name, param_name) -> str:
+    """What an UNANNOTATED parameter receives at its call sites, as `'refs'`,
+    `'scalar'` or `'unknown'` (doc/GIR.md stage 5c).
+
+    `None` arguments (and a padded `= None` default) are ignored: they say
+    nothing about the kind of the non-`None` values. `'refs'` means every
+    other call site passes a reference, `'scalar'` that every one passes an
+    int/float/bool. A parameter with no observation, with an argument whose
+    kind nothing proves, or with BOTH kinds, is `'unknown'` (rule 3: no
+    informative evidence, nothing changes). `func_name` is the callee key the
+    call-site pass records under: the bare name for a free function,
+    `<Struct>_<method>` for a method (a constructor is `<Struct>___init__`)."""
+    obs = getattr(gen, '_param_value_obs', None)
+    if not obs:
+        return 'unknown'
+    bits = obs.get(param_value_key(func_name, param_name), 0)
+    if bits == _PV_REFS:
+        return 'refs'
+    if bits == _PV_SCALAR:
+        return 'scalar'
+    return 'unknown'
+
+
+def is_none_literal_node(value) -> bool:
+    """True for a literal `None` (the parser spells it as a `NoneLiteral` or as
+    the bare name)."""
+    return _pv_is_none_node(value)
+
+
+def _pv_is_none_node(value) -> bool:
+    return isinstance(value, gimple_ctypes.NoneLiteral) \
+        or (isinstance(value, gimple_ctypes.IdentExpr)
+            and _as_str(value.name) == 'None')
+
+
+def _pv_type_class(t) -> str:
+    """The value class a C type spelling proves: `'refs'`, `'scalar'`, or
+    `'unknown'` (the `int64_t` word is also the default for "cannot tell")."""
+    t = _as_str(t)
+    if not t:
+        return 'unknown'
+    if gimple_ctypes.TypeLattice.is_double(t) or gimple_ctypes.TypeLattice.is_float(t):
+        return 'scalar'
+    if gimple_ctypes.TypeLattice.ends_in_star(t):
+        return 'refs'
+    return 'unknown'
+
+
+def _pv_var_type(gen, caller_key, name) -> str:
+    """The C type of local `name` in `caller_key`: the inference table's
+    answer, else the struct a plain `name = Struct(...)` binding proves (the
+    inference has not typed module-level code yet when this pass runs), else a
+    module global."""
+    n = _as_str(name)
+    t = (getattr(gen, '_inferred_var_types', None) or {}).get(
+        _as_str(caller_key), {}).get(n)
+    if not t:
+        t = (getattr(gen, '_pv_local_structs', None) or {}).get(
+            _as_str(caller_key), {}).get(n)
+    if not t:
+        t = (getattr(gen, '_global_var_types', None) or {}).get(n)
+    return _as_str(t)
+
+
+def _pv_bind_local_structs(node, structs: dict, out: dict) -> None:
+    """Record `name -> '<Struct> *'` for every `name = Struct(...)` under
+    `node`; a name bound to two different structs is dropped (`''`)."""
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _pv_bind_local_structs(item, structs, out)
+        return
+    if isinstance(node, (gimple_ctypes.FunctionDef, gimple_ctypes.StructDef)):
+        return
+    if isinstance(node, gimple_ctypes.AssignStmt) \
+            and isinstance(node.target, gimple_ctypes.IdentExpr) \
+            and isinstance(node.value, gimple_ctypes.CallExpr) \
+            and isinstance(node.value.func, gimple_ctypes.IdentExpr) \
+            and _as_str(node.value.func.name) in structs:
+        nm = _as_str(node.target.name)
+        ty = _as_str(node.value.func.name) + ' *'
+        if nm in out and out[nm] != ty:
+            out[nm] = ''
+        else:
+            out[nm] = ty
+    if dataclasses.is_dataclass(node):
+        for f in dataclasses.fields(node):
+            v = getattr(node, f.name, None)
+            if isinstance(v, (list, tuple)) or dataclasses.is_dataclass(v):
+                _pv_bind_local_structs(v, structs, out)
+
+
+def value_class_of(gen, node, caller_key, caller_struct, depth) -> str:
+    """The value class of one expression evaluated inside `caller_key` (a
+    callee key, `'<toplevel>'` for module code), owned by struct
+    `caller_struct` or None: `'none'`, `'refs'`, `'scalar'` or `'unknown'`.
+
+    Only shapes that PROVE a kind answer; everything else is `'unknown'`,
+    which is silence rather than a second kind (the same discipline the
+    old literal-only store scan had)."""
+    if node is None:
+        return 'unknown'
+    if _pv_is_none_node(node):
+        return 'none'
+    if isinstance(node, gimple_ctypes.UnaryOp) \
+            and _as_str(node.op) in ('-', '+') \
+            and isinstance(node.operand, (gimple_ctypes.IntLiteral,
+                                          gimple_ctypes.FloatLiteral)):
+        return 'scalar'
+    if isinstance(node, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral,
+                         gimple_ctypes.BoolLiteral)):
+        return 'scalar'
+    if isinstance(node, (gimple_ctypes.StringLiteral, gimple_ctypes.ListExpr,
+                         gimple_ctypes.DictExpr, gimple_ctypes.SetExpr,
+                         gimple_ctypes.TupleExpr, gimple_ctypes.Comprehension)):
+        return 'refs'
+    if gen is None:
+        return 'unknown'
+    structs = getattr(gen, '_pv_structs', None) or {}
+    if isinstance(node, gimple_ctypes.CallExpr):
+        if isinstance(node.func, gimple_ctypes.IdentExpr) \
+                and _as_str(node.func.name) in structs:
+            return 'refs'
+        return 'unknown'
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        n = _as_str(node.name)
+        if n == 'self' and caller_struct:
+            return 'refs'
+        pnames = (getattr(gen, '_pv_param_names', None) or {}).get(_as_str(caller_key))
+        if pnames and n in pnames:
+            return param_value_class(gen, caller_key, n)
+        return _pv_type_class(_pv_var_type(gen, caller_key, n))
+    if isinstance(node, gimple_ctypes.MemberExpr) \
+            and isinstance(node.obj, gimple_ctypes.IdentExpr):
+        on = _as_str(node.obj.name)
+        owner = None
+        if on == 'self':
+            owner = caller_struct
+        else:
+            t = _pv_var_type(gen, caller_key, on)
+            if t and gimple_ctypes.TypeLattice.ends_in_star(t):
+                owner = t[:-2]
+        if owner and _as_str(owner) in structs:
+            return field_value_class(gen, _as_str(owner), _as_str(node.member), depth)
+    return 'unknown'
+
+
+def _field_store_classes(gen, struct, field_name, depth) -> list:
+    """The value class of every `self.<field_name> = <value>` store in
+    `struct`'s methods (one entry per store)."""
+    classes: list = []
+    sname = _as_str(struct.name)
     for m in getattr(struct, 'methods', []) or []:
         found: list = []
         _self_field_stores(getattr(m, 'body', []), found)
-        for field_name, kind in found:
-            if kind is not None:
-                kinds.setdefault(field_name, set()).add(kind)
-    return frozenset(f for f, ks in kinds.items() if 'none' in ks and (ks - {'none'}))
+        ckey = sname + '_' + _as_str(m.name)
+        for i in range(len(found)):
+            if _as_str(found[i][0]) != field_name:
+                continue
+            classes.append(value_class_of(gen, found[i][1], ckey, sname, depth + 1))
+    return classes
+
+
+def field_value_class(gen, struct_name, field_name, depth) -> str:
+    """What a struct field's NON-`None` stores are: `'refs'`, `'scalar'` or
+    `'unknown'` (no store, a store of unproven kind, or both kinds). The
+    recursion is bounded by `depth` because a field may be stored from
+    another field of the same struct."""
+    if depth > 3:
+        return 'unknown'
+    structs = getattr(gen, '_pv_structs', None) or {}
+    struct = structs.get(_as_str(struct_name))
+    if struct is None:
+        return 'unknown'
+    classes = _field_store_classes(gen, struct, _as_str(field_name), depth)
+    saw_refs = False
+    saw_scalar = False
+    for c in classes:
+        if c == 'refs':
+            saw_refs = True
+        elif c == 'scalar':
+            saw_scalar = True
+        elif c != 'none':
+            return 'unknown'
+    if saw_refs and not saw_scalar:
+        return 'refs'
+    if saw_scalar and not saw_refs:
+        return 'scalar'
+    return 'unknown'
+
+
+def _pv_bits(cls) -> int:
+    if cls == 'refs':
+        return _PV_REFS
+    if cls == 'scalar':
+        return _PV_SCALAR
+    if cls == 'unknown':
+        return _PV_UNKNOWN
+    return 0
+
+
+def _pv_note(table: dict, callee, pname, bits: int) -> None:
+    if bits == 0:
+        return
+    key = param_value_key(callee, pname)
+    table[key] = table.get(key, 0) | bits
+
+
+def _pv_method_params(fn) -> list:
+    """A method's parameter names that a call ARGUMENT binds: not the
+    receiver, not a classmethod's `cls`, not a `*args` / `**kwargs`."""
+    is_cls = 'classmethod' in (getattr(fn, 'decorators', None) or [])
+    out: list = []
+    for p in (fn.params or []):
+        n = _as_str(p[0])
+        if n == 'self' or (is_cls and n == 'cls') or n.startswith('*'):
+            continue
+        out.append(n)
+    return out
+
+
+def _pv_resolve_callee(gen, call, caller_name, caller_struct, structs, defs):
+    """The callee key of one call, or None when it is not resolvable to a
+    function of this module. A free function is its bare name, a method
+    `<Struct>_<method>`, a constructor call `<Struct>___init__`; receiver
+    resolution is the one the method-observation passes use (`self`, a local
+    typed `<Struct> *`, a `self.<field>` typed `<Struct> *`)."""
+    f = call.func
+    if isinstance(f, gimple_ctypes.IdentExpr):
+        n = _as_str(f.name)
+        if n in structs:
+            k = n + '___init__'
+            if k in defs:
+                return k
+            return None
+        if n in defs:
+            return n
+        return None
+    if not isinstance(f, gimple_ctypes.MemberExpr):
+        return None
+    recv = f.obj
+    owner = None
+    if isinstance(recv, gimple_ctypes.IdentExpr):
+        if _as_str(recv.name) == 'self':
+            owner = caller_struct
+        else:
+            t = _pv_var_type(gen, caller_name, recv.name)
+            if t and gimple_ctypes.TypeLattice.ends_in_star(t):
+                owner = t[:-2]
+    elif isinstance(recv, gimple_ctypes.MemberExpr) \
+            and isinstance(recv.obj, gimple_ctypes.IdentExpr) \
+            and _as_str(recv.obj.name) == 'self' and caller_struct:
+        ft = _as_str((getattr(gen, 'struct_field_types', None) or {}).get(
+            _as_str(caller_struct), {}).get(_as_str(recv.member)))
+        if ft and gimple_ctypes.TypeLattice.ends_in_star(ft):
+            owner = ft[:-2]
+    if not owner or _as_str(owner) not in structs:
+        return None
+    k = _as_str(owner) + '_' + _as_str(f.member)
+    if k in defs:
+        return k
+    return None
+
+
+def _pv_collect_round(gen, bodies: list, structs: dict, defs: dict, pnames: dict) -> dict:
+    """One pass over every call site, into a fresh table."""
+    table: dict = {}
+    for entry in bodies:
+        caller_name = _as_str(entry[0])
+        caller_struct = entry[1]
+        calls: list = []
+        gen._calls_in_stmts(entry[2], calls)
+        for call in calls:
+            callee = _pv_resolve_callee(gen, call, caller_name, caller_struct, structs, defs)
+            if callee is None:
+                continue
+            fn = defs[callee]
+            names = pnames[callee]
+            bound: set = set()
+            spread = False
+            for a in call.args:
+                if isinstance(a, gimple_ctypes.UnaryOp) and _as_str(a.op) in ('*', '**'):
+                    spread = True
+            for kw in (getattr(call, 'kwargs', None) or []):
+                if isinstance(kw[1], gimple_ctypes.UnaryOp) and _as_str(kw[1].op) == '**':
+                    spread = True
+            if spread:
+                # A spread has no one argument per slot: every parameter may
+                # receive anything, which is "no informative evidence".
+                for n in names:
+                    _pv_note(table, callee, n, _PV_UNKNOWN)
+                continue
+            for i in range(len(call.args)):
+                if i >= len(names):
+                    break
+                bound.add(names[i])
+                cls = value_class_of(gen, call.args[i], caller_name, caller_struct, 0)
+                _pv_note(table, callee, names[i], _pv_bits(cls))
+            for kw in (getattr(call, 'kwargs', None) or []):
+                kn = _as_str(kw[0])
+                if kn in names:
+                    bound.add(kn)
+                    cls = value_class_of(gen, kw[1], caller_name, caller_struct, 0)
+                    _pv_note(table, callee, kn, _pv_bits(cls))
+            dflts = getattr(fn, 'param_defaults', None) or {}
+            for n in names:
+                if n in bound or n not in dflts:
+                    continue
+                cls = value_class_of(gen, dflts[n], '', None, 0)
+                _pv_note(table, callee, n, _pv_bits(cls))
+    return table
+
+
+def collect_param_value_obs(gen, all_functions: list, all_structs: list,
+                            caller_bodies: list, own_struct_names: list = None) -> None:
+    """Fill `gen._param_value_obs` (and the tables `value_class_of` reads):
+    for every unannotated parameter of a function, method or constructor of
+    this module, the kinds of value its call sites pass (doc/GIR.md stage 5c).
+
+    `caller_bodies` is `[(caller key, owning struct name or None, body)]`, the
+    method-caller list the other cross-call passes walk. The walk repeats (at
+    most three rounds) because an argument that is itself a forwarded
+    parameter, or a field stored from one, is classified from the PREVIOUS
+    round's table; each round starts from an empty table so a stale
+    `unknown` from round one cannot outlive the evidence that settles it."""
+    structs: dict = {}
+    defs: dict = {}
+    pnames: dict = {}
+    allnames: dict = {}
+    for fn in all_functions:
+        if isinstance(fn, gimple_ctypes.FunctionDef):
+            k = _as_str(fn.name)
+            defs[k] = fn
+            names: list = []
+            for p in (fn.params or []):
+                n = _as_str(p[0])
+                if not n.startswith('*'):
+                    names.append(n)
+            pnames[k] = names
+    for st in all_structs:
+        if not isinstance(st, gimple_ctypes.StructDef):
+            continue
+        sname = _as_str(st.name)
+        structs[sname] = st
+        for m in (st.methods or []):
+            k = sname + '_' + _as_str(m.name)
+            defs[k] = m
+            pnames[k] = _pv_method_params(m)
+    for k in pnames:
+        allnames[k] = set(pnames[k])
+    gen._pv_structs = structs
+    gen._pv_param_names = allnames
+    gen._pv_own_structs = set(_as_str(n) for n in (own_struct_names or []))
+    gen._pv_mixed_cache = None
+    locs: dict = {}
+    for entry in caller_bodies:
+        one: dict = {}
+        _pv_bind_local_structs(entry[2], structs, one)
+        locs[_as_str(entry[0])] = one
+    gen._pv_local_structs = locs
+    gen._param_value_obs = {}
+    for _round in range(3):
+        table = _pv_collect_round(gen, caller_bodies, structs, defs, pnames)
+        prev = gen._param_value_obs
+        same = len(table) == len(prev)
+        if same:
+            for key in table:
+                if prev.get(key) != table[key]:
+                    same = False
+                    break
+        gen._param_value_obs = table
+        if same:
+            break
+
+
+def mixed_field_read(gen, struct_name, member) -> bool:
+    """True iff `<struct_name>.<member>` is a MIXED field of a struct defined
+    in THIS module (`mixed_field_names`): its slot holds a scalar beside
+    `None`, `None` is stored as the shared box, and every read of the field
+    answers from the box.
+
+    Only a struct the module itself defines is asked: the decision rests on
+    the call sites of the struct's methods, which only the defining module's
+    own compile sees, so an imported struct (whose defining module made its
+    own decision from its own call sites) is left as it was rather than read
+    with a representation its stores may not use."""
+    own = getattr(gen, '_pv_own_structs', None)
+    if not own or _as_str(struct_name) not in own:
+        return False
+    cache = getattr(gen, '_pv_mixed_cache', None)
+    if cache is None:
+        cache = {}
+        gen._pv_mixed_cache = cache
+    sn = _as_str(struct_name)
+    if sn not in cache:
+        cache[sn] = mixed_field_names((getattr(gen, '_pv_structs', None) or {})[sn], gen)
+    return _as_str(member) in cache[sn]
+
+
+def mixed_field_names(struct, gen=None) -> frozenset:
+    """The fields of `struct` that hold a `None` literal AND a scalar across
+    the struct's methods (`self.<f> = None` beside `self.<f> = 42`): the
+    box-holding kind, because a bare word would read the `None` back as the
+    integer 0 (the 2026-11-22 corpus group, doc/GIR.md stage 5c).
+
+    The decision rule (stage 5c "DECISION"): a slot's `None` follows what the
+    slot can hold. A field whose non-`None` stores are all references (a
+    constructor call, a string or container literal, a references-only field,
+    a `refs` parameter) keeps the NULL word and is NOT mixed. A scalar literal
+    or a `scalar` parameter beside the `None` store makes it mixed. A store of
+    unproven kind (`unknown`) is silence and does not."""
+    stores: dict = {}
+    order: list = []
+    sname = _as_str(getattr(struct, 'name', ''))
+    for m in getattr(struct, 'methods', []) or []:
+        found: list = []
+        _self_field_stores(getattr(m, 'body', []), found)
+        ckey = sname + '_' + _as_str(getattr(m, 'name', ''))
+        for i in range(len(found)):
+            fname = _as_str(found[i][0])
+            if fname not in stores:
+                stores[fname] = set()
+                order.append(fname)
+            stores[fname].add(value_class_of(gen, found[i][1], ckey, sname, 0))
+    out: list = []
+    for fname in order:
+        ks = stores[fname]
+        if 'none' in ks and 'scalar' in ks:
+            out.append(fname)
+    return frozenset(out)
 
 
 def mixed_box_name(gen, name) -> bool:
@@ -5053,7 +5461,7 @@ def box_word_value(gen, value_node, vtype: str, v: str) -> tuple:
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)]), 'int64_t'
     if gimple_ctypes.TypeLattice.is_cstr(vtype):
         return gen._call_expr('int64_t', 'mojo_box_from_str', [('char *', v)]), 'int64_t'
-    if vtype == 'MojoBytes *':
+    if gimple_ctypes.TypeLattice.is_bytes(vtype):
         return gen._call_expr('int64_t', 'mojo_box_from_bytes', [('void *', v)]), 'int64_t'
     if gimple_ctypes.TypeLattice.is_int_word_or_bool(vtype):
         if gen._word_may_be_box(v) or gen._word_is_tagged(v):
@@ -5636,13 +6044,13 @@ def _convert_container_kind(gen, dst_type: str, src_type: str, value: str):
     _KIND = gimple_ctypes._CONTAINER_KIND_TYPES
     if dst_type not in _KIND or src_type not in _KIND or src_type == dst_type:
         return None
-    if gimple_ctypes.TypeLattice.is_list(dst_type) and src_type == 'MojoSet *':
+    if gimple_ctypes.TypeLattice.is_list(dst_type) and gimple_ctypes.TypeLattice.is_set(src_type):
         res = gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', value)])
         _e = gen._elem_of(value)
         if _e:
             gen._elem_types[res] = _e
         return res
-    if gimple_ctypes.TypeLattice.is_list(dst_type) and src_type == 'MojoDict *':
+    if gimple_ctypes.TypeLattice.is_list(dst_type) and gimple_ctypes.TypeLattice.is_dict(src_type):
         res = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', value)])
         gen._elem_types[res] = 'char *'
         return res
@@ -5784,11 +6192,11 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
     Fixing it here, once, closes it for all 5 call sites at once."""
     if gimple_ctypes.TypeLattice.is_list(src_type):
         return value
-    if src_type == 'MojoDict *':
+    if gimple_ctypes.TypeLattice.is_dict(src_type):
         _dk = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', value)])
         gen._elem_types[_dk] = 'char *'  # dict keys are always strings
         return _dk
-    if src_type == 'MojoSet *':
+    if gimple_ctypes.TypeLattice.is_set(src_type):
         _sl = gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', value)])
         # Carry the set's element type onto the list, exactly as the dict
         # branch just above does for its keys. `set.to_list` only reboxes;
@@ -5803,7 +6211,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         return _sl
     if src_type == 'MojoGenerator *':
         return _generator_to_list(gen, value)
-    if src_type == 'MojoBytes *':
+    if gimple_ctypes.TypeLattice.is_bytes(src_type):
         # A bytes operand iterates its BYTES as ints 0-255 (CPython), so its
         # materialized view is a fresh MojoList of int slots, one per byte,
         # read with the same element source `for x in b:` uses
@@ -6140,7 +6548,7 @@ def _list_repr_fn(gen, rav: str) -> str:
         # (0) slot as the None sentinel, printing `[1, None]`. Mirrors the
         # int64_t/double routing just above.
         return 'mojo_repr_list_bools'
-    if et == 'MojoBytes *':
+    if gimple_ctypes.TypeLattice.is_bytes(et):
         return 'mojo_repr_list_bytes'
     return '_mojo_repr_list'
 
@@ -6453,7 +6861,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
             et = _real
             ev = gen._cast(_real, ev)
-    if gimple_ctypes.TypeLattice.is_list(et) or et == 'MojoSet *':
+    if gimple_ctypes.TypeLattice.is_list(et) or gimple_ctypes.TypeLattice.is_set(et):
         # A plain container value (a literal, or a local whose static type
         # is already known) reaches here directly, same value the `print`
         # dispatch already knows how to repr — reuse its helper choice
@@ -6464,9 +6872,9 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         else:
             fn, fn_args = '_mojo_repr_set', [('MojoSet *', ev)]
         return gen._call_expr('char *', fn, fn_args)
-    if et == 'MojoDict *':
+    if gimple_ctypes.TypeLattice.is_dict(et):
         return gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', ev)])
-    if et == 'MojoBytes *':
+    if gimple_ctypes.TypeLattice.is_bytes(et):
         # Python str(b) / f"{b}" both give the b'...' repr text (no decode).
         return gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', ev)])
     if et == 'MojoMemoryView *':
@@ -6475,7 +6883,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         # Python str(True)/str(False) → "True"/"False", not the "1"/"0"
         # the int path below would produce.
         return gen._call_expr('char *', 'mojo_bool_to_str', [('int', ev)])
-    if gimple_ctypes.TypeLattice.is_int(et):
+    if (gimple_ctypes.TypeLattice.is_word(et) or gimple_ctypes.TypeLattice.is_c_int(et) or gimple_ctypes.TypeLattice.is_i8(et) or gimple_ctypes.TypeLattice.is_i16(et) or gimple_ctypes.TypeLattice.is_i32(et) or gimple_ctypes.TypeLattice.is_u8(et) or gimple_ctypes.TypeLattice.is_u16(et) or gimple_ctypes.TypeLattice.is_u32(et) or gimple_ctypes.TypeLattice.is_uword(et)):
         nv = gen._to_int64(et, ev)
         # A word that may be a box, a tagged dict-slot value, a string pointer
         # held in an int64_t, or a plain integer: str() via the runtime's
@@ -6495,7 +6903,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     if et in ('double', 'float', '__fp16'):
         fv = ev if gimple_ctypes.TypeLattice.is_double(et) else gen._cast('double', ev)
         return gen._call_expr('char *', 'mojo_repr_float', [('double', fv)])
-    if gimple_ctypes.TypeLattice.ends_in_star(et) and et != 'void *':
+    if gimple_ctypes.TypeLattice.ends_in_star(et) and not gimple_ctypes.TypeLattice.is_voidp(et):
         # A struct value: consult the receiver's OWN dunder, `__str__`
         # first and `__repr__` second, which is CPython's order for
         # `str(x)` and is what makes `str(p)` stop printing the bare type
@@ -7654,7 +8062,7 @@ def _compr_dict_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     tgt = gen0.target
     vt = gen.var_types.get(tgt, 'char *')
     tgt_c = gen._cname(tgt)
-    if gimple_ctypes.TypeLattice.is_int(vt):
+    if (gimple_ctypes.TypeLattice.is_word(vt) or gimple_ctypes.TypeLattice.is_c_int(vt) or gimple_ctypes.TypeLattice.is_i32(vt)):
         vp = gen._cast('void *', key_tmp)
         box = gen._cast('int64_t', vp)
         gen._copy(f"{tgt_c}", f"{box}")
@@ -8124,7 +8532,7 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     call to the `_kw` twin (`mojo_dict_set_int_kw(d, 3, v)`). A raw emit skips
     that and hands the runtime `(char *)3` as a key to hash, which segfaults."""
     gen._note_container_callable_ret(dict_val, val, val_ctype, val_node)
-    _bs = 'bytes_' if key_ctype == 'MojoBytes *' else ''
+    _bs = 'bytes_' if gimple_ctypes.TypeLattice.is_bytes(key_ctype) else ''
     # A `char *` value, through `mojo_dict_set_str`, which tags the slot
     # `kind == 2`. This arm is why the function is not named for the int case
     # any more: it used to be documented as "the one dict store of a NON-STRING
@@ -9486,7 +9894,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             if gimple_ctypes.TypeLattice.is_cstr(real):
                 aval = gen._cast('char *', f"{aval}")
                 atype = 'char *'
-            elif real == 'MojoDict *':
+            elif gimple_ctypes.TypeLattice.is_dict(real):
                 dp = gen._coerce_to_type('int64_t', 'MojoDict *', aval)
                 rv = _own_repr(gen, '_mojo_repr_dict',
                                gen._call_expr('char *', '_mojo_repr_dict',
@@ -9537,7 +9945,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
         # uses). With neither the value falls through as it did. This arm did
         # not exist, so `print(p)` printed the object's ADDRESS as a decimal
         # while `str(p)` / `repr(p)` were right.
-        if isinstance(atype, str) and gimple_ctypes.TypeLattice.ends_in_star(atype) and atype != 'void *':
+        if isinstance(atype, str) and gimple_ctypes.TypeLattice.ends_in_star(atype) and not gimple_ctypes.TypeLattice.is_voidp(atype):
             _psn = atype[:-2].strip()
             if _psn in gen.struct_field_types:
                 _pcall = user_dunder_repr_call(gen, _psn, atype, aval,
@@ -9616,17 +10024,17 @@ def _gen_print(gen, args: list, kwargs: list = None):
             rv = _own_repr(gen, _lf, gen._call_expr('char *', _lf, _largs),
                            _owned_reprs)
             gen._rt_void(print_fn, [f"{rv}"])
-        elif atype == 'MojoDict *':
+        elif gimple_ctypes.TypeLattice.is_dict(atype):
             rv = _own_repr(gen, '_mojo_repr_dict',
                            gen._call_expr('char *', '_mojo_repr_dict',
                                           [('MojoDict *', aval)]), _owned_reprs)
             gen._rt_void(print_fn, [f"{rv}"])
-        elif atype == 'MojoBytes *':
+        elif gimple_ctypes.TypeLattice.is_bytes(atype):
             rv = _own_repr(gen, 'mojo_bytes_repr',
                            gen._call_expr('char *', 'mojo_bytes_repr',
                                           [('MojoBytes *', aval)]), _owned_reprs)
             gen._rt_void(print_fn, [f"{rv}"])
-        elif atype == 'MojoSet *':
+        elif gimple_ctypes.TypeLattice.is_set(atype):
             # print({1, 2}) with no boxing involved (a set LITERAL's lowered
             # type is statically MojoSet *, so it never reaches the boxed
             # int64_t re-typing branch above that already calls
@@ -9646,7 +10054,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # had no container branch to take and fell to the numeric path,
             # printing the list's ADDRESS. The static type knows what it is,
             # so route on that.
-            if _stat == 'MojoDict *':
+            if gimple_ctypes.TypeLattice.is_dict(_stat):
                 _dp = gen._coerce_to_type(atype if gimple_ctypes.TypeLattice.is_int_word_or_voidp(atype) else 'int64_t',
                                           'MojoDict *', aval)
                 rv = _own_repr(gen, '_mojo_repr_dict',
@@ -10531,11 +10939,11 @@ def _owned_free_runtime_fn(ctype) -> str:
     real, reproducible `make bootstrap` divergence). An explicit
     if/elif's each branch returns a STRING LITERAL directly, which is
     always correctly typed."""
-    if ctype == 'MojoDict *':
+    if gimple_ctypes.TypeLattice.is_dict(ctype):
         return 'mojo_dict_free'
     if gimple_ctypes.TypeLattice.is_list(ctype):
         return 'mojo_list_free'
-    if ctype == 'MojoSet *':
+    if gimple_ctypes.TypeLattice.is_set(ctype):
         return 'mojo_set_free'
     return ''
 
@@ -10543,11 +10951,11 @@ def _owned_free_runtime_fn(ctype) -> str:
 def _owned_push_runtime_fn(ctype) -> str:
     """`_OWNED_PUSH_RUNTIME_FN.get(ctype)` — see `_owned_free_runtime_fn`
     for why this can't be a dict `.get()` call under self-hosting."""
-    if ctype == 'MojoDict *':
+    if gimple_ctypes.TypeLattice.is_dict(ctype):
         return 'mojo_cleanup_push_dict'
     if gimple_ctypes.TypeLattice.is_list(ctype):
         return 'mojo_cleanup_push_list'
-    if ctype == 'MojoSet *':
+    if gimple_ctypes.TypeLattice.is_set(ctype):
         return 'mojo_cleanup_push_set'
     return ''
 
@@ -10571,11 +10979,11 @@ def _owned_stack_push_runtime_fn(ctype) -> str:
     `_STACK` kinds tear down buffers only, never `free()` the struct); an
     explicit if-chain for the same self-hosting reason as
     `_owned_free_runtime_fn`."""
-    if ctype == 'MojoDict *':
+    if gimple_ctypes.TypeLattice.is_dict(ctype):
         return 'mojo_cleanup_push_dict_stack'
     if gimple_ctypes.TypeLattice.is_list(ctype):
         return 'mojo_cleanup_push_list_stack'
-    if ctype == 'MojoSet *':
+    if gimple_ctypes.TypeLattice.is_set(ctype):
         return 'mojo_cleanup_push_set_stack'
     return ''
 
@@ -10607,9 +11015,9 @@ def emit_container_new(gen, t: str, ctype: str) -> None:
         gen._rt_void(f"{_owned_stack_init_fn(ctype)}", [f"&{st}"])
         build.assign(gen, f'{t}', f'&{st}')
         return
-    if ctype == 'MojoDict *':
+    if gimple_ctypes.TypeLattice.is_dict(ctype):
         gen._rt_into(t, 'mojo_dict_new', [])
-    elif ctype == 'MojoSet *':
+    elif gimple_ctypes.TypeLattice.is_set(ctype):
         gen._rt_into(t, 'mojo_set_new', [])
     else:
         gen._rt_into(t, 'mojo_list_new', [])
@@ -10626,7 +11034,7 @@ def _container_keys_safe(gen, name: str, ctype) -> bool:
     """A dict or set owns its key/element strings, so it may be torn down at
     scope exit only if no key it handed out by iteration can outlive it
     (ownership_destruct.key_views_consumed). Any other type is unaffected."""
-    if ctype != 'MojoDict *' and ctype != 'MojoSet *':
+    if not gimple_ctypes.TypeLattice.is_dict(ctype) and not gimple_ctypes.TypeLattice.is_set(ctype):
         return True
     return _key_views_ok(gen._cur_func_body, name)
 
@@ -11151,11 +11559,11 @@ def _owned_destroy_runtime_fn(ctype) -> str:
     """`_OWNED_DESTROY_RUNTIME_FN.get(ctype)` — see `_owned_free_
     runtime_fn`'s docstring for why this can't be a dict `.get()` call
     under self-hosting."""
-    if ctype == 'MojoDict *':
+    if gimple_ctypes.TypeLattice.is_dict(ctype):
         return 'mojo_dict_destroy'
     if gimple_ctypes.TypeLattice.is_list(ctype):
         return 'mojo_list_destroy'
-    if ctype == 'MojoSet *':
+    if gimple_ctypes.TypeLattice.is_set(ctype):
         return 'mojo_set_destroy'
     return ''
 

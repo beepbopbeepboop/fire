@@ -1,8 +1,8 @@
 # GIR: a typed IR for the gimple backend
 
-Status: stages 0, 1, 2a, 2b, 3a, 3b, 3c and 5a landed (2026-11-21). This file is the plan and the rules. Read it
+Status (2026-11-23): stages 0, 1, 2a, 2b, 3a, 3b, 3c, 5a, 5b and 6 are landed, and stage 7 T1-T6 are done. Stage 4
+(types) and stage 5c (None) are the open stages. This file is the plan and the rules. Read it
 before changing anything under `mojo/backend_gimple/` or `mojo/ir/`.
-How the remaining stages are being built with Sonnet/Haiku workers: `doc/GIR_WORKERS.md`.
 
 ## 1. What is wrong today (measured 2026-11-13)
 
@@ -287,18 +287,31 @@ stage 7 has an oracle before it has a builder.
   `test_type_lattice_predicates.py` pins each predicate's exact membership and each codemod table
   entry. The remaining `==` tests are the ones whose left side is an expression the codemod
   deliberately does not accept; the tuple pattern can only shrink from here.
-  *Measured 2026-11-22 after the W1 tail* (eight packets, one commit each, the packet docs deleted with
-  them): `== 'int64_t'` 12, `== 'char *'` 5, `== 'MojoList *'` 9, `endswith(' *')` 12, `== '_Bool'` 0,
-  `== 'double'` 0. The live remainder is comments that quote a test, `endswith(' *')` on a receiver that
-  may be `None` (left alone: `ends_in_star(None)` is False where `.endswith` raises), and `rt_call.py`, which
-  has no `gimple_ctypes` import and so stays as it was. The ratchet baseline is lowered to these counts.
+  *Census 2026-11-23 (the exact rewrites and the single-type codemod).* Stage 4's string tests are about 930, not
+  about 30. The ratchet had counted seven spellings; `test_type_string_ratchet.py` now counts every comparison
+  against a C type spelling in three patterns (`== type string`, `in (type tuple)`, `endswith('*')`). Before this
+  round a grep on master counted 619 `==` tests, 270 tuple tests and 38 `endswith`. The widened tuple rewrites of
+  `6a89c722e` and `cf600c4d5` are now exact (`is_no_type` and the `is_c_int`/`is_i8`/.../`is_c_float` predicates
+  replace the widening predicates, and `ALLOWED_EXTRA` is gone). The single-type equality codemod ran over the
+  backend for `MojoDict *`, `MojoBytes *`, `void`, `MojoSet *`, `void *`, `char` and `MojoStr *`. The ratchet now
+  measures 216 `==` / 263 tuple / 38 `endswith`, and those are its BASELINE. Still open: the `== 'int'` and
+  `== 'float'` equalities (their exact predicates exist; mapping them is a separate change).
+  *One vocabulary (landed 2026-11-23, migration step 1 of
+  `bugs/hard/GIR_stage4_one_type_vocabulary.md`).* `mojo/ir/types.py` is the single source: `Type` is
+  interned by C SPELLING (`char`/`int8_t`, `long`/`int64_t`, `bool`/`_Bool` are distinct objects) and
+  carries `cls`, the semantic type, so `trivially_convertible`, `mismatch_class` and `cast_is_legal`
+  compare `.cls` and still treat `long` and `int64_t` as one GIMPLE class. Every `TypeLattice.is_*`
+  now delegates to `spelled(t)` plus a `Type` method and answers exactly the spellings it did; the nine
+  union predicates are frozen (no new callers). C is byte-identical on all 285 programs. Next: move
+  one side table (`_elem_types`) to `Type`.
 - **Stage 5a (landed 2026-11-14). A value's facts travel with a copy.**
   `carry_value_info(gen, dst, src)` (`emit_infra.py`) copies what the backend
   knows about a VALUE from one name to another, and `gen._copy` calls it for
   every same-typed copy. It carries the 18 type tables (`_elem_types`,
   `_dict_val_types`, `_actual_types`, `_tuple_slot_types`, the callable and
-  generator tables, ...), only FILLS (a fact already recorded for the
-  destination wins), and never carries ownership (`_fresh_vals`, `_owned_*`).
+  generator tables, ...), only ADDS facts (a fact already recorded for the
+  destination wins; the rule for the value kinds is stage 5b's, below), and never
+  carries ownership (`_fresh_vals`, `_owned_*`).
   This CHANGES generated code: 33 compiler modules compile differently
   (about 770 fewer statements; a boxed fallback read becomes a typed read
   where the element type is now known). Small programs are unchanged.
@@ -314,7 +327,11 @@ stage 7 has an oracle before it has a builder.
   `kind` is `Int / Erased(T) / DynWord / Box / Plain` and the flags
   `Tagged`, `SlotKinds`, `BoxedContainer` and `BindBox` carry the facts that
   are not a kind. `int64_t` therefore splits into
-  Int / Erased(T) / DynWord / Box in the value's info.
+  Int / Erased(T) / DynWord / Box in the value's info. No writer sets `Erased(T)`
+  yet: `carry` moves it (a Box source upgrades a Plain, Dyn or Erased destination;
+  only an Int destination is protected, `mojo/middle/valueinfo.py` `carry`), and
+  `erased_type` is read, but nothing marks a value Erased. It is modelled and
+  carried only.
   *Measured 2026-11-20 (the guide for the next round).* The six
   dynamic-word sets, by uses / files / writers (`.add`, `.update`, `[x] =`):
   `_boxed_vals` 93/11/30, `_dyn_word_vals` 75/8/51, `_tagged_word_vals`
@@ -536,17 +553,21 @@ stage 7 has an oracle before it has a builder.
   binds a name read later, or calls a nested function).
   `test_gimple_module_passes.py` pins the extracted rows, their annotations,
   the 8,674-line ratchet and the `0 lines can be moved` end state.
-  NOT moved: 29 nested functions that read a local of `gen_module_impl`
-  (lifting one needs a typed parameter per captured local), the passes
-  that call them, and the passes that bind a name read later (those need
-  to return a value).
-- **Stage 6. Shape.** One loop builder replaces the 18 copies of the counted
-  loop skeleton across 28 `_gen_for_*`/`_compr_*` functions; the giant
-  functions are split along their `isinstance` arms.
+  Fifth round (2026-11-23): the two blocks `4e2efdfee` added to the parent moved out
+  (`_gmp_publish_definer_pts`, `_gmp_emit_str_pool_forward_decl`), and
+  `test_gimple_module_passes.py` pins them. The parent is now 8,679 lines; the 5 over the
+  8,674 ratchet are call-site lines the moves left and one call wrapped by `2adea3531`, so
+  its ratchet is raised to the measured count, with the reason written beside it.
+  NOT moved: 25 of the 32 nested functions (30 direct) read a name bound in
+  `gen_module_impl`'s own body (measured 2026-11-23 by an AST pass; `self` and the
+  parent's parameters do not count). Lifting one needs a typed parameter per captured
+  local. Also not moved: the passes that call them, and the passes that bind a name
+  read later (those need to return a value).
 - **Stage 7. Other printers.** The C++ coroutine lowering (`cpp_core.py`,
-  `cpp_async.py`, 16,400 lines, a second walk of the same AST) and the direct
-  GCC bridge (`gcc/fire/fire-gimple-bridge.cc`, today a stub that builds
-  `int main(){return 0;}`) become printers over GIR. Its oracle is in place and
+  `cpp_async.py`, 16,400 lines, a second walk of the same AST) becomes a printer
+  over GIR. A direct GCC bridge (`gcc/fire/fire-gimple-bridge.cc`) is not in this
+  repository: there is no `gcc/` directory, and `git log --all` has no commit for
+  that path. So stage 7's T1-T8 cover only the C++ printer. Its oracle is in place and
   is the second corpus `tools/c_oracle.py` hashes (`tools/cpp_corpus`, 13
   coroutine programs compiled with `MOJO_CORO=cpp`, both promise shapes).
   Shape step (2026-11-22): `extract_arm.py` moved every top-level `if` arm of
@@ -555,8 +576,7 @@ stage 7 has an oracle before it has a builder.
   344 -> 256, `_cpp_yield_from` 716 -> 595, `_cpp_for_stmt` 1,846 -> 456 —
   so `--list ... 25` prints `0 lines can be moved` for all five and an arm is
   the unit that later returns an `Ex`. Both corpora are byte-identical.
-  `test_gimple_cpp_core_arms.py` pins it. The builder it prints through
-  (stage 2b, `mojo/ir/build.py`) is still the blocker.
+  `test_gimple_cpp_core_arms.py` pins it.
 
 ## 5. The two oracles every worker uses
 
@@ -566,9 +586,8 @@ reports success without them.
 1. **Byte-identical C** (behaviour-preserving work: codemods, extractions,
    builder migration). Hash the generated C of `tools/pydiff_corpus` at the base
    commit and on the worker's tree; every hash must match. Today this is the
-   scratch script used on 2026-11-20/21; step W0.1 below turns it into
-   `tools/c_oracle.py`, which caches the base hashes per commit so a worker runs
-   only its own side.
+   `tools/c_oracle.py`: the scratch script of 2026-11-20/21 became it, and it caches
+   the base hashes per commit so a worker runs only its own side.
 2. **CPython agreement** (behaviour-changing work: stage 5c, bug fixes).
    `python3 tools/pydiff.py <repro>` prints `OK`, and `python3
    test_pydiff_ratchet.py` keeps every listed program OK.
@@ -591,26 +610,31 @@ which runs `fire.py --dump-full fire.py` (what `bootstrap-stage1-transitive`
 runs) for both sides and fails on any NEW weak stub. It costs 5-8 minutes and
 about 6 GB, so the orchestrator runs it once per wave on the merged tree, not
 each worker. Any change that adds a module, a class, or a method called across
-modules gets it. The full check is still `make bootstrap` (owner-run; see §6).
+modules gets it. The full check is still `make bootstrap` (owner-run; see CLAUDE.md, `## Verification policy`).
 
 ## 6. Stage 7: status and todo (measured 2026-11-23)
 
-Measured on master with an AST pass over `cpp_core.py`: 0 statement f-strings left; 0 expression f-string leaves left
-(the last two are ported on master); 24 `.show()` boundaries; 39 functions returning `list[...]` of statement text; 11
-functions returning `str`; the three statement helpers have 186 (`_cpp_ir_line`), 112 (`_cpp_assign_line`), 52
-(`_cpp_call_line`) and 60 (`_cpp_instr`) call sites, plus 20 `_cpp_opaque` and 3 `_cpp_if_break_line`.
+The T0 baseline, measured on master with an AST pass over `cpp_core.py` before T3 (kept for the record): 0 statement
+f-strings left; 0 expression f-string leaves left (the last two are ported on master); 24 `.show()` boundaries; 39
+functions returning `list[...]` of statement text; 11 functions returning `str`; the three statement helpers have 186
+(`_cpp_ir_line`), 112 (`_cpp_assign_line`), 52 (`_cpp_call_line`) and 60 (`_cpp_instr`) call sites, plus 20
+`_cpp_opaque` and 3 `_cpp_if_break_line`. Re-measured 2026-11-23, after T6: 12 `.show()` calls in `cpp_core.py`
+(`grep -c`); the functions annotated `-> str` are `_cpp_expr` (`cpp_core.py`) and `_cpp_dict_key_expr` and
+`_cpp_fresh_name` (`cpp_async.py`); `_cpp_str_compare` is annotated `str | None` (see T3).
 
 - [x] T1. Statement helpers return `Instr` (with `indent` set), not `str`: `_cpp_ir_line`, `_cpp_assign_line`,
       `_cpp_call_line`, `_cpp_instr`, `_cpp_opaque`, `_cpp_if_break_line`. Consumers that test a line as text (for
       example `'co_yield' in ln` over `finally_lines`) must test the Instr's `show()`.
 - [x] T2. The statement printers return `list[Instr]` (merged `cec0b197f`; verified on master 2026-11-23).
 - [x] T3. The `-> str` functions become `Ex` (or stay as text only at a named boundary). Done 2026-11-23, see the T3 status below.
-- [x] T4. The `.show()` calls are removed as their consumers take `Ex`/`Instr` (58 to 7; see the T4 status below).
-- [x] T5. One rendering edge: the function-assembly site renders each `Instr` with `.line()` (the one `'\n'.join` site). Done 2026-11-23, see the T5 status below.
+- [x] T4. The `.show()` calls are removed as their consumers take `Ex`/`Instr` (58 to 7 at T4, and 12 after T6;
+      see the T4 and T6 status below).
+- [x] T5. One rendering edge: each `Instr` is rendered by `.line()` through `render_lines` (`mojo/ir/instr.py`), and
+      the function-assembly joins that print the rendered lines are the `cpp_async.py` and `emit_funcs`/`emit_loops`
+      sites. Done 2026-11-23, see the T5 status below.
 - [x] T6. Call-slot text lists (`_cpp_call_arg_expr` and its consumers) take `Ex`. Done 2026-11-23, see the T6 status below.
 - [ ] T7. Verify: `test_gimple_cpp_core_arms.py`; `c_oracle check` identical on all 285 pydiff and all coroutine
-      programs; `compile_stdlib.py` `FAILED: 0`, no skips; the transcription-only sites (listed in the Status entries)
-      probed until each is reached or its probe is recorded as impossible.
+      programs; `compile_stdlib.py` `FAILED: 0`, no skips.
 - [ ] T8. Done criterion: delete this doc in the same commit, with `python3 tools/dangling_doc_refs.py --ratchet`.
 
 ### Status 2026-11-23: T6 (call-slot text lists take `Ex`)
@@ -652,7 +676,7 @@ Verification (worktree `work-t6`, branch `work/gir-stage7-t6`, base `63e597a35`)
 - `compile_stdlib.py` (default parallelism): `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no `skip` lines, exit 0.
   The run was a cold build (`Codegen CAS: 0/610 hits`, `GCC CAS: 0/610 hits`).
 
-T6 is T6-done. Still open: T7 to T8.
+T6 is T6-done.
 
 ### Status 2026-11-23: T5 (one rendering edge)
 
@@ -687,7 +711,7 @@ Verification (worktree `work-t5`, branch `work/gir-stage7-t5`, base `9904b3b03`)
 - Targeted: `test_gir_builder.py` (0 failures), `test_codegen_yield_from_walk_ast_memo.py` (PASS); the latter imports
   `render_lines` directly now.
 
-T5 is T5-done. Still open: T6 to T8.
+T5 is T5-done.
 
 ### Status 2026-11-23: T4 (`.show()` removed as consumers take `Ex`)
 
@@ -721,7 +745,7 @@ Verification (worktree `work-t4`, branch `work/gir-stage7-t4`):
   identical C++ companion`.
 - `compile_stdlib.py`: `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no `skip` lines, exit 0.
 
-T4 is T4-done. Still open: T5 to T8.
+T4 is T4-done.
 
 ### Status 2026-11-23: T2 verified on master (merge `cec0b197f`)
 
@@ -730,7 +754,7 @@ T2 (statement printers return `list[Instr]`) was merged before verification and 
 - `c_oracle check --base 3dec79e25` (the commit before T2): identical C on all 285 pydiff programs and identical C++ on all 35 coroutine programs.
 - `compile_stdlib.py` (default parallelism): `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no skips. The run was served almost entirely from the content-addressed cache (100% codegen and GCC hits), so it confirms the same code compiles, not a fresh build.
 
-T2 is T2-done. Still open: T4 through T8.
+T2 is T2-done.
 
 ### Status 2026-11-23: T3 (`-> str` functions return `Ex`)
 
@@ -777,8 +801,9 @@ Verification (worktree `work-t3`, base `master` HEAD 051634f49):
   reported here.
 - `compile_stdlib.py`: `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no `skip` lines, exit 0.
 
-T3 is T3-done. Still open: T4 through T8.
+T3 is T3-done.
 
 Status: stage 7 T1 (statement helpers return `Instr`) and T2 (statement printers return `list[Instr]`) are on
-master and verified. Still open: T3 to T8 below. This file is the only GIR document; the dated history of
+master and verified. T3 to T6 are done since (see their entries). Status (2026-11-23): still open: T7 and T8.
+This file is the only GIR document; the dated history of
 the stage 7 work is in git history (the stage 6 and 7 bug log, deleted 2026-11-23).

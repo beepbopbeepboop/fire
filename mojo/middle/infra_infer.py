@@ -2767,7 +2767,7 @@ def _return_arms_need_boxed_word(acc: list, arms: list, joined: str = None) -> b
         gimple_ctypes.TypeLattice.join_all(acc))
     for _i in range(len(acc)):
         _t = _as_str(acc[_i])
-        if _t == 'void' or gimple_ctypes.TypeLattice.is_pointer(_t):
+        if gimple_ctypes.TypeLattice.is_void(_t) or gimple_ctypes.TypeLattice.is_pointer(_t):
             continue
         _node = arms[_i] if _i < len(arms) else None
         if _is_none_return_arm(_node):
@@ -2895,9 +2895,9 @@ def _return_arms_are_int_or_none(acc: list, arms: list, body: list = None) -> bo
     for _i in range(len(acc)):
         _t = _as_str(acc[_i])
         _node = arms[_i] if _i < len(arms) else None
-        if _t != 'void' and _is_none_return_arm(_node):
+        if not gimple_ctypes.TypeLattice.is_void(_t) and _is_none_return_arm(_node):
             _has_none = True
-        elif (gimple_ctypes.TypeLattice.is_number_scalar(_t) or gimple_ctypes.TypeLattice.is_float(_t)) \
+        elif (gimple_ctypes.TypeLattice.is_number_scalar(_t) or gimple_ctypes.TypeLattice.is_c_float(_t)) \
                 and gimple_exprtypes.scalar_shape_arm_kind(_node) is not None:
             _has_scalar = True
         elif gimple_ctypes.TypeLattice.is_int_word(_t) and body is not None \

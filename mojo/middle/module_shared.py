@@ -1430,7 +1430,7 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                 # items()` unpacks `v` as `char *`, not int64
                 # (int64 -> `str()` on the pointer -> garbage
                 # `_slit_N` names in the emitted string pool).
-                if ft == 'MojoDict *' and getattr(node, 'type_ann', None):
+                if gimple_ctypes.TypeLattice.is_dict(ft) and getattr(node, 'type_ann', None):
                     _dv_sa = self._annotation_dict_val_type(node.type_ann)
                     if _dv_sa is not None:
                         _dv_hits.append((fn, _dv_sa))

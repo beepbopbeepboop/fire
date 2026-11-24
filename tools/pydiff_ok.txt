@@ -1,5 +1,6 @@
 # Programs in tools/pydiff_corpus that match CPython. May only grow.
 classes/01_basic_class.py
+classes/03_none_field_later_set.py
 classes/05_return_values.py
 classes/06_methods_calling_methods.py
 classes/07_default_arguments.py
@@ -12,6 +13,8 @@ classes/27_vector_add_new_object.py
 classes/29_no_shared_state.py
 classes/30_sum_field_over_list.py
 classes/31_setter_methods_validation.py
+classes/32_builder_chaining.py
+classes/41_none_field_reset.py
 containers/01_list_empty_fill.py
 containers/03_list_slices.py
 containers/08_list_insert_pop.py

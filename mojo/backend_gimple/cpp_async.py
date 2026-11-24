@@ -2419,7 +2419,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         # pointer-shaped (str/list/dict/struct pointers) in addition to int64.
         if len(params_C) > 4:
             return False
-        if any(ct == 'void' or ct is None for _, ct in params_C):
+        if any(gimple_ctypes.TypeLattice.is_void(ct) or ct is None for _, ct in params_C):
             return False
         # For now, allow int64_t and pointer types
         for _, ct in params_C:
@@ -2453,7 +2453,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
             return False
         c_ret_n = 'int64_t' if c_ret == 'int' else c_ret
         # Allow int64_t and pointer types as returns
-        if c_ret_n != 'void' and not gimple_ctypes.TypeLattice.is_word(c_ret_n) and not (isinstance(c_ret_n, str) and c_ret_n.endswith('*')):
+        if not gimple_ctypes.TypeLattice.is_void(c_ret_n) and not gimple_ctypes.TypeLattice.is_word(c_ret_n) and not (isinstance(c_ret_n, str) and c_ret_n.endswith('*')):
             return False
         c_kw = _helper_kw_renames(params_C)
         c_emit = _emit_helper_body(C.body, hC, c_kw)
@@ -2462,7 +2462,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         # Build typed callable
         try:
             c_param_list = [(ct if ct != 'int' else 'int64_t') for _, ct in params_C]
-            callable_ct = gimple_ctypes.callable_ctype(c_param_list, c_ret_n if c_ret_n != 'void' else 'int64_t')
+            callable_ct = gimple_ctypes.callable_ctype(c_param_list, c_ret_n if not gimple_ctypes.TypeLattice.is_void(c_ret_n) else 'int64_t')
         except Exception:
             callable_ct = (gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG if params_C
                            else gimple_ctypes._CPP_CALLABLE_CTYPE)
@@ -2485,10 +2485,10 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
                    f"return (*({callable_ct} *)env)({call_args}); }}")
         block = [f"static int64_t {csym} ({sig_F}) {{"]
         block += [f"    {x}" for x in f_emit[0] + f_emit[1]]
-        cpp_ret_c = gimple_exprtypes._c_to_cpp_scalar_type(c_ret_n) if c_ret_n != 'void' else 'int64_t'
+        cpp_ret_c = gimple_exprtypes._c_to_cpp_scalar_type(c_ret_n) if not gimple_ctypes.TypeLattice.is_void(c_ret_n) else 'int64_t'
         block.append(f"    {callable_ct} *_clo = new {callable_ct}([=]({sig_C}) mutable -> {cpp_ret_c} {{")
         block += [f"        {x}" for x in c_emit[0] + c_emit[1]]
-        if cpp_ret_c != 'void':
+        if not gimple_ctypes.TypeLattice.is_void(cpp_ret_c):
             dflt = 'nullptr' if cpp_ret_c.endswith('*') else '0'
             block.append(f"        return ({cpp_ret_c}){dflt};  /* fallthrough guard */")
         else:
@@ -2552,7 +2552,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
             return False
         hoist, hbody = emitted
         csym = f"{base}_h_{gimple_ctypes._safe_name(d.name)}"
-        cpp_ret = ('void' if ret_ct == 'void'
+        cpp_ret = ('void' if gimple_ctypes.TypeLattice.is_void(ret_ct)
                    else gimple_exprtypes._c_to_cpp_scalar_type(ret_ct))
         sig = ', '.join(
             f"{gimple_exprtypes._c_to_cpp_scalar_type(ct)} {kw_renames.get(pn, pn)}"
@@ -2561,13 +2561,13 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         block = [f"static {cpp_ret} {csym} ({sig}) {{"]
         block += [f"    {x}" for x in hoist]
         block += hbody
-        if cpp_ret != 'void':
+        if not gimple_ctypes.TypeLattice.is_void(cpp_ret):
             _dflt = 'nullptr' if cpp_ret.endswith('*') else '0'
             block.append(f"    return ({cpp_ret}){_dflt};  /* fallthrough guard */")
         block.append("}")
         defs.extend(block)
         gen._cpp_nested_helper_syms[d.name] = csym
-        reg_rettypes[d.name] = ret_ct if ret_ct != 'void' else 'int64_t'
+        reg_rettypes[d.name] = ret_ct if not gimple_ctypes.TypeLattice.is_void(ret_ct) else 'int64_t'
         return True
 
     for d in targets:
@@ -3115,7 +3115,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
     # MojoList*/MojoDict*/MojoSet*/MojoBytes*, char *, struct pointers,
     # etc.) are stored in the coroutine promise's result slot and read back
     # unchanged by awaiters/consumers.
-    if (value_ctype != 'void' and gimple_ctypes.TypeLattice.ends_in_star(value_ctype)
+    if (not gimple_ctypes.TypeLattice.is_void(value_ctype) and gimple_ctypes.TypeLattice.ends_in_star(value_ctype)
             and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *',
                                     'MojoBytes *', 'char *', 'void *')
             and value_ctype[:-2] in gen.struct_field_types):
@@ -3197,7 +3197,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         f"    void await_resume() noexcept {{}}",
         f"}};",
         f"struct {promise} {{",
-        (f"    {cpp_value_ctype} result{{}};" if value_ctype != 'void'
+        (f"    {cpp_value_ctype} result{{}};" if not gimple_ctypes.TypeLattice.is_void(value_ctype)
          else "    /* void: no stored return value */"),
         # Step E (exceptions): an exception that escapes this
         # coroutine's own body uncaught is NOT translated straight into
@@ -3288,7 +3288,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         f"        }}",
         f"    }}",
         (f"    void return_value({cpp_value_ctype} v) {{ result = v; }}"
-         if value_ctype != 'void' else "    void return_void() noexcept {}"),
+         if not gimple_ctypes.TypeLattice.is_void(value_ctype) else "    void return_void() noexcept {}"),
         f"}};",
         f"inline std::coroutine_handle<> {final_awaiter}::await_suspend({handle_t} h) noexcept {{",
         f"    std::coroutine_handle<> cont = h.promise().continuation;",
@@ -3332,7 +3332,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         f"}}",
         f'extern "C" {cpp_value_ctype} {base}_value (MojoAsync *g) {{',
         f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
-        ("    (void)h;" if value_ctype == 'void' else "    return h.promise().result;"),
+        ("    (void)h;" if gimple_ctypes.TypeLattice.is_void(value_ctype) else "    return h.promise().result;"),
         f"}}",
         f'extern "C" void {base}_destroy (MojoAsync *g) {{',
         f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
@@ -3443,9 +3443,9 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         f"            throw __e;",
         f"        }}",
         (f"        {cpp_value_ctype} v = callee_h.promise().result;"
-         if value_ctype != 'void' else "        callee_h.destroy();"),
-        ("        callee_h.destroy();" if value_ctype != 'void' else ""),
-        ("        return v;" if value_ctype != 'void' else "        return;"),
+         if not gimple_ctypes.TypeLattice.is_void(value_ctype) else "        callee_h.destroy();"),
+        ("        callee_h.destroy();" if not gimple_ctypes.TypeLattice.is_void(value_ctype) else ""),
+        ("        return v;" if not gimple_ctypes.TypeLattice.is_void(value_ctype) else "        return;"),
         f"    }}",
         f"}};",
     ]

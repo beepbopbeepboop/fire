@@ -593,7 +593,7 @@ def _gen_stmt_VarDecl(gen, node):
             gen._elem_types[node.name] = gen._elem_types[v]
             if v in gen._nested_elem_types:
                 gen._nested_elem_types[node.name] = gen._nested_elem_types[v]
-        if ctype == 'MojoDict *':
+        if gimple_ctypes.TypeLattice.is_dict(ctype):
             if v in gen._elem_types:
                 gen._elem_types[node.name] = gen._elem_types[v]
                 if v in gen._nested_elem_types:
@@ -681,7 +681,7 @@ def _gen_stmt_VarDecl(gen, node):
         # seed the element type from the annotation here too — otherwise a
         # list filled via insert()/index-stores reads back as raw int64_t
         # handles (same gap as the no-initializer path's seeding below).
-        if gimple_ctypes.TypeLattice.is_list(actual_dst) or actual_dst == 'MojoSet *':
+        if gimple_ctypes.TypeLattice.is_list(actual_dst) or gimple_ctypes.TypeLattice.is_set(actual_dst):
             _et = _annotation_container_elem_type(gen, node.type_ann, actual_dst)
             if _et and node.name not in gen._elem_types:
                 gen._elem_types[node.name] = _et
@@ -863,7 +863,7 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str,
         # read `e[k]` through `mojo_dict_get_int` even with `d`'s value type
         # known (`f(d)` where every call site passes `{'x': '1'}` printed an
         # address, while the same call reading `d[k]` directly printed `1`).
-        if dst == 'MojoDict *' and v in gen._dict_val_types:
+        if gimple_ctypes.TypeLattice.is_dict(dst) and v in gen._dict_val_types:
             gen._dict_val_types[tname] = gen._dict_val_types[v]
             if v in gen._dict_nested_val_types:
                 gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
@@ -895,7 +895,7 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str,
             gen._dict_val_types[tname] = gen._dict_val_types[v]
             if v in gen._dict_nested_val_types:
                 gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
-    elif vtype == 'char':
+    elif gimple_ctypes.TypeLattice.is_char(vtype):
         gen._actual_types[tname] = 'char'
     # `e = d` where `d` is a BOXED dict parameter: `vtype` is `int64_t`
     # because the parameter is declared `int64_t`, so the
@@ -918,7 +918,7 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str,
                 gen._nested_elem_types[tname] = gen._nested_elem_types[v]
             if v in gen._nested_elem_types:
                 gen._nested_elem_types[tname] = gen._nested_elem_types[v]
-        elif actual_type == 'MojoDict *':
+        elif gimple_ctypes.TypeLattice.is_dict(actual_type):
             if v in gen._elem_types:
                 gen._elem_types[tname] = gen._elem_types[v]
                 if v in gen._nested_elem_types:
@@ -1032,7 +1032,7 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     `f = lambda: False` goes, so it is the one a real program hits. See
     `ginf.carry_callable_ret_types`.
     """
-    if vtype == 'MojoDict *':
+    if gimple_ctypes.TypeLattice.is_dict(vtype):
         if v in gen._dict_val_types:
             gen._dict_val_types[tname] = gen._dict_val_types[v]
             if v in gen._dict_nested_val_types:
@@ -2218,7 +2218,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             # COMPILE_FAIL_Tools_check-c-api-docs_main.
             if v in gen._tuple_slot_types:
                 gen._tuple_slot_types[tname] = gen._tuple_slot_types[v]
-        if dst == 'MojoDict *':
+        if gimple_ctypes.TypeLattice.is_dict(dst):
             if v in gen._elem_types:
                 gen._elem_types[tname] = gen._elem_types[v]
                 if v in gen._nested_elem_types:
@@ -2538,6 +2538,13 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 gen._emit_label(_bb_raise)
                 gen._rt_void('mojo_raise_attribute_error', [gen._intern_string(_msg)])
                 gen._emit_label(_bb_after)
+            # Stage 5c: a literal `None` stored into a MIXED field (a scalar
+            # beside `None`) is the shared None box, so a later read tells it
+            # from the integer 0. Every other store is the bare word.
+            if (ginf.is_none_literal_node(node.value)
+                    and gimple_ctypes.TypeLattice.is_word(field_type)
+                    and ginf.mixed_field_read(gen, struct_name, node.target.member)):
+                v, vtype = ginf.box_word_value(gen, node.value, vtype, v)
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
             gimple_ctypes.presence_set_emit(gen, gen._struct_name_owner.get(struct_name), node.target.member, ov, op)
             # PART 6 (2026-10-22, family C): the tagged-Optional side-band
@@ -2576,7 +2583,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 # Also store the dict value type for list-of-dicts fields
                 # so f.scopes[0]["key"] dispatches to mojo_dict_get_str
                 # instead of mojo_dict_get_int.
-                if gen._elem_types[v] == 'MojoDict *' and v in gen._dict_val_types:
+                if gimple_ctypes.TypeLattice.is_dict(gen._elem_types[v]) and v in gen._dict_val_types:
                     gen._field_dict_val_types.setdefault(struct_name, {})[node.target.member] = gen._dict_val_types[v]
     elif isinstance(node.target, gimple_ctypes.SubscriptExpr):
         # Fixed-size-array struct field write: `obj.field[idx] = ...` /
@@ -2645,14 +2652,14 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
             ev_cast = gen._cast_for_list(vtype, v, suf)
             gen._rt_void(f"mojo_list_set_{suf}", [f"{obj_v}", f"{idx64}", ev_cast])
-        elif ot == 'MojoBytes *':
+        elif gimple_ctypes.TypeLattice.is_bytes(ot):
             # `ba[i] = v` — bytearray element store (bytes is immutable in
             # Python, but the C type is shared; a store to a genuine
             # `bytes` value is a TypeError real code never reaches).
             idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
             v64 = gen._to_int64(vtype, v)
             gen._rt_void('mojo_bytearray_setitem', [f"{obj_v}", idx64, v64])
-        elif ot == 'MojoDict *':
+        elif gimple_ctypes.TypeLattice.is_dict(ot):
             # Record the dict's value type so later reads recover it (esp.
             # pointer values: dict-of-dicts/lists/sets, or a plain struct
             # instance). Homogeneous assumption, matching list element-type
@@ -2682,7 +2689,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 # `None` lowers to (see `emit_dict_none_key_store`).
                 ginf.emit_dict_none_key_store(gen, obj_v, vtype, v, node.value)
                 key_tmp = None
-            elif it == 'MojoBytes *':
+            elif gimple_ctypes.TypeLattice.is_bytes(it):
                 # A bytes KEY is its own key domain in the runtime (see
                 # _DictSlot.keykind), not a char* one: routing it through
                 # _char_to_cstr cast the MojoBytes POINTER to char*, so the
@@ -2740,7 +2747,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 # pointers (see mojo_isinstance).
                 _idx_is_str = (it in ('char *', 'MojoStr *')
                                or gimple_ctypes.TypeLattice.is_cstr(gen._get_actual_type(it, idx_v)))
-                _is_dict = (actual_type == 'MojoDict *'
+                _is_dict = (gimple_ctypes.TypeLattice.is_dict(actual_type)
                             or (_idx_is_str and actual_type not in ('MojoList *', 'MojoSet *')))
                 if not _is_dict:
                     # It's a list - cast to MojoList* and set element
@@ -2799,7 +2806,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                     for _bf in ('_data', 'data', '_array', 'array', 'buffer', 'storage', 'values', '_values', 'items', '_items', 'container', 'inner', '_inner'):
                         if _bf in sft_c:
                             _bft = sft_c[_bf]
-                            if isinstance(_bft, str) and _bft == 'MojoDict *':
+                            if isinstance(_bft, str) and gimple_ctypes.TypeLattice.is_dict(_bft):
                                 _bdp = gen._new_val('MojoDict *', f"{obj_v}->{gimple_ctypes._safe_field(_bf)}")
                                 _, _bkv = gen._char_to_cstr(it, idx_v, True, True)
                                 gen._emit_dict_int_value_store(_bdp, 'char *', _bkv, vtype, v, node.value)
@@ -2818,7 +2825,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                     if not _backed:
                         for _bf, _bft in sft_c.items():
                             if isinstance(_bft, str):
-                                if _bft == 'MojoDict *':
+                                if gimple_ctypes.TypeLattice.is_dict(_bft):
                                     _bdp = gen._new_val('MojoDict *', f"{obj_v}->{gimple_ctypes._safe_field(_bf)}")
                                     _, _bkv = gen._char_to_cstr(it, idx_v, True, True)
                                     gen._emit_dict_int_value_store(_bdp, 'char *', _bkv, vtype, v, node.value)
@@ -2987,18 +2994,18 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # ambiguity handling as `del x[a:b]`.
         stgt = node.target
         ot, obj_v = gen.lower_expr(stgt.obj)
-        if ot == 'MojoStr *' or gimple_ctypes.TypeLattice.is_cstr(ot):
+        if gimple_ctypes.TypeLattice.is_str(ot) or gimple_ctypes.TypeLattice.is_cstr(ot):
             # `s[a:b] = ...` is not valid Python (str is immutable).
             raise RuntimeError(
                 "cannot compile module: slice-assignment to a string "
                 "target is not valid (strings are immutable) — falling "
                 "back to interpreting this module from source instead")
-        if ot == 'MojoBytes *':
+        if gimple_ctypes.TypeLattice.is_bytes(ot):
             # `ba[a:b] = <bytes>` — bytearray slice-assign (splice). Only
             # the unstepped form is valid Python for a size-changing RHS;
             # a stepped bytearray slice-assign requires matching lengths
             # and is rare — handle the common case, fall through otherwise.
-            if vtype == 'MojoBytes *':
+            if gimple_ctypes.TypeLattice.is_bytes(vtype):
                 _rhs_b = v
             elif gimple_ctypes.TypeLattice.is_list(vtype):
                 _rhs_b = gen._rt_call('MojoBytes *', 'mojo_bytes_from_list', [f"{v}"])
@@ -3339,7 +3346,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
             suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
             idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
             gen._rt_void(f"mojo_list_set_{suf}", [f"{obj_v}", idx64, f"{v}"])
-        elif ot == 'MojoDict *':
+        elif gimple_ctypes.TypeLattice.is_dict(ot):
             # `d[k] += val` etc. — mirrors _gen_stmt_AssignStmt's MojoDict*
             # branch (this one had no dict case at all: any dict-subscript
             # augmented assignment fell through to the raw-pointer/MojoList
@@ -3377,7 +3384,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
             actual_type = gen._get_actual_type(ot, obj_v)
             idx_is_str = (it in ('char *', 'MojoStr *')
                           or gimple_ctypes.TypeLattice.is_cstr(gen._get_actual_type(it, idx_v)))
-            if actual_type == 'MojoDict *' or (idx_is_str and actual_type not in ('MojoList *', 'MojoSet *')):
+            if gimple_ctypes.TypeLattice.is_dict(actual_type) or (idx_is_str and actual_type not in ('MojoList *', 'MojoSet *')):
                 ip = gen._new_temp('int64_t')
                 gen._cast_into(ip, 'int64_t', f"{obj_v}")
                 dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
@@ -3629,7 +3636,7 @@ def _box_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
     if gimple_ctypes.TypeLattice.is_list(vt):
         return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_list',
                                          [('MojoList *', v)])
-    if vt == 'MojoBytes *':
+    if gimple_ctypes.TypeLattice.is_bytes(vt):
         return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_bytes',
                                          [('void *', v)])
     return 'int64_t', gen._coerce_to_type(vt, 'int64_t', v)
@@ -3763,7 +3770,7 @@ def _gen_stmt_ReturnStmt(gen, node):
             gen._ret(_nv)
             return
         # If function returns non-void, return default value
-        if gen.func_ret_type and gen.func_ret_type != 'void':
+        if gen.func_ret_type and not gimple_ctypes.TypeLattice.is_void(gen.func_ret_type):
             ret = gen.func_ret_type
             # A bare `return` (Python's implicit `return None`) inside a
             # function whose OTHER paths return a real value must still
@@ -4028,9 +4035,9 @@ def _gen_stmt_ReturnStmt(gen, node):
             else:
                 vtype, v = _box_mixed_return_arm(gen, vtype, v)
         ret = gen.func_ret_type
-        if ret == 'void':
+        if gimple_ctypes.TypeLattice.is_void(ret):
             gen._ret_void()
-        elif ret and ret != 'void' and vtype != ret:
+        elif ret and not gimple_ctypes.TypeLattice.is_void(ret) and vtype != ret:
             tmp = gen._new_temp(ret)
             gen._safe_coerce_emit(vtype, ret, v, tmp)
             gen._ret(tmp)
@@ -4812,13 +4819,13 @@ def _gen_stmt_DelStmt(gen, node):
                 'int64_t', 'MojoList *', gen._to_int64(ot, ov))
             gen._rt_void('mojo_list_del_slice', [f"{lp}", f"{start_v}", f"{stop_v}"])
             continue
-        if ot == 'MojoBytes *':
+        if gimple_ctypes.TypeLattice.is_bytes(ot):
             # `del ba[i]` — bytearray element removal.
             idx_type, idx_val = gen.lower_expr(target.index)
             idx64 = gen._to_int64(idx_type, idx_val)
             gen._rt_void('mojo_bytearray_delitem', [ov, idx64])
             continue
-        if ot == 'MojoDict *':
+        if gimple_ctypes.TypeLattice.is_dict(ot):
             key_type, key_val = gen.lower_expr(target.index)
             key_type, key_val = gen._char_to_cstr(key_type, key_val, True, True)
             # `del d[k]` is CPython's item deletion, whose miss RAISES — not
@@ -5435,7 +5442,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(tname)}"
                 gtype = gen._global_dst_ctype(tname)
                 gen._safe_coerce_emit(vtype, gtype, v, field_ref)
-                if vtype == 'MojoDict *':
+                if gimple_ctypes.TypeLattice.is_dict(vtype):
                     if v in gen._dict_val_types:
                         gen._dict_val_types[tname] = gen._dict_val_types[v]
                         if v in gen._dict_nested_val_types:
@@ -5451,7 +5458,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(tname)}"
                 gtype = gen._global_dst_ctype(tname)
                 gen._safe_coerce_emit(vtype, gtype, v, field_ref)
-                if vtype == 'MojoDict *':
+                if gimple_ctypes.TypeLattice.is_dict(vtype):
                     if v in gen._dict_val_types:
                         gen._dict_val_types[tname] = gen._dict_val_types[v]
                         if v in gen._dict_nested_val_types:
@@ -5575,7 +5582,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
                 ev_cast = gen._cast_for_list(vtype, v, suf)
                 gen._rt_void(f"mojo_list_set_{suf}", [obj_v, f"{idx64}", ev_cast])
-            elif ot == 'MojoDict *':
+            elif gimple_ctypes.TypeLattice.is_dict(ot):
                 _, key_tmp = gen._char_to_cstr(it2, idx_v, True, True)
                 gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
                                               vtype, v, node.value)
@@ -5588,7 +5595,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 # the container's type is unknown.
                 _idx_is_str2 = (it2 in ('char *', 'MojoStr *')
                                 or gimple_ctypes.TypeLattice.is_cstr(gen._get_actual_type(it2, idx_v)))
-                if not (actual_type == 'MojoDict *'
+                if not (gimple_ctypes.TypeLattice.is_dict(actual_type)
                         or (_idx_is_str2 and actual_type not in ('MojoList *', 'MojoSet *'))):
                     ip = gen._new_temp('int64_t')
                     gen._cast_into(ip, 'int64_t', obj_v)
@@ -7454,7 +7461,7 @@ def _gen_stmt_WithStmt(gen, node):
         # INTERP_with_as_binding_for_loop_keyerror.md). Found via
         # Tools/ftscalingbench/ftscalingbench.py's MyContextManager.
         enter_ret_t = gen.func_return_types.get(enter_fn, et) if has_enter else et
-        if has_enter and enter_ret_t == 'void':
+        if has_enter and gimple_ctypes.TypeLattice.is_void(enter_ret_t):
             # A void-returning __enter__ (a legitimate, common Mojo
             # shape — no explicit return, side-effects only, e.g.
             # test/tempfile/test_tempfile.mojo's TempEnvWithCleanup)
