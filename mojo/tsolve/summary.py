@@ -73,6 +73,7 @@ class FnSummary:
         self.annotated_ret: bool = False  # the return is pinned to its annotation
         self.decidable: bool = True       # False: no answer is claimed for it
         self.ret_terms: list = []         # every term that flows into `ret` (returns and fall-off)
+        self.deco: str = ''               # '' | 'staticmethod' | 'classmethod' (4.2e)
 
 
 class ClassSummary:
@@ -107,6 +108,7 @@ class Program:
         self.fns: dict = {}            # FuncKey -> FnSummary
         self.classes: dict = {}        # class name -> ClassSummary (first definition)
         self.field_index: dict = {}    # field name -> [TVar] over every class
+        self.loose: dict = {}          # field name -> TVar, for a field no class declares (4.2f)
 
     def new_var(self, name: str) -> int:
         self.vars.append(sty.BOT)
@@ -117,6 +119,16 @@ class Program:
     def pin(self, var: int, ty) -> None:
         self.vars[var] = ty
         self.pinned[var] = True
+
+    def loose_var(self, name: str) -> int:
+        """The one variable a store to a field NO class declares writes, and a read through a
+        class that lacks the field reads (`gen.cache = c` in a helper, `gen.cache` elsewhere).
+        Registered in field_index, so a read on an unknown receiver sees it too (4.2f)."""
+        if name not in self.loose:
+            var = self.new_var(name)
+            self.loose[name] = var
+            self.field_index.setdefault(name, []).append(var)
+        return self.loose[name]
 
     def add_flow(self, src: Term, dst: int, origin: str = '') -> None:
         self.flows.append(Flow(src, dst, origin))
@@ -152,6 +164,11 @@ class Program:
                 if m is not None:
                     return m
         return None
+
+    def receiver_offset(self, fs: FnSummary) -> int:
+        """Where a method's first ARGUMENT lands: after `self` or `cls` (1), or at parameter 0
+        for a staticmethod, which has no receiver parameter (4.2e)."""
+        return 0 if fs.deco == 'staticmethod' else 1
 
     def param_targets(self, fs: FnSummary, offset: int, names: list) -> list:
         """Where each argument of a call flows: one entry per argument term.

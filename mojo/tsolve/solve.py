@@ -167,6 +167,9 @@ class _Solver:
                 return sty.DYN
             v = self.prog.find_field_var_in(cs, t.name)
             if v is None:
+                # No class declares it, but a store to it may exist (4.2f).
+                if t.name in self.prog.loose:
+                    return self.read(self.prog.loose[t.name])
                 return sty.DYN
             return self.read(v)
         if recv.kind == 'dyn':
@@ -203,9 +206,10 @@ class _Solver:
 
     def flow_arguments(self, fs, t: Term) -> None:
         # The receiver is `args[0]` and `self` is `params[0]`, so the arguments
-        # after it start at parameter 1. The names are for `kwnames`.
+        # after it start at parameter 1; a staticmethod has no receiver parameter
+        # (4.2e). The names are for `kwnames`.
         terms = t.args[1:]
-        targets = self.prog.param_targets(fs, 1, t.kwnames)
+        targets = self.prog.param_targets(fs, self.prog.receiver_offset(fs), t.kwnames)
         for i in range(len(terms)):
             if targets[i] >= 0:
                 self.add_flow(terms[i], targets[i])

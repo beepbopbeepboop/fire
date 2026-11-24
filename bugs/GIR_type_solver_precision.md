@@ -693,6 +693,31 @@ Closure acceptance: section 8.
 
 ## Status
 
+### HANDOFF (read first; kept current by whoever works on this)
+
+- Branch: master. Commits so far (newest last): c7878b789 (step 1 instruments), db2a1cdba
+  (2a None receivers, bot-return), 8bc44e1ed (2b externs), b5a1cccdf (2c narrowing),
+  336eff194 (2d dotted annotations).
+- 4.2e (static/class methods) and 4.2f (loose fields) LANDED and verified: test_tsolve 64/0,
+  c_oracle identical vs 336eff194 (286 + 35), compile_stdlib 610/0, cycle test PASS.
+- Still open, in order: 4.2g kind pins (`sty.is_bare_container`, `Program.kind_pinned`,
+  `sty.kind_join`, `Program.pin_ann` used by every annotation pin site), 4.2h cast helpers
+  (`FnSummary.cast_ty`, a `cast` term), 4.2i summarizer coverage (nested tuple targets, slice
+  stores, subscript stores into non-name containers, dict splat, class in a function, starred
+  target). Then step 3 (annotated early decisions, ledger classes), step 4 (ClosureBuilder
+  protocol; owner-first global C types), step 5 (acceptance, section 8).
+- Tools: `tools/tsolve_why.py --classify|--shadow|--undecided LEDGER`. `--fn` and `--undecidable`
+  (section 2.6, need the solved program) are not written yet.
+- How to verify each step: `python3 test_tsolve.py`; `python3 tools/c_oracle.py check --base <last
+  commit>` (identical unless a program has an import cycle); `python3 compile_stdlib.py` (PASSED 610,
+  FAILED 0); `python3 test_import_cycle_sigs.py`. Acceptance (section 8) is the closure run (2.1),
+  about 5 minutes, ~11 GB under memcap.
+- Known pitfalls found this session: an analysis that does not call `solve()` sees every variable
+  as `bot`; the AST rewriter lowers `os.environ.get` to `mojo_c_getenv` (externs.INTERNAL); the
+  stub emitter's keys are mangled symbols (`_definer_name`); the store is keyed by the SANITIZED
+  qualifier (`module_qualifier`).
+
+
 - 2026-11-24 (session 3): designed. Measured as in sections 2 and 4.7 (the HEAD numbers from
   the previous session's acceptance run, re-read; the prototype numbers from a scratch copy of
   `mojo/tsolve`, no compile). Nothing in the tree changed. Next: step 1.

@@ -540,14 +540,22 @@ class _Summarizer:
 
     def _new_fn(self, path: str, name: str, cls: str, node, key: str, names: dict) -> FnSummary:
         fs = FnSummary(key, path, name, cls)
-        fs.decidable = not (node.decorators or node.is_generator or node.is_async)
-        for pair in node.params:
-            pname = pair[0]
-            ptype = pair[1]
+        # A staticmethod or classmethod is an ordinary function with no receiver, or with
+        # `cls` pinned to the class; any other decorator is not modelled (4.2e).
+        if cls and len(node.decorators) == 1 and node.decorators[0] in ('staticmethod', 'classmethod'):
+            fs.deco = node.decorators[0]
+            fs.decidable = not (node.is_generator or node.is_async)
+        else:
+            fs.decidable = not (node.decorators or node.is_generator or node.is_async)
+        for i in range(len(node.params)):
+            pname = node.params[i][0]
+            ptype = node.params[i][1]
             var = self.prog.new_var(pname)
             fs.params.append(var)
             fs.param_names.append(pname)
             if pname.startswith('*'):
+                self.prog.pin(var, sty.DYN)
+            elif i == 0 and fs.deco == 'classmethod':
                 self.prog.pin(var, sty.DYN)
             elif pname == 'self' and cls and cls in names:
                 self.prog.pin(var, sty.struct_of(names[cls]))
@@ -755,6 +763,22 @@ class _Summarizer:
         if ty is None:
             return []
         return [[cond.args[0].name, ty]]
+
+    def _class_name(self, scope: _Scope, node) -> str:
+        """The class name `node` names (`C`, or `m.C` through a module binding), or ''."""
+        if isinstance(node, N.IdentExpr):
+            b = self._lookup(scope, node.name)
+            if b is not None and b.kind == 'class':
+                return b.key
+            return ''
+        if isinstance(node, N.MemberExpr) and isinstance(node.obj, N.IdentExpr):
+            b = self._lookup(scope, node.obj.name)
+            if b is None or b.kind != 'module':
+                return ''
+            mb = self.resolve_name(b.key, node.member)
+            if mb is not None and mb.kind == 'class':
+                return mb.key
+        return ''
 
     def _class_sty(self, scope: _Scope, node):
         """The STy an `isinstance` second argument names, or None when it names nothing known."""
@@ -1041,7 +1065,8 @@ class _Summarizer:
             return [v]
         found = self.prog.field_index.get(node.member)
         if not found:
-            return None
+            # No class declares this field: the store goes to the loose variable of its name.
+            return [self.prog.loose_var(node.member)]
         return list(found)
 
     # ── expressions ─────────────────────────────────────────────────────
@@ -1316,6 +1341,14 @@ class _Summarizer:
                     if mb is not None and mb.kind == 'class':
                         return self._construct(mb.key, args, names, kwvals)
                     return const_term(sty.DYN)
+            cname = self._class_name(scope, func.obj)
+            if cname != '' and self.prog.class_is_unique(cname):
+                fs = self.prog.find_method_in(self.prog.classes[cname], func.member)
+                if fs is not None and fs.deco != '':
+                    # `C.m(...)`: a static or class method, called without an instance.
+                    self._feed(fs, self.prog.receiver_offset(fs), args + kwvals,
+                               [''] * len(args) + names)
+                    return Term('call', None, fs.ret, fs.key, [], [])
             recv = self._term(scope, func.obj)
             if func.member in _GROW_METHODS:
                 for v in self._lvalue_vars(scope, func.obj):

@@ -257,6 +257,31 @@ class Origins(unittest.TestCase):
         }
         self.assertEqual(_ret(files, 'f'), 'str')
 
+    def test_a_staticmethod_called_through_its_class(self):
+        src = ('class K:\n    @staticmethod\n    def m(a):\n        return a + "!"\n'
+               'def f():\n    return K.m("x")\n')
+        self.assertEqual(_ret({'main': src}, 'f'), 'str')
+
+    def test_a_classmethod_through_a_module_class(self):
+        files = {
+            'main': 'import m\ndef f():\n    return m.K.make(1)\n',
+            'm': 'class K:\n    @classmethod\n    def make(cls, n):\n        return [n, n]\n',
+        }
+        self.assertEqual(_ret(files, 'f'), 'list[int]')
+
+    def test_an_other_decorator_stays_undecidable(self):
+        src = 'class K:\n    @property\n    def m(self):\n        return 1\n'
+        self.assertIsNone(_solve({'main': src}).ret_sty('/t/main.py', 'K.m'))
+
+    def test_a_loose_field_is_shared_by_its_writes_and_reads(self):
+        # `cache` is declared by no class: the store in `put` and the read in `get` meet in
+        # one loose variable (bugs/GIR_type_solver_precision.md, 4.2f).
+        src = ('struct G:\n    var n: Int\n'
+               'def put(g):\n    g.cache = {"a": 1}\n'
+               'def get(g):\n    return g.cache\n'
+               'def main():\n    g = G(1)\n    put(g)\n    return get(g)\n')
+        self.assertEqual(_ret({'main': src}, 'main'), 'dict[str, int]')
+
     def test_why_none_names_the_reason(self):
         self.assertEqual(_solve({'main': 'def f():\n    return 1\n'}).why_none('/t/main.py', 'f'), '')
         self.assertEqual(_solve({'main': 'def f() -> Int:\n    return 1\n'}).why_none('/t/main.py', 'f'),
