@@ -2638,7 +2638,7 @@ def _cpp_word_of_kind(ctype: str, expr: str) -> str:
         # boxed by kind like the others: a raw pointer is only read as a
         # string when the runtime registered it (a C++ literal is not)
         return f"mojo_box_from_str((char *)({expr}))"
-    if ctype == 'MojoBytes *':
+    if TypeLattice.is_bytes(ctype):
         return f"(int64_t)(intptr_t)({expr})"
     return f"(int64_t)({expr})"
 

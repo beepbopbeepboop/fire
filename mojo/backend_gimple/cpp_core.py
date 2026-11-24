@@ -70,7 +70,7 @@ def _cpp_parse_std_function(ctype: str):
         return None, None
     ret = m.group(1).strip()
     params_str = m.group(2).strip()
-    if not params_str or params_str == 'void':
+    if not params_str or gimple_ctypes.TypeLattice.is_void(params_str):
         params = []
     else:
         # Simple split by commas at top level (not perfect but fine for our types)
@@ -245,12 +245,12 @@ def _cpp_in_link(gen, a: Ex, a_node, b: Ex, b_node, negate: bool) -> Ex:
         # The needle must be a char * — a bare indexed char (mojo_str_char_at
         # result, typed 'char') is widened to a 1-char string first, the
         # same coercion the GIMPLE path applies (mojo_char_to_str).
-        if at == 'char':
+        if gimple_ctypes.TypeLattice.is_char(at):
             needle = _cpp_call_ex('mojo_char_to_str', [_cpp_cast_ex('char', _paren_ex(a))])
         else:
             needle = _cpp_cast_ex('char *', _paren_ex(a))
         res = _cpp_call_ex('mojo_str_contains', [_cpp_cast_ex('char *', _paren_ex(b)), needle])
-    elif bt == 'MojoStr *':
+    elif gimple_ctypes.TypeLattice.is_str(bt):
         res = _cpp_call_ex('mojo_str_contains', [_cpp_cast_ex('char *', _paren_ex(b)), _cpp_cast_ex('char *', _paren_ex(a))])
     elif gimple_ctypes.TypeLattice.is_list(bt):
         # mojo_list_contains_{int,double,str}; pick the suffix from the
@@ -267,12 +267,12 @@ def _cpp_in_link(gen, a: Ex, a_node, b: Ex, b_node, negate: bool) -> Ex:
             res = _cpp_call_ex('mojo_list_contains_str', [_cpp_as('MojoList *', b), _cpp_cast_ex('char *', _paren_ex(a))])
         else:
             res = _cpp_call_ex('mojo_list_contains_int', [_cpp_as('MojoList *', b), _cpp_cast_ex('int64_t', _paren_ex(a))])
-    elif bt == 'MojoSet *':
+    elif gimple_ctypes.TypeLattice.is_set(bt):
         if gimple_ctypes.TypeLattice.is_cstr(at) or (at and at.endswith('char')):
             res = _cpp_call_ex('mojo_set_contains_str', [_cpp_as('MojoSet *', b), _cpp_cast_ex('char *', _paren_ex(a))])
         else:
             res = _cpp_call_ex('mojo_set_contains_int', [_cpp_as('MojoSet *', b), _cpp_cast_ex('int64_t', _paren_ex(a))])
-    elif bt == 'MojoDict *':
+    elif gimple_ctypes.TypeLattice.is_dict(bt):
         # dict membership is keyed by string (all dict keys are char * in
         # the runtime) — `a in d` tests key presence.
         res = _cpp_call_ex('mojo_dict_contains', [_cpp_as('MojoDict *', b), _cpp_cast_ex('char *', _paren_ex(a))])
@@ -970,7 +970,7 @@ def _cpp_fstring_list_piece(gen, expr_node, v) -> Ex:
         return _cpp_call_ex('mojo_repr_list_ints', [_cpp_as('MojoList *', v)])
     if gimple_ctypes.TypeLattice.is_bool(elem_cty):
         return _cpp_call_ex('mojo_repr_list_bools', [_cpp_as('MojoList *', v)])
-    if elem_cty == 'MojoBytes *':
+    if gimple_ctypes.TypeLattice.is_bytes(elem_cty):
         return _cpp_call_ex('mojo_repr_list_bytes', [_cpp_as('MojoList *', v)])
     if gimple_ctypes.TypeLattice.is_cstr(elem_cty):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
@@ -1099,14 +1099,14 @@ def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> Ex:
                     piece = _paren_ex(_cpp_cond_ex(_paren_ex(v), ex_text('"True"'), ex_text('"False"')))
                 elif gimple_ctypes.TypeLattice.is_list(ectype):
                     piece = _cpp_fstring_list_piece(gen, expr_node, v)
-                elif ectype == 'MojoDict *':
+                elif gimple_ctypes.TypeLattice.is_dict(ectype):
                     raise gimple_exprtypes._UnsupportedGeneratorShape(
                         f"f-string interpolation '{{{part_text}}}' of a "
                         "container-typed dict has no scalar C++ string form in "
                         "this compiled generator/coroutine body "
                         "(this emitter has no container-repr walker; refuse "
                         "rather than print the dict's raw header bytes)")
-                elif ectype == 'MojoSet *':
+                elif gimple_ctypes.TypeLattice.is_set(ectype):
                     raise gimple_exprtypes._UnsupportedGeneratorShape(
                         f"f-string interpolation '{{{part_text}}}' of a "
                         "container-typed set has no scalar C++ string form in "
@@ -1130,14 +1130,14 @@ def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> Ex:
                 piece = _paren_ex(_cpp_cond_ex(_paren_ex(v), ex_text('"True"'), ex_text('"False"')))
             elif gimple_ctypes.TypeLattice.is_list(ectype):
                 piece = _cpp_fstring_list_piece(gen, expr_node, v)
-            elif ectype == 'MojoDict *':
+            elif gimple_ctypes.TypeLattice.is_dict(ectype):
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     f"f-string interpolation '{{{part_text}}}' of a "
                     "container-typed dict has no scalar C++ string form in "
                     "this compiled generator/coroutine body "
                     "(this emitter has no container-repr walker; refuse "
                     "rather than print the dict's raw header bytes)")
-            elif ectype == 'MojoSet *':
+            elif gimple_ctypes.TypeLattice.is_set(ectype):
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     f"f-string interpolation '{{{part_text}}}' of a "
                     "container-typed set has no scalar C++ string form in "
@@ -1607,7 +1607,7 @@ def _cpp_expr_static_ctype(gen, e):
                 and isinstance(e.obj, gimple_ctypes.IdentExpr)
                 and gen._cpp_declared is not None):
             _dct = gen._cpp_declared.get(e.obj.name)
-            if _dct == 'MojoDict *':
+            if gimple_ctypes.TypeLattice.is_dict(_dct):
                 return 'int64_t'
             if gimple_ctypes.TypeLattice.is_list(_dct):
                 _leet = getattr(gen, '_cpp_list_local_elem_types', {}).get(e.obj.name)
@@ -4117,7 +4117,7 @@ def _cpx_walrus(gen, e) -> Ex:
                 return _paren_ex(_cpp_call_ex('mojo_list_set_double', [obj, idx64, f"(double)({val})"]))
             else:
                 return _paren_ex(_cpp_call_ex('mojo_list_set_int', [obj, idx64, f"(int64_t)({val})"]))
-        elif obj_ct == 'MojoDict *':
+        elif gimple_ctypes.TypeLattice.is_dict(obj_ct):
             return _paren_ex(_cpp_call_ex('mojo_dict_set_int_kw', [obj, f"(int64_t)({idx})", f"(int64_t)({val})"]))
         return _assign_ex(f"*(&({obj}[{idx}]))", val)
     return _assign_ex(gen._cpp_expr(e.left), val)
@@ -4363,7 +4363,7 @@ def _cpx_call_member(gen, e) -> Ex:
             if gimple_ctypes.TypeLattice.is_double(_eff):
                 return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_list_append_double', [_cont_ref, f"(double)({_a})"]), ex_text('0')))
             return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_list_append_int', [_cont_ref, f"(int64_t)({_a})"]), ex_text('0')))
-        if (_cont_ct == 'MojoSet *' and e.func.member == 'add'
+        if (gimple_ctypes.TypeLattice.is_set(_cont_ct) and e.func.member == 'add'
                 and len(e.args) == 1):
             _avct = gimple_exprtypes._infer_simple_expr_ctype(
                 e.args[0], gen._cpp_declared,
@@ -4409,7 +4409,7 @@ def _cpx_call_member(gen, e) -> Ex:
                 if gimple_ctypes.TypeLattice.is_double(_avct):
                     return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_list_append_double', [_cpp_as('MojoList *', _mobj), f"(double)({_a})"]), ex_text('0')))
                 return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_list_append_int', [_cpp_as('MojoList *', _mobj), f"(int64_t)({_a})"]), ex_text('0')))
-            if _mcont_ct == 'MojoSet *' and e.func.member == 'add' and len(e.args) == 1:
+            if gimple_ctypes.TypeLattice.is_set(_mcont_ct) and e.func.member == 'add' and len(e.args) == 1:
                 _avct = gimple_exprtypes._infer_simple_expr_ctype(
                     e.args[0], gen._cpp_declared,
                     getattr(gen, '_cpp_gen_self_fields', None),
@@ -4421,9 +4421,9 @@ def _cpx_call_member(gen, e) -> Ex:
             if e.func.member == 'clear' and not e.args:
                 if gimple_ctypes.TypeLattice.is_list(_mcont_ct):
                     return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_list_clear', [_cpp_as('MojoList *', _mobj)]), ex_text('0')))
-                if _mcont_ct == 'MojoSet *':
+                if gimple_ctypes.TypeLattice.is_set(_mcont_ct):
                     return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_set_clear', [_cpp_as('MojoSet *', _mobj)]), ex_text('0')))
-                if _mcont_ct == 'MojoDict *':
+                if gimple_ctypes.TypeLattice.is_dict(_mcont_ct):
                     return _paren_ex(_cpp_comma_ex(_cpp_call_ex('mojo_dict_clear', [_cpp_as('MojoDict *', _mobj)]), ex_text('0')))
     if isinstance(e.func.obj, gimple_ctypes.IdentExpr) and e.func.obj.name == 'self' \
             and _cpp_self_struct:
@@ -4793,7 +4793,7 @@ def _cpx_call_member(gen, e) -> Ex:
     # get(val)` returns a `Flag *`. See
     # CODEGEN_enum_runtime_class_creation's 2026-08-20
     # update.
-    if (_str_obj_ctype == 'MojoDict *' and e.func.member == 'get'
+    if (gimple_ctypes.TypeLattice.is_dict(_str_obj_ctype) and e.func.member == 'get'
             and len(e.args) in (1, 2)):
         _dict_val_ct = None
         if (isinstance(e.func.obj, gimple_ctypes.MemberExpr)
@@ -4835,7 +4835,7 @@ def _cpx_call_member(gen, e) -> Ex:
     # invalid C++ member-call syntax on an opaque struct pointer.
     # Real: Lib/weakref.py's WeakValueDictionary.items/keys:
     # `for k, wr in self.data.copy().items():`.
-    if (_str_obj_ctype == 'MojoDict *' and not e.args
+    if (gimple_ctypes.TypeLattice.is_dict(_str_obj_ctype) and not e.args
             and e.func.member in ('copy', 'items', 'keys', 'values')):
         _dict_fn = {'copy': 'mojo_dict_copy', 'items': 'mojo_dict_items',
                     'keys': 'mojo_dict_keys',
@@ -4980,9 +4980,9 @@ def _cpx_call_ident(gen, e) -> Ex:
                 _lct = None
         if gimple_ctypes.TypeLattice.is_list(_lct):
             return _cpp_call_ex('mojo_list_len', [_cpp_as('MojoList *', args[0])])
-        if _lct == 'MojoDict *':
+        if gimple_ctypes.TypeLattice.is_dict(_lct):
             return _cpp_call_ex('mojo_dict_len', [_cpp_as('MojoDict *', args[0])])
-        if _lct == 'MojoSet *':
+        if gimple_ctypes.TypeLattice.is_set(_lct):
             return _cpp_call_ex('mojo_set_len', [_cpp_as('MojoSet *', args[0])])
         if gimple_ctypes.TypeLattice.is_cstr(_lct):
             return _cpp_call_ex('mojo_strlen', [_cpp_cast_ex('char *', _paren_ex(args[0]))])
@@ -5598,9 +5598,9 @@ def _cpx_call_ident(gen, e) -> Ex:
             # mojo_sorted) so a keyless `sorted(...)` in a
             # generator body works at all, not just the `key=`
             # shape this fix specifically targets.
-            if _iter_ctype == 'MojoSet *':
+            if gimple_ctypes.TypeLattice.is_set(_iter_ctype):
                 _fn = 'mojo_set_sorted'
-            elif _iter_ctype == 'MojoDict *':
+            elif gimple_ctypes.TypeLattice.is_dict(_iter_ctype):
                 _fn = 'mojo_dict_sorted_keys'
             elif gimple_ctypes.TypeLattice.is_cstr(_elem_ctype):
                 _fn = 'mojo_list_sorted_str'
@@ -8419,7 +8419,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[Instr]:
                 if gimple_ctypes.TypeLattice.is_double(vctype):
                     return [_cpp_call_line(indent, 'mojo_list_set_double', [f'({obj})', idx64, val])]
                 return [_cpp_call_line(indent, 'mojo_list_set_int', [f'({obj})', idx64, f'(int64_t)({val})'])]
-            if obj_ct == 'MojoDict *':
+            if gimple_ctypes.TypeLattice.is_dict(obj_ct):
                 key_expr = gen._cpp_dict_key_expr(s.target.index, idx)
                 vctype = gimple_exprtypes._infer_simple_expr_ctype(
                     s.value, gen._cpp_declared, self_fields, gen._async_api)
@@ -9062,9 +9062,9 @@ def _cps_while_stmt(gen, s, declared: dict, indent: str) -> list[Instr]:
         # (stack)` would spin forever once drained). Real: a
         # stack-driven generator's `while stack: top = stack.pop()`.
         cond = ex_cat('(mojo_list_len(', _cpp_as('MojoList *', cond), ') != 0)')
-    elif _cond_ct == 'MojoDict *':
+    elif gimple_ctypes.TypeLattice.is_dict(_cond_ct):
         cond = ex_cat('(mojo_dict_len(', _cpp_as('MojoDict *', cond), ') != 0)')
-    elif _cond_ct == 'MojoSet *':
+    elif gimple_ctypes.TypeLattice.is_set(_cond_ct):
         cond = ex_cat('(mojo_set_len(', _cpp_as('MojoSet *', cond), ') != 0)')
     # The loop's header, guard and closers are the stage-2b shapes
     # (mojo/ir/instr.py `while` / `if` / `break` / `end`); the body is printed

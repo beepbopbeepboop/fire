@@ -60,6 +60,7 @@ class Ex:
         self.suffix: str = ''
         self.arrow: bool = False
         self.tight: bool = False    # `f(...)` rather than `f (...)`
+        self.capture: str = '&'     # 'closure': the capture spec, `[&]` by default
         self.ty: Type = VOID
         self.a: Ex = self          # self = "absent"; keeps the field typed
         self.b: Ex = self
@@ -90,8 +91,11 @@ class Ex:
             return self.a.show() + ', ' + self.b.show()
         if k == 'brace':
             # `T{a, b}` (tight) or `T{ a, b }`: a C++ braced construction; `a` is the type/callee text.
-            inner = ', '.join(x.show() for x in self.args)
-            if getattr(self, 'tight', False):
+            brace_parts: list[str] = []
+            for x in self.args:
+                brace_parts.append(x.show())
+            inner = ', '.join(brace_parts)
+            if self.tight:
                 return self.a.show() + '{' + inner + '}'
             return self.a.show() + '{ ' + inner + ' }'
         if k == 'paren':
@@ -112,21 +116,33 @@ class Ex:
         if k == 'closure':
             # `[&](params) -> T { stmt }`: a lambda VALUE, passed on rather than called in place;
             # `name` is its parameter list text, `text` its return type ('' = none), `capture` its capture (default '&').
-            head = '[' + getattr(self, 'capture', '&') + '](' + self.name + ')' + (' -> ' + self.text if self.text else '')
-            parts = [st.show() for st in self.body]
-            return head + ' { ' + ' '.join(p for p in parts if p != '') + ' }'
+            head = '[' + self.capture + '](' + self.name + ')' + (' -> ' + self.text if self.text else '')
+            return head + ' { ' + _join_nonempty(self.body) + ' }'
         if k == 'lambda':
             # `[&]() -> T { stmt stmt }()`: a call-once lambda; `text` is T's C spelling,
             # or '' for a lambda with no return type (`[&]() { ... }()`). An empty
             # statement (an opaque block that came out empty) takes no separator.
             head = '[&]() -> ' + self.text if self.text else '[&]()'
-            parts = [st.show() for st in self.body]
-            return head + ' { ' + ' '.join(p for p in parts if p != '') + ' }()'
+            return head + ' { ' + _join_nonempty(self.body) + ' }()'
         if k == 'cat':
-            return ''.join(x.show() for x in self.args)
+            cat_parts: list[str] = []
+            for x in self.args:
+                cat_parts.append(x.show())
+            return ''.join(cat_parts)
         if k == 'none':
             return ''
         return '<opaque>'
+
+
+def _join_nonempty(stmts: list) -> str:
+    """The statements' text joined by one space, leaving out the empty ones (a lambda body
+    whose opaque block came out empty takes no separator)."""
+    kept: list[str] = []
+    for st in stmts:
+        text = st.show()
+        if text != '':
+            kept.append(text)
+    return ' '.join(kept)
 
 
 def ex_var(name: str) -> Ex:
@@ -166,7 +182,13 @@ def ex_cat(*parts) -> Ex:
     For a line that is partly text and partly an operand, so the operand stays an Ex until the
     statement helper renders it."""
     e = Ex('cat')
-    e.args = [p if isinstance(p, Ex) else ex_text(p) for p in parts]
+    args: list[Ex] = []
+    for p in parts:
+        if isinstance(p, Ex):
+            args.append(p)
+        else:
+            args.append(ex_text(p))
+    e.args = args
     return e
 
 
@@ -286,7 +308,13 @@ def render_lines(lines) -> list[str]:
     """The one rendering edge for a function body (doc/GIR.md, stage 7 T5): a mixed list of statement
     `Instr` and raw C text lines, as the text lines a function body prints. An `Instr` is rendered by
     `Instr.line()` (its own indent, a label at column 0); a `str` is already text and passes through."""
-    return [ln.line() if isinstance(ln, Instr) else ln for ln in lines]
+    out: list[str] = []
+    for ln in lines:
+        if isinstance(ln, Instr):
+            out.append(ln.line())
+        else:
+            out.append(ln)
+    return out
 
 
 class Sig:

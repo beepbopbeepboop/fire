@@ -53,7 +53,8 @@ C. **Union predicates.** Freeze them: add no new ones, and the codemod emits an 
 
 D. **Unsolved.** Pick `Optional[Type]` (None = unsolved) or an `UNSOLVED` sentinel `Type`, and
    decide whether `'unknown'` and `''` are one thing (today `is_unsolved` says yes, while several
-   hand-written tuples named only `''`; see `bugs/GIR_stage4_rewrites_must_be_exact.md`).
+   hand-written tuples named only `''`, which now ask `is_no_type`, the exact `''`-only predicate that
+   does not take `'unknown'`: the 2026-11-23 exact-rewrite fix).
 
 ## Then the migration (each step byte-identical on `tools/c_oracle.py`, closure check per step)
 
@@ -65,10 +66,10 @@ D. **Unsolved.** Pick `Optional[Type]` (None = unsolved) or an `UNSOLVED` sentin
 
 ## Related
 
-- `bugs/GIR_stage4_rewrites_must_be_exact.md`: undo the 15 widened rewrites first, so the bridge is
-  exact before it is moved.
-- `bugs/GIR_stage4_ratchet_counts_every_type_string.md`: the honest census (about 930 string tests).
-- `bugs/GIR_stage4_single_type_equalities_codemod.md`: the cheap mechanical part.
+- The exact-rewrite fix (landed 2026-11-23): the widened tuple rewrites are exact, so the bridge starts
+  from exact predicates.
+- The honest census (2026-11-23, `test_type_string_ratchet.py`): about 930 string tests before the rewrites.
+- The single-type equality codemod (landed 2026-11-23): the cheap mechanical part.
 
 ## Status
 

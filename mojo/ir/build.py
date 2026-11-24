@@ -53,18 +53,21 @@ def raw(gen, text: str) -> Instr:
     return i
 
 
-def append(gen, instr: Instr) -> None:
+def append(gen, instr: Instr, stamp: bool = True) -> None:
     """Append `instr` to the body being lowered, stamped with the `#line`
     directive of the innermost source statement (the rule the text emitter
-    used to apply on its own).
+    used to apply on its own).  `stamp=False` skips the directive; a label
+    is the one caller that does, because it opens a block.
 
     It also CLEARS `gen._last_was_terminal`: the text emitter did that for
     every ordinary statement, and the readers of the flag (the implicit
     return and the scope-exit frees) mean "the next thing is reachable".
     A family that moved without this would silently turn the statement
-    after a jump into a block terminator, dropping an emitted `return`."""
+    after a jump into a block terminator, dropping an emitted `return`.
+    A label is no exception: it is a jump target, so what follows it is
+    reachable again."""
     d = gen._stmt_line_directive
-    if d:
+    if stamp and d:
         text = instr.line()
         if text.strip() and not text.lstrip().startswith('#'):
             gen.body_lines.append(_opaque(d))
@@ -134,7 +137,7 @@ def label(gen, name: str, freq_hint: str = '') -> None:
     i.label = name
     if freq_hint:
         i.text = '  /* ' + freq_hint + ' */'
-    gen.body_lines.append(i)
+    append(gen, i, False)
 
 
 def comment(gen, text: str, indent: int = 2) -> None:

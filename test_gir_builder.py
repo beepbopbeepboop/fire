@@ -130,6 +130,10 @@ def test_a_statement_is_reachable_again():
     gen._last_was_terminal = True
     build.comment(gen, '/* x */')
     check(gen._last_was_terminal is False, 'a comment is reachable again')
+    gen._last_was_terminal = True
+    build.label(gen, 'bb_9')
+    check(gen._last_was_terminal is False,
+          'a label is reachable again (it is a jump target; the flag is cleared through append)')
 
 
 

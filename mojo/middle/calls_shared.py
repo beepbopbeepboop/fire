@@ -305,7 +305,7 @@ def _callable_param_ret_types(gen, fn_node) -> dict:
         if not isinstance(_d, gimple_ctypes.IdentExpr):
             continue
         _rt = gen.func_return_types.get(_as_str(_d.name))
-        if _rt and _rt != 'void':
+        if _rt and not gimple_ctypes.TypeLattice.is_void(_rt):
             _out[_pn] = _rt
     return _out
 

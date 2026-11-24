@@ -1886,7 +1886,7 @@ def _dvt_val_cts(_ann):
     if _outer is None:
         _outer = 'int64_t'
     _nested = None
-    if _outer == 'MojoDict *':
+    if gimple_ctypes.TypeLattice.is_dict(_outer):
         _nv = _dvt_val_cts(_vann)
         if _nv is not None:
             _nested = _nv[0]
@@ -3968,7 +3968,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         gen._callable_param_ret_types = {}
         for _cpt_pn, _cpt_fn in (getattr(node, '_mojo_coro_callable_param_fns', None) or {}).items():
             _cpt_rt = gen.func_return_types.get(_as_str(_cpt_fn))
-            if _cpt_rt and _cpt_rt != 'void':
+            if _cpt_rt and not gimple_ctypes.TypeLattice.is_void(_cpt_rt):
                 gen._callable_param_ret_types[_as_str(_cpt_pn)] = _cpt_rt
     else:
         gen._callable_param_gen_api = gen._callable_param_generator_apis_of(node)
@@ -4112,7 +4112,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     for _pct_key in _pct:
         _pct_bare = _as_str(_pct_key)
         _pct_t = _as_str(_pct[_pct_bare])
-        if _pct_t == 'MojoDict *':
+        if gimple_ctypes.TypeLattice.is_dict(_pct_t):
             gen._actual_types[_pct_bare] = _pct_t
     # ...and the dict-VALUE half of the same contract, for the same reason and
     # beside it. A dict parameter has no binding site inside the callee, so
@@ -4186,7 +4186,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         else:
             ret_type = gen._infer_return_type(node.body, node)
         # Special case: main() should return int, not void
-        if node.name == 'main' and ret_type == 'void':
+        if node.name == 'main' and gimple_ctypes.TypeLattice.is_void(ret_type):
             ret_type = 'int64_t'
 
     gen.func_ret_type = ret_type
@@ -4462,7 +4462,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             # and keep `result` as a real `int` process exit code (this
             # wrapper's own C `main()` always returns `int`, regardless
             # of what the compiled Python `main()` itself returns).
-            if ret_type == 'void':
+            if gimple_ctypes.TypeLattice.is_void(ret_type):
                 lines.append(f"  {safe} ({call_args});")
                 lines.append(f"  int result = 0;")
             else:
@@ -4485,7 +4485,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             call_args = ', '.join(['0'] * len(param_strs))
             # See the identical `ret_type == 'void'` guard above (`def
             # main() -> None:`) -- same fix, same reason.
-            if ret_type == 'void':
+            if gimple_ctypes.TypeLattice.is_void(ret_type):
                 lines.append(f"  {safe} ({call_args});")
                 lines.append(f"  int result = 0;")
             else:
@@ -5728,7 +5728,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             pass
         ret_type = gen._infer_return_type(node.body, node)
         gen.var_types = _saved_lv
-        if ret_type == 'void':
+        if gimple_ctypes.TypeLattice.is_void(ret_type):
             ret_type = 'void'
 
     gen.func_ret_type = ret_type
