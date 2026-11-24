@@ -598,7 +598,9 @@ class _Summarizer:
             self._stmt(scope, st)
         self._run_deferred(scope)
         if not _terminates(node.body):
-            self._flow(const_term(sty.NONE), fs.ret)
+            fall = const_term(sty.NONE)
+            fs.ret_terms.append(fall)
+            self._flow(fall, fs.ret)
 
     def _run_deferred(self, scope: _Scope) -> None:
         i = 0
@@ -688,9 +690,11 @@ class _Summarizer:
             if scope.fn is None or scope.fn.ret < 0:
                 return
             if st.value is None:
-                self._flow(const_term(sty.NONE), scope.fn.ret)
+                term = const_term(sty.NONE)
             else:
-                self._flow(self._term(scope, st.value), scope.fn.ret)
+                term = self._term(scope, st.value)
+            scope.fn.ret_terms.append(term)
+            self._flow(term, scope.fn.ret)
         elif isinstance(st, N.IfStmt):
             self._term(scope, st.condition)
             narrowed = self._isinstance_narrow(scope, st.condition)

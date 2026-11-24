@@ -703,3 +703,10 @@ Closure acceptance: section 8.
   c_oracle identical vs 0753a4f1f (286 + 35), compile_stdlib PASSED 610 FAILED 0,
   test_import_cycle_sigs PASS. Not yet: `--fn` and `--undecidable` (need the solved program).
   Next: step 2 (solver precision), in the order of section 5.
+- 2026-11-24 (session 3, implementation): step 2, first two rules LANDED: 4.2d (`none` receivers
+  and containers evaluate to `bot`; the monotonicity invariant is stated in solve.py) and 4.3
+  (`ret_terms`, `eval_term`, `Solution.has_bot_return`, `why_none` -> `bot-return`). Verified:
+  test_tsolve 45/0, c_oracle identical vs c7878b789 (286 + 35), compile_stdlib 610/0,
+  test_import_cycle_sigs PASS. Still open in step 2: 4.2a externs, 4.2b dotted annotations,
+  4.2c narrowing, 4.2e static/class methods, 4.2f loose fields, 4.2g kind pins, 4.2h cast helpers,
+  4.2i coverage.

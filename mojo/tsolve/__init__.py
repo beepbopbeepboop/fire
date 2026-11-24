@@ -36,7 +36,17 @@ class Solution:
             return 'annotated'
         if self.prog.vars[fs.ret].kind == 'bot':
             return 'bot'
+        if self.has_bot_return(fs):
+            return 'bot-return'
         return ''
+
+    def has_bot_return(self, fs) -> bool:
+        """True when some return site evaluates to `bot`: a value the solver knows nothing
+        about leaves the function there, and joining without it would drop it (4.3)."""
+        for t in fs.ret_terms:
+            if _solve.eval_term(self.prog, t).kind == 'bot':
+                return True
+        return False
 
     def ret_sty(self, path: str, name: str):
         """The solved return type of `name` in module `path`, as an STy.
@@ -47,7 +57,7 @@ class Solution:
         if fs is None or not fs.decidable or fs.annotated_ret:
             return None
         t = self.prog.vars[fs.ret]
-        if t.kind == 'bot':
+        if t.kind == 'bot' or self.has_bot_return(fs):
             return None
         return t
 

@@ -202,6 +202,21 @@ class Origins(unittest.TestCase):
         self.assertTrue(into_v)
         self.assertIn('/t/main.py:6', [fl.origin for fl in into_v])
 
+    def test_a_none_receiver_waits_for_the_real_value(self):
+        # `x` is `None` and then the dict argument; a transient `None` receiver must give
+        # `bot`, not `dyn`, so the answer is the dict's `.get` (bugs/GIR_type_solver_precision.md, 4.2d).
+        src = ('def f(d):\n    x = None\n    x = d\n    return x.get("k")\n'
+               'def g():\n    return f({"k": "v"})\n')
+        self.assertEqual(_ret({'main': src}, 'g'), 'str')
+
+    def test_a_bot_return_site_makes_the_answer_undecided(self):
+        # `o.unknown_field` is `bot` (no caller feeds `o`); joining would silently drop it
+        # and answer `none`, so the answer must be undecided with reason `bot-return`.
+        src = 'def f(o):\n    if o:\n        return o.unknown_field\n    return None\n'
+        sol = _solve({'main': src})
+        self.assertIsNone(sol.ret_sty('/t/main.py', 'f'))
+        self.assertEqual(sol.why_none('/t/main.py', 'f'), 'bot-return')
+
     def test_why_none_names_the_reason(self):
         self.assertEqual(_solve({'main': 'def f():\n    return 1\n'}).why_none('/t/main.py', 'f'), '')
         self.assertEqual(_solve({'main': 'def f() -> Int:\n    return 1\n'}).why_none('/t/main.py', 'f'),

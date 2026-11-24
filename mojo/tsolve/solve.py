@@ -26,9 +26,18 @@ class SolveError(RuntimeError):
     pass
 
 
+# Monotonicity (bugs/GIR_type_solver_precision.md, 4.2d): every term evaluation is
+# monotone in the values it reads. A variable only grows (`join` never shrinks it), so a
+# term that answers `dyn` for an input that is only TRANSIENTLY `none` or `bot` can never
+# take that answer back. Reading a `none` or `bot` receiver therefore gives `bot`: the
+# answer waits for the real value. This is what makes the fixpoint independent of the order
+# the flows are evaluated in.
+
+
 class _Solver:
     def __init__(self, prog: Program):
         self.prog: Program = prog
+        self.readonly: bool = False  # `eval_term`: evaluate without making flows
         self.queue: list = []       # FIFO of flow ids waiting to be evaluated
         self.head: int = 0
         self.queued: list = []      # per flow: is it in the queue?
@@ -43,6 +52,8 @@ class _Solver:
             self.queue.append(fid)
 
     def add_flow(self, src: Term, dst: int) -> None:
+        if self.readonly:
+            return
         # The flow being evaluated created this one (a method's arguments flow to
         # the resolved method's parameters), so it inherits that flow's origin.
         origin = self.prog.flows[self.cur].origin if self.cur >= 0 else ''
@@ -140,7 +151,7 @@ class _Solver:
 
     def field(self, t: Term):
         recv = self.ev(t.args[0])
-        if recv.kind == 'bot':
+        if recv.kind == 'bot' or recv.kind == 'none':
             return sty.BOT
         if recv.kind == 'struct':
             cs = self.prog.classes.get(recv.name)
@@ -164,7 +175,7 @@ class _Solver:
 
     def method(self, t: Term):
         recv = self.ev(t.args[0])
-        if recv.kind == 'bot':
+        if recv.kind == 'bot' or recv.kind == 'none':
             return sty.BOT
         if recv.kind == 'struct':
             cs = self.prog.classes.get(recv.name)
@@ -223,8 +234,11 @@ def join_all(types: list):
 
 
 def elem_of(c):
-    """The element type of a container value (a dict's element is its value)."""
-    if c.kind == 'bot':
+    """The element type of a container value (a dict's element is its value).
+
+    A `none` container gives `bot`: an item of `None` raises, so no value comes out of it
+    (bugs/GIR_type_solver_precision.md, 4.2d). `dyn` is for a value we cannot see into."""
+    if c.kind == 'bot' or c.kind == 'none':
         return sty.BOT
     if c.kind == 'list' or c.kind == 'set':
         return c.args[0]
@@ -238,7 +252,7 @@ def elem_of(c):
 
 
 def slot_of(c, i: int):
-    if c.kind == 'bot':
+    if c.kind == 'bot' or c.kind == 'none':
         return sty.BOT
     if c.kind == 'tuple' and 0 <= i < len(c.args):
         return c.args[i]
@@ -306,6 +320,14 @@ def builtin_method(recv, name: str, t: Term, solver: _Solver):
             return sty.NONE
         return sty.DYN
     return sty.DYN
+
+
+def eval_term(prog: Program, t: Term):
+    """The value of `t` in the solved program, read-only (no flows are made): used to
+    ask what a return site evaluates to after the fixpoint."""
+    s = _Solver(prog)
+    s.readonly = True
+    return s.ev(t)
 
 
 def solve(prog: Program) -> None:

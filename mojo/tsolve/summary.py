@@ -72,6 +72,7 @@ class FnSummary:
         self.ret: int = -1         # TVar of the return
         self.annotated_ret: bool = False  # the return is pinned to its annotation
         self.decidable: bool = True       # False: no answer is claimed for it
+        self.ret_terms: list = []         # every term that flows into `ret` (returns and fall-off)
 
 
 class ClassSummary:
