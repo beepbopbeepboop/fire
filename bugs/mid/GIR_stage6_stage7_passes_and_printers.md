@@ -1043,7 +1043,7 @@ call, with a unary `+` over a closure that has an empty capture (the closure kin
 `&`). The `mojo_dict_get_int` return with a runtime cast type is a cast over a call.
 
 Verified on the branch (step 40 runs): arm test 30 arms, 0 failures; `c_oracle check --base master` identical on
-all 285 pydiff programs and all 35 coroutine programs (before these two edits; see the run note below).
+all 285 pydiff programs and all 35 coroutine programs (run on the final state, after these two edits).
 
 Coverage: the `brace` sites reached by the existing corpus are the `_W` ternary (12), the reverse cast (03, 09), the
 globals field (22) and the dynamic call (21). The `_W` pick, the negated `in`, the tuple text, the dictionary-get cast,
@@ -1054,3 +1054,54 @@ Remaining for the done criterion: the statement printers still return text lists
 the `.show()` boundaries are the rendering edge of those lists, and the call-slot consumers (`_cpp_call_arg_expr`,
 the list-literal call argument) still take text. Converting the statement printers to return IR statements is the
 next stage-7 step and the largest one left. The doc is NOT deleted.
+
+## Status 2026-11-23 (step 37): the yield-from, generator-delegate and copy-loop lines are statements
+
+Nine text lines print from statement kinds: the `yield from` sub-generator guard declaration (`decl`), its
+guarded break (`ifbody` through the new `_cpp_if_break_line`), the pending-exception throw (`throw`); the
+generator-delegate guard declaration (`decl`, the same text); and the unsupported-shape copy loop
+(`decl` for `auto`, `for`, `coyield`, `end`).
+
+Coverage: the `yield from` guard declaration and its guarded break are reached by existing program `03`. The
+copy loop, the generator-delegate guard declaration and the pending-exception throw are NOT reached by any
+compiling program, so they are verified by transcription only.
+
+Still text statement lines: about 10 (the try statement's scope lines, the `_cps_*` and `_cpf_*` one-liners).
+
+Verified: `c_oracle check --base 291886716` identical on all 285 pydiff programs and all 35 coroutine programs;
+`test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
+
+## Status 2026-11-23 (step 38): twelve more statement lines are statements
+
+The `mojo_iter_word` copies of the word, param-call and named-target iterators (`assign`), the async-loop and
+`yield from` guarded breaks (`ifbody` through `_cpp_if_break_line`), the named-target cached-iterator copy
+(`assign`), the target declaration (`decl`), the try statement's opening and closing braces (`block`, `end`),
+and the `co_await` sleep statement (an `expr` over a `coawait` Ex).
+
+Coverage: the `mojo_iter_word` copy (`05`), the async-loop break (`02`), the target declaration (`02`, `02`,
+and others), and the try block (`05`) are reached. The `yield from` guarded break, the cached-iterator copy, the
+try closing brace and the sleep statement are NOT reached by any compiling program; they are checked by
+transcription only.
+
+Still text: the vararg function-pointer statement in `_cps_assign_stmt` (a `+[]` lambda value, a form the
+closure kind does not cover); it is the one multi-line statement left in the list of 58.
+
+Verified: `c_oracle check --base 461f9f26b` identical on all 285 pydiff programs and all 35 coroutine programs;
+`test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
+
+## Status 2026-11-23 (step 39): the assignment right-hand sides in `_cps_assign_stmt` are shapes
+
+The right-hand sides of the word-assignment forms are IR shapes: `_mj_w(x)` (a call, two sites), `(int64_t)(intptr_t)(x)`
+and `(T)(intptr_t)(x)` (casts over a parenthesized operand; the declared-type cast keeps its spelling verbatim), and the
+tuple element read `mojo_list_get_int(<list cast>, i)` (a call). Each renders the text of the f-string it replaced.
+
+Coverage: NONE of the four shapes is reached by any compiling program in the existing corpus, and my probes did not find
+an input that reaches them, so they are verified by transcription only. This is the weakest verification in the list so
+far and the next probe should target the module-function-value and the word-local assignment forms first.
+
+Still text: the vararg function-pointer statement (`+[]`, a form the closure kind does not cover) and the remaining
+expression leaves in `_cpx_binary_op` (three lambda-body returns), `_cps_return_stmt`, `_cpx_slice_expr`,
+`_cpx_subscript_expr`, `_cpx_member_expr`, `_cpx_call_member`, `_cpx_ident_expr`, and `_cpp_next_lambda_ex` (two).
+
+Verified: `c_oracle check --base 9b998053c` identical on all 285 pydiff programs and all 35 coroutine programs;
+`test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
