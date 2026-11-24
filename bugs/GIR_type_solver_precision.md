@@ -725,3 +725,9 @@ Closure acceptance: section 8.
   59/0 (dotted class, and, ternary, early-return idiom, tuple, the guard), c_oracle identical vs
   8bc44e1ed (286 + 35), compile_stdlib 610/0, test_import_cycle_sigs PASS.
   Still open in step 2: 4.2b, 4.2e, 4.2f, 4.2g, 4.2h, 4.2i.
+- 2026-11-24 (session 3, implementation): step 2, rule 4.2b (dotted annotations) LANDED:
+  `class_names` maps a spelling to its class name; `_names_for(mod)` adds `alias.Class` for each
+  closure class an `import m as alias` reaches (built from the target's statements, so declaration
+  order does not matter); every annotation pin site uses its module's names. Verified: test_tsolve
+  60/0, c_oracle identical vs b5a1cccdf (286 + 35), compile_stdlib 610/0, cycle test PASS.
+  Still open in step 2: 4.2e, 4.2f, 4.2g, 4.2h, 4.2i.

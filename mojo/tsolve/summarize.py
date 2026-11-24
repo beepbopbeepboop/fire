@@ -52,6 +52,7 @@ class _Mod:
         self.imports: dict = {}      # module ref -> abspath, or '' when external
         self.wildcards: list = []    # abspaths of `from m import *`
         self.submods: dict = {}      # `from pkg import sub`: local name -> abspath of pkg.sub
+        self.ann_names = None        # cache: the annotation names visible in this module (4.2b)
 
 
 class _Scope:
@@ -370,7 +371,7 @@ class _Summarizer:
         self.root_stmts: list = root_stmts
         self.mods: dict = {}         # abspath -> _Mod
         self.order: list = []        # _Mod in breadth-first closure order
-        self.class_names: dict = {}  # the names of the unique classes (for annotations)
+        self.class_names: dict = {}  # unique class name -> class name (for annotations)
         self.class_list: list = []   # every ClassSummary, duplicates included
         self.pending: list = []      # (FnSummary, node, mod, ClassSummary or None)
         self.cur_origin: str = ''    # the origin of the statement being summarized
@@ -414,7 +415,7 @@ class _Summarizer:
                     counts[st.name] = counts.get(st.name, 0) + 1
         for name in counts:
             if counts[name] == 1:
-                self.class_names[name] = True
+                self.class_names[name] = name
         for mod in self.order:
             self._declare_module(mod)
         for mod in self.order:
@@ -479,7 +480,7 @@ class _Summarizer:
             return
         var = self.prog.new_var(name)
         if ann:
-            self.prog.pin(var, sty.from_annotation(ann, self.class_names))
+            self.prog.pin(var, sty.from_annotation(ann, self._names_for(mod)))
         mod.names[name] = _Binding('var', '', var, '', '')
 
     def _declare_module_fn(self, mod: _Mod, node) -> None:
@@ -489,11 +490,11 @@ class _Summarizer:
             # A second definition of one name: an overload set. Both are undecidable.
             self.prog.fns[prev.key].decidable = False
             mod.names[node.name] = _Binding('dyn', '', -1, '', '')
-            fs = self._new_fn(mod.path, node.name, '', node, '')
+            fs = self._new_fn(mod.path, node.name, '', node, '', self._names_for(mod))
             fs.decidable = False
             self.pending.append((fs, node, mod, None))
             return
-        fs = self._new_fn(mod.path, node.name, '', node, key)
+        fs = self._new_fn(mod.path, node.name, '', node, key, self._names_for(mod))
         self.prog.fns[key] = fs
         mod.names[node.name] = _Binding('func', key, -1, '', '')
         self.pending.append((fs, node, mod, None))
@@ -516,7 +517,7 @@ class _Summarizer:
             if isinstance(f, N.VarDecl):
                 var = self.prog.new_var(f.name)
                 if f.type_ann:
-                    self.prog.pin(var, sty.from_annotation(f.type_ann, self.class_names))
+                    self.prog.pin(var, sty.from_annotation(f.type_ann, self._names_for(mod)))
                 cs.fields[f.name] = var
         for m in node.methods:
             if isinstance(m, N.FunctionDef):
@@ -528,7 +529,7 @@ class _Summarizer:
         for m in node.methods:
             if isinstance(m, N.FunctionDef):
                 key = func_key(mod.path, name + '.' + m.name)
-                fs = self._new_fn(mod.path, m.name, name, m, '')
+                fs = self._new_fn(mod.path, m.name, name, m, '', self._names_for(mod))
                 if key in self.prog.fns:
                     fs.decidable = False
                 else:
@@ -537,7 +538,7 @@ class _Summarizer:
                 cs.methods[m.name] = fs
                 self.pending.append((fs, m, mod, cs))
 
-    def _new_fn(self, path: str, name: str, cls: str, node, key: str) -> FnSummary:
+    def _new_fn(self, path: str, name: str, cls: str, node, key: str, names: dict) -> FnSummary:
         fs = FnSummary(key, path, name, cls)
         fs.decidable = not (node.decorators or node.is_generator or node.is_async)
         for pair in node.params:
@@ -548,16 +549,16 @@ class _Summarizer:
             fs.param_names.append(pname)
             if pname.startswith('*'):
                 self.prog.pin(var, sty.DYN)
-            elif pname == 'self' and cls and cls in self.class_names:
-                self.prog.pin(var, sty.struct_of(cls))
+            elif pname == 'self' and cls and cls in names:
+                self.prog.pin(var, sty.struct_of(names[cls]))
             elif pname == 'self' and cls:
                 self.prog.pin(var, sty.DYN)
             elif ptype:
-                self.prog.pin(var, sty.from_annotation(ptype, self.class_names))
+                self.prog.pin(var, sty.from_annotation(ptype, names))
         fs.ret = self.prog.new_var(name + '.ret')
         if node.return_type:
             fs.annotated_ret = True
-            self.prog.pin(fs.ret, sty.from_annotation(node.return_type, self.class_names))
+            self.prog.pin(fs.ret, sty.from_annotation(node.return_type, names))
         elif not fs.decidable:
             self.prog.pin(fs.ret, sty.DYN)
         return fs
@@ -578,6 +579,30 @@ class _Summarizer:
                 continue
             if self.resolve_name(b.src_mod, b.src_name) is None:
                 mod.names[name] = _Binding('module', mod.submods[name], -1, '', '')
+
+    def _names_for(self, mod: _Mod) -> dict:
+        """The annotation names visible in `mod`: every unique closure class by its bare name,
+        and `alias.Class` for each class a module binding `alias` (an `import m as alias` of a
+        closure module) makes reachable (4.2b). Built from the imported module's statements,
+        so it does not depend on the order the modules are declared in."""
+        if mod.ann_names is not None:
+            return mod.ann_names
+        names = {}
+        for name in self.class_names:
+            names[name] = self.class_names[name]
+        for st in mod.stmts:
+            if not isinstance(st, N.ImportStmt):
+                continue
+            target_path = mod.imports.get(st.module, '')
+            target = self.mods.get(target_path)
+            if target is None:
+                continue
+            alias = st.alias if st.alias else st.module
+            for tst in target.stmts:
+                if isinstance(tst, N.StructDef) and tst.name in self.class_names:
+                    names[alias + '.' + tst.name] = tst.name
+        mod.ann_names = names
+        return names
 
     def resolve_name(self, path: str, name: str, depth: int = 0):
         """What `name` means at the top level of module `path` (following imports)."""
@@ -660,7 +685,7 @@ class _Summarizer:
             else:
                 var = self.prog.new_var(n)
                 if names[n]:
-                    self.prog.pin(var, sty.from_annotation(names[n], self.class_names))
+                    self.prog.pin(var, sty.from_annotation(names[n], self._names_for(scope.mod)))
             scope.locals[n] = _Binding('var', '', var, '', '')
 
     # ── statements ──────────────────────────────────────────────────────
@@ -899,7 +924,7 @@ class _Summarizer:
         # A def inside a body is a value of unknown type; its own body still
         # contributes flows (its calls feed the parameters of what it calls).
         scope.locals[node.name] = _Binding('dyn', '', -1, '', '')
-        fs = self._new_fn(scope.mod.path, node.name, '', node, '')
+        fs = self._new_fn(scope.mod.path, node.name, '', node, '', self._names_for(scope.mod))
         fs.decidable = False
         scope.deferred.append((fs, node, scope.mod, scope.cs, scope))
 
@@ -1188,7 +1213,7 @@ class _Summarizer:
         dotted = self._dotted(scope, e)
         if dotted != '':
             if dotted in externs.ATTRS:
-                return const_term(sty.from_annotation(externs.ATTRS[dotted], self.class_names))
+                return const_term(sty.from_annotation(externs.ATTRS[dotted], self._names_for(scope.mod)))
             return const_term(sty.DYN)
         if isinstance(e.obj, N.IdentExpr):
             b = self._lookup(scope, e.obj.name)
@@ -1259,7 +1284,7 @@ class _Summarizer:
             self._terms(scope, e.args)
             for pair in e.kwargs:
                 self._term(scope, pair[1])
-            return const_term(sty.from_annotation(externs.FUNCS[dotted], self.class_names))
+            return const_term(sty.from_annotation(externs.FUNCS[dotted], self._names_for(scope.mod)))
         if dotted != '' and not self._is_attr_method(scope, e.func):
             self._terms(scope, e.args)
             for pair in e.kwargs:
@@ -1354,7 +1379,7 @@ class _Summarizer:
         if name == 'abs':
             return args[0] if args else const_term(sty.DYN)
         if name in externs.INTERNAL:
-            return const_term(sty.from_annotation(externs.INTERNAL[name], self.class_names))
+            return const_term(sty.from_annotation(externs.INTERNAL[name], self._names_for(scope.mod)))
         if name == 'open':
             return const_term(sty.struct_of(FILE_KIND))
         if name == 'enumerate' and args:

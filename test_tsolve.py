@@ -115,7 +115,7 @@ class JoinTable(unittest.TestCase):
 class FromAnnotation(unittest.TestCase):
     """bugs/GIR_type_solver.md 2.1, `from_annotation`, row by row."""
 
-    CLASSES = {'Tok': True}
+    CLASSES = {'Tok': 'Tok'}
 
     def fa(self, text):
         return from_annotation(text, self.CLASSES)
@@ -249,6 +249,13 @@ class Origins(unittest.TestCase):
         # the two returns would be dyn. With it, both returns are int.
         src = 'def f(x):\n    if isinstance(x, str):\n        x = 1\n        return x\n    return 0\n'
         self.assertEqual(_ret({'main': src}, 'f'), 'int')
+
+    def test_a_dotted_annotation_names_a_closure_class(self):
+        files = {
+            'main': 'import m\ndef f(x: m.C):\n    return x.name\n',
+            'm': 'struct C:\n    var name: String\n',
+        }
+        self.assertEqual(_ret(files, 'f'), 'str')
 
     def test_why_none_names_the_reason(self):
         self.assertEqual(_solve({'main': 'def f():\n    return 1\n'}).why_none('/t/main.py', 'f'), '')

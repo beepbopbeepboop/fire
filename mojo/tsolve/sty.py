@@ -213,15 +213,16 @@ def _bare(name: str, class_names) -> STy:
     if name in ('set', 'Set'):
         return set_of(DYN)
     if name in class_names:
-        return struct_of(name)
+        return struct_of(class_names[name])
     return DYN
 
 
 def from_annotation(text, class_names) -> STy:
     """Parse an annotation string into an `STy` (bugs/GIR_type_solver.md, 2.1).
 
-    `class_names` is any container of the closure's class names (a set or a
-    dict). A name in it is `struct_of(name)`; any other unknown name is `dyn`.
+    `class_names` maps each spelling a closure class can be written as (its bare name,
+    `alias.Class` through a module binding) to the class's name, and a name in it is
+    `struct_of(that class)`; any other unknown name is `dyn` (bugs/GIR_type_solver_precision.md, 4.2b).
     The text is split with a small scanner, not a regex.
     """
     if text is None:
