@@ -2776,13 +2776,14 @@ def _cpp_struct_word_lambda(ops: str, body: list) -> Ex:
     return lam
 
 
-def _cpp_if_break_line(ind: str, cond) -> str:
+def _cpp_if_break_line(ind: str, cond) -> Instr:
     """`if (cond) break;` at `ind`, as one statement of a loop body."""
     body = Instr('break')
     ins = Instr('ifbody')
     ins.rhs = _as_ex(cond)
     ins.body = body
-    return ind + ins.show()
+    ins.indent = len(ind)
+    return ins
 
 
 def _cpp_next_on_generator_expr(gen, handle_expr, api) -> Ex:
@@ -3169,7 +3170,7 @@ def _cpp_build_container_from_iterable(gen, kind: str, iter_node, target_name: s
     # call inside the loop body is lowered.
     declared[acc] = res_ctype
     lines = gen._cpp_for_stmt(for_stmt, declared, '    ')
-    body_text = ' '.join(l.strip() for l in lines)
+    body_text = ' '.join(l.strip() for l in _cpp_render_lines(lines))
     _cfi = Ex('lambda')
     _cfi.text = res_ctype
     _cfi.body = [_cpp_instr('decl', f"{res_ctype} {acc} = {new_fn} ()"),
@@ -7680,7 +7681,7 @@ def _cpp_hoist_walrus_decls(gen, expr, declared: dict, indent: str) -> list[str]
     return lines
 
 
-def _cpp_call_line(indent: str, fname: str, args: list) -> str:
+def _cpp_call_line(indent: str, fname: str, args: list) -> Instr:
     """`fname(a, b);` at `indent`, printed from the stage-2b `call` and `expr` shapes."""
     from mojo.ir.instr import Ex, Instr, ex_text
     e = Ex('call')
@@ -7689,7 +7690,8 @@ def _cpp_call_line(indent: str, fname: str, args: list) -> str:
     e.args = [ex_text(a) for a in args]
     i = Instr('expr')
     i.rhs = e
-    return indent + i.show()
+    i.indent = len(indent)
+    return i
 
 
 def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
@@ -8944,14 +8946,15 @@ def _cps_var_decl(gen, s, declared: dict, indent: str) -> list[str]:
     return []
 
 
-def _cpp_assign_line(lhs, rhs, indent: str) -> str:
+def _cpp_assign_line(lhs, rhs, indent: str) -> Instr:
     """`lhs = rhs;` at `indent`, printed from the stage-2b `Instr` shape."""
     from mojo.ir.instr import Instr, ex_text
     i = Instr('assign')
     # Callers pass C text or a stage-2b Ex; a string is text.
     i.lhs = ex_text(lhs) if isinstance(lhs, str) else lhs
     i.rhs = ex_text(rhs) if isinstance(rhs, str) else rhs
-    return indent + i.show()
+    i.indent = len(indent)
+    return i
 
 
 def _cps_aug_assign(gen, s, declared: dict, indent: str) -> list[str]:
@@ -8978,8 +8981,10 @@ def _cps_aug_assign(gen, s, declared: dict, indent: str) -> list[str]:
                 gen._struct_name_owner.get(gen._cpp_gen_self_struct),
                 s.target.member, 'self', '->')
             _fld = gimple_ctypes._safe_field(s.target.member)
-            return [_cpp_assign_line(f"self->{_fld}", f"self->{_fld} {op} {val}", indent)
-                    + (f" {_pset}" if _pset else '')]
+            _ln = _cpp_assign_line(f"self->{_fld}", f"self->{_fld} {op} {val}", indent)
+            if _pset:
+                _ln.note = f" {_pset}"
+            return [_ln]
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             "augmented assignment to an undeclared/non-simple target")
     op = gimple_ctypes._GD_BIN_OPS.get(s.op, s.op)
@@ -8998,13 +9003,21 @@ def _cps_aug_assign(gen, s, declared: dict, indent: str) -> list[str]:
     return [_cpp_assign_line(lhs, rhs, indent)]
 
 
-def _cpp_ir_line(ind: str, kind: str, text: str = '') -> str:
+def _cpp_render_lines(lines) -> list[str]:
+    """The assembly edge: a mixed list of statement `Instr` and raw C text lines, as the text lines a
+    function body prints. An `Instr` is rendered by `Instr.line()` (its own indent, a label at column
+    0); a `str` is already text and passes through unchanged."""
+    return [ln.line() if isinstance(ln, Instr) else ln for ln in lines]
+
+
+def _cpp_ir_line(ind: str, kind: str, text: str = '') -> Instr:
     """One statement line at `ind`, printed from a stage-2b shape (mojo/ir/instr.py)."""
     from mojo.ir.instr import Instr, ex_text
     ins = Instr(kind)
     if text:
         ins.rhs = ex_text(text)
-    return ind + ins.show()
+    ins.indent = len(ind)
+    return ins
 
 
 def _cps_while_stmt(gen, s, declared: dict, indent: str) -> list[str]:
@@ -12887,7 +12900,7 @@ def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
             finally_lines.extend(
                 gen._cpp_stmt(fs, declared, indent + '        '))
         if any('co_yield' in ln or 'co_await' in ln
-               for ln in finally_lines):
+               for ln in _cpp_render_lines(finally_lines)):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "`yield`/`yield from` inside a `finally:` block is not "
                 "supported in a generator body")

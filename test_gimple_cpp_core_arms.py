@@ -182,7 +182,7 @@ def main() -> int:
     # arm, so each helper is pinned here with text operands directly.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from mojo.backend_gimple import cpp_core as _C
-    from mojo.ir.instr import ex_text as _ex
+    from mojo.ir.instr import ex_text as _ex, Instr as _Instr
     text_cases = [
         (_C._cpp_assign_line('x', '1', '  '), '  x = 1;'),
         (_C._cpp_assign_line(_ex('x'), _ex('y'), ''), 'x = y;'),
@@ -482,6 +482,9 @@ def main() -> int:
         # An arm returns its `Ex`; the C text it renders to is what these cases pin.
         if isinstance(got, _Ex):
             got = got.show()
+        # A statement helper returns its `Instr`; the line it prints is `.line()`.
+        elif isinstance(got, _Instr):
+            got = got.line()
         if got != want:
             failures.append(f'IR helper text: got {got!r}, want {want!r}')
 
