@@ -21,6 +21,7 @@ Ex.kind
   'comma'  a, b                       `a, b` inside a parenthesized comma expression
   'lambda' text (return C type), body   `[&]() -> text { body }()`; body is Instr
   'closure' name (params), text, body  `[&](params) -> text { body }`, a lambda value
+  'cat'    args                       the parts of a text-and-operand line, printed back to back
   'opaque' ty                         something the reader does not model
 
 Instr.kind
@@ -121,6 +122,8 @@ class Ex:
             head = '[&]() -> ' + self.text if self.text else '[&]()'
             parts = [st.show() for st in self.body]
             return head + ' { ' + ' '.join(p for p in parts if p != '') + ' }()'
+        if k == 'cat':
+            return ''.join(x.show() for x in self.args)
         if k == 'none':
             return ''
         return '<opaque>'
@@ -154,6 +157,16 @@ def ex_bin(a: Ex, op: str, b: Ex) -> Ex:
 def ex_deref(a: Ex) -> Ex:
     e = Ex('deref')
     e.a = a
+    return e
+
+
+def ex_cat(*parts) -> Ex:
+    """The parts printed back to back, with no separator: each an Ex, or text (an `ex_text` leaf).
+
+    For a line that is partly text and partly an operand, so the operand stays an Ex until the
+    statement helper renders it."""
+    e = Ex('cat')
+    e.args = [p if isinstance(p, Ex) else ex_text(p) for p in parts]
     return e
 
 
