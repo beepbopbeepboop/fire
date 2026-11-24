@@ -2190,8 +2190,20 @@ def _host_rank_checks(failures):
             with open(path, encoding="utf-8", errors="replace") as fh:
                 tree = ast.parse(fh.read())
         except SyntaxError as exc:                        # noqa: BLE001
-            check(False, f"{S.rel(path)} does not parse, so the zlib row "
-                         f"cannot be measured over it: {exc}")
+            # TWO CAUSES, and the check used to name only the second. A `.py`
+            # in this tree is Python, so this is either a real syntax error or
+            # a MOJO-ONLY program wearing the wrong extension — `struct` is the
+            # usual tell, and it is the way `tools/cpp_corpus` acquired two of
+            # them on 2026-11-23. The corpus convention (`tools/c_oracle.py::
+            # corpus`) is that such a program is named `.mojo`; the scanners
+            # that read every `.py` as Python (`this one`, the sweep's host
+            # row) then step over it instead of parsing a `struct` body.
+            check(False, f"{S.rel(path)} is not Python, so the zlib row cannot "
+                         f"be measured over it: {exc}\n"
+                         f"    If it is a Mojo-only program (a `struct`, a "
+                         f"`fn`), it belongs under a `.mojo` name — "
+                         f"`tools/c_oracle.py::corpus` globs both, and only a "
+                         f"`.py` is read as Python by this check.")
             continue
         bound = {}
         for node in ast.walk(tree):
