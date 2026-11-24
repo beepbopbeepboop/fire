@@ -825,14 +825,23 @@ Fixed (merged; each is a real fix, not a workaround):
 - The `_mj_w` and struct-constructor `Ex` reprs in generated C++ (`ead016231`, `9ba501e2b`), which
   broke `test_gimple_generator_runner.py` (520/0 on master).
 
-Open, with bug docs:
-- `bugs/GIR_selfhost_extern_return_types.md`: `conflicting types` (30). A WIP commit
-  (`e9e4ea4a9`, merged to master as `913aa3780`) removes those 30 but adds pointer-conversion
-  errors, so it is RED. The fix is a pre-pass that records each definer's return type before any
-  importer is generated.
-- `bugs/GIR_selfhost_unexplained_error_kinds.md`: `'Scope' has no member 'declared_types'` (11),
-  `'MojoFunction' has no member 'param_types'` (10), `non-trivial conversion in 'component_ref'`
-  (10), `'Interpreter' has no member '_try_depth'` (8), and the smaller rows. Not diagnosed.
+Open, with bug docs. Re-measured 2026-11-24 on master `91140cc58`: 40 gcc errors, counted with
+`tools/selfhost_ci.py` (the method is in the second doc).
+- `bugs/GIR_selfhost_extern_return_types.md`: 37 errors. The cause is import-cycle back-edges:
+  the closure has one 76-module import cycle, and an importer is generated before its
+  definer's return-type passes run. 13 functions are affected. The WIP commit (`e9e4ea4a9`,
+  merged as `913aa3780`) patched prototype text with placeholders, so call-site temps stayed
+  `int64_t`; it is reverted as step 0. The fix is the pre-pass `bugs/GIR_type_solver.md` (S1):
+  the importer's read freezes the solver's answer, the definer obeys it, and a ledger proves
+  there are no conflicts.
+- `bugs/GIR_selfhost_unexplained_error_kinds.md`: 3 errors, `MojoList * + double`. It is a
+  `+`-lowering defect in `emit_exprs._lower_binary_tail` (a may-box word beside a list operand
+  is promoted to double, and `list + int64_t` was a silent no-op). The old has-no-member and
+  `component_ref` rows no longer reproduce.
+
+The type solver (`bugs/GIR_type_solver.md`) is the long-term direction for every signature,
+field and local type (stages S1-S6). S1 is the first consumer. S4 takes over the overload hash's
+parameter types, and S6 is the unboxing stage.
 
 The self-host gate (`bootstrap-stage1-transitive`, disabled, `bugs/gate-bootstrap-stage1-transitive.md`)
 stays disabled until the closure compiles with zero gcc errors and the stage 2/3 chain runs.
