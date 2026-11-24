@@ -3891,14 +3891,7 @@ def _ensure_local(gen, ctype: str, val: str) -> str:
         if is_numeric_literal:
             _native = 'double' if '.' in val else 'int'
             if ctype != _native:
-                # The cast must land in a register, not in the returned text.
-                # A caller that feeds this into a further cast (`_to_int64`
-                # wrapping a padded `False` default as `(int64_t)(_Bool)0`,
-                # from `box_word_value`) builds a cast of a cast, which GIMPLE
-                # rejects inside a __GIMPLE body ("expected expression before
-                # '(' token"). This function's own contract is that cast
-                # operands are registers, so materialize the literal here.
-                return gen._new_val(ctype, f'({ctype}){val}')
+                return f'({ctype}){val}'
         return val
     # Copying a wider-declared scalar into a narrower integer temp is an
     # implicit conversion GIMPLE rejects (e.g. an int64_t ABI parameter
