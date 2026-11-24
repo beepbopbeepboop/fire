@@ -601,11 +601,52 @@ functions returning `str`; the three statement helpers have 186 (`_cpp_ir_line`)
 - [x] T3. The `-> str` functions become `Ex` (or stay as text only at a named boundary). Done 2026-11-23, see the T3 status below.
 - [x] T4. The `.show()` calls are removed as their consumers take `Ex`/`Instr` (58 to 7; see the T4 status below).
 - [x] T5. One rendering edge: the function-assembly site renders each `Instr` with `.line()` (the one `'\n'.join` site). Done 2026-11-23, see the T5 status below.
-- [ ] T6. Call-slot text lists (`_cpp_call_arg_expr` and its consumers) take `Ex`.
+- [x] T6. Call-slot text lists (`_cpp_call_arg_expr` and its consumers) take `Ex`. Done 2026-11-23, see the T6 status below.
 - [ ] T7. Verify: `test_gimple_cpp_core_arms.py`; `c_oracle check` identical on all 285 pydiff and all coroutine
       programs; `compile_stdlib.py` `FAILED: 0`, no skips; the transcription-only sites (listed in the Status entries)
       probed until each is reached or its probe is recorded as impossible.
 - [ ] T8. Done criterion: delete this doc in the same commit, with `python3 tools/dangling_doc_refs.py --ratchet`.
+
+### Status 2026-11-23: T6 (call-slot text lists take `Ex`)
+
+`_cpp_call_arg_expr(gen, a) -> Ex` now returns an `Ex` (the list-literal case already did): `_cpp_list_literal_arg_expr`
+or `gen._cpp_expr_ex(a)`, no `.show()`. Its consumers now take the Ex:
+- The slot binder `_cpp_generator_call_slot_pairs` returns `[(Ex, ctype), ...]`. Its leading, tail and default slots
+  are normalised there (`_as_ex`, `ex_text`), so no caller hands it text.
+- `_cpp_emit_generator_start_expr` and `_cpp_generator_start_kwargs_expr` build the `<base>_start` arguments with
+  `_cpp_cast_ex`/`_paren_ex` and `_cpp_call_ex`, not f-strings.
+- The `yield from` and `for ... in` consumers: the pointer and word casts are `_cpp_cast_ex`; the `', '.join(arg_exprs)`
+  joins are gone, and the `_mojogen_sub_guard` line is `ex_cat(..., _cpp_call_ex(<base>_start, arg_exprs), ...)`.
+  The `for ... in` `_mj_w(...)` wrap is `_cpp_call_ex`.
+- The builtin-call function (`args = [_cpp_call_arg_expr(gen, a) ...]`): its `f"(T)({args[N]})"` casts and
+  `(void *)(intptr_t)(...)` casts are `_cpp_cast_ex`/`_paren_ex`, the `ex_text(args[0])` wrappers are dropped, and the
+  `tuple`/`list` copy line is `_cpp_iter_word_ex`. The min/max result and the `mojo_reversed` wrap are `_cpp_call_ex`.
+
+Counts (the call-argument path; `.show()` and f-string sites over the argument lists, master `63e597a35` vs this round):
+- Call sites of `_cpp_call_arg_expr` whose result is text: 7 before (the 4 slot/cargs sites at 2315, 2343, 2439, 2442,
+  plus 4933, 10396, 13656), 0 after. Every one now feeds an Ex list.
+- f-string sites over an argument (`{args[...]}`, `{a}` of an argument list, the `(T)(...)` slot casts): 19 before, 2
+  after. Both are statement text (see below).
+- `.show()` calls in `cpp_core.py`: 8 before, 12 after. The one in `_cpp_call_arg_expr` is gone; the 5 added are the
+  text edges listed below, each rendering an argument once at the point it becomes statement text.
+
+Text consumers left in the call-argument path, each a text edge (statement or shape test), with the reason:
+1. The min/max statement body (`_body`, `_a = args[_ai].show()`, `args[0].show()`): built as a C statement string in the
+   reduction lambda. Moving it to `Instr` statements is the next step, not T6's.
+2. The `*args` pack (`_pack_stmts`, `args[_i].show()`): a text list of printed statements (see the T4 note on 5974).
+3. The rethrow argument text (`_cargs = ", ".join(...)` over `[x.show() for x in args]`), passed to
+   `_cpp_rethrow_pending`, which takes text.
+4. The `yield from` shape test (`re.fullmatch(r'-?\d+|true|false', arg_exprs[_ai].show().strip())`): a regex over the
+   printed argument, so it must read the text. The decision is unchanged.
+
+Verification (worktree `work-t6`, branch `work/gir-stage7-t6`, base `63e597a35`):
+- `test_gimple_cpp_core_arms.py`: `30 arm(s) pinned across 5 printer(s), 0 failure(s)`.
+- `c_oracle check --base master`: `all 285 programs generate identical C to 63e597a35a6e` and `all 35 coroutine programs
+  generate identical C++ companion to 63e597a35a6e`.
+- `compile_stdlib.py` (default parallelism): `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no `skip` lines, exit 0.
+  The run was a cold build (`Codegen CAS: 0/610 hits`, `GCC CAS: 0/610 hits`).
+
+T6 is T6-done. Still open: T7 to T8.
 
 ### Status 2026-11-23: T5 (one rendering edge)
 

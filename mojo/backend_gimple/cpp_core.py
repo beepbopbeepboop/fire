@@ -2249,7 +2249,7 @@ def _cpp_generator_call_slot_pairs(gen, call, api, sub_params, defaults, *,
                                    leading=(), tail=(), pad_upto=None,
                                    label=''):
     """Bind one compiled-generator call's arguments to the callee's parameter
-    SLOTS, returning `[(expression, source_ctype_or_None), ...]` in slot order.
+    SLOTS, returning `[(Ex expression, source_ctype_or_None), ...]` in slot order.
 
     This is the ONE argument-to-slot binder shared by every compiled-generator
     delegation the coroutine body emitter emits (`<base>_start(...)` in
@@ -2305,7 +2305,7 @@ def _cpp_generator_call_slot_pairs(gen, call, api, sub_params, defaults, *,
         if pos >= n:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"{label}: too many arguments (the callee takes {n})")
-        slots[pos] = (_pfx, _pct)
+        slots[pos] = (_as_ex(_pfx), _pct)
         supplied += 1
         pos += 1
     for _aa in call.args:
@@ -2352,7 +2352,7 @@ def _cpp_generator_call_slot_pairs(gen, call, api, sub_params, defaults, *,
         if pos >= n:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"{label}: expected {n} argument(s), got more")
-        slots[pos] = (_tfx, _tct)
+        slots[pos] = (_as_ex(_tfx), _tct)
         supplied += 1
         pos += 1
     for _si in range(pad_upto):
@@ -2363,7 +2363,7 @@ def _cpp_generator_call_slot_pairs(gen, call, api, sub_params, defaults, *,
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"{label}: expected {n} argument(s), got {supplied} "
                 f"(no default at slot {_si})")
-        slots[_si] = (gen._default_expr_to_pair(_dv, cxx=True)[1], None)
+        slots[_si] = (ex_text(gen._default_expr_to_pair(_dv, cxx=True)[1]), None)
     for _si in range(n):
         if slots[_si] is None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
@@ -2449,7 +2449,7 @@ def _cpp_generator_start_kwargs_expr(gen, call, api, sub_params, defaults):
             return None
         _gv = f"{uid}_p{_i}"
         lookups.append((_nm, _ct, _gv))
-        cargs.append(_gv)
+        cargs.append(ex_text(_gv))
     lines = []
     for _nm, _ct, _gv in lookups:
         _dval = gen._default_expr_to_pair(defaults_by_name[_nm], cxx=True)[1]
@@ -2472,7 +2472,7 @@ def _cpp_generator_start_kwargs_expr(gen, call, api, sub_params, defaults):
     for _i, _ae in enumerate(cargs):
         _pt = sub_params[_i]
         if isinstance(_pt, str) and gimple_ctypes.TypeLattice.ends_in_star(_pt):
-            cast_args.append(f"({_pt})({_ae})")
+            cast_args.append(_cpp_cast_ex(_pt, _paren_ex(_ae)))
         else:
             cast_args.append(_ae)
     _gsk = Ex('lambda')
@@ -2522,7 +2522,7 @@ def _cpp_emit_generator_start_expr(gen, call, api) -> Ex:
         _pt = sub_params[_i]
         _at = arg_ctypes[_i]
         if isinstance(_pt, str) and gimple_ctypes.TypeLattice.ends_in_star(_pt):
-            cargs.append(f"({_pt})({_ae})")
+            cargs.append(_cpp_cast_ex(_pt, _paren_ex(_ae)))
         elif (isinstance(_pt, str) and gimple_ctypes.TypeLattice.is_number_scalar(_pt)
               and isinstance(_at, str) and gimple_ctypes.TypeLattice.ends_in_star(_at)):
             # A pointer value into a scalar parameter: the callee's own C
@@ -2534,7 +2534,7 @@ def _cpp_emit_generator_start_expr(gen, call, api) -> Ex:
             # 'int64_t'"). Real: read_table's `lines =
             # strutil._iter_significant_lines(infile)` when `infile` is a
             # container-shaped local.
-            cargs.append(f"(int64_t)(intptr_t)({_ae})")
+            cargs.append(_cpp_cast_ex('int64_t', _cpp_cast_ex('intptr_t', _paren_ex(_ae))))
         else:
             cargs.append(_ae)
     base = api['base']
@@ -2643,15 +2643,16 @@ def _cpp_nested_generator_api(gen, name: str):
         (getattr(gen, '_cpp_gen_self_name', None), name))
 
 
-def _cpp_call_arg_expr(gen, a):
-    """One call-argument expression for a compiled-generator/coroutine call.
+def _cpp_call_arg_expr(gen, a) -> Ex:
+    """One call-argument expression for a compiled-generator/coroutine call, as an Ex.
     A list LITERAL has no valid C++ text at an argument position (`_cpp_expr`
     lowers it to a braced-init-list, and `(MojoList *)({...})` is invalid
     C++), so it becomes a real MojoList* via `_cpp_list_literal_arg_expr`.
-    Everything else is `_cpp_expr` unchanged."""
+    Everything else is `_cpp_expr_ex` unchanged. Text is rendered only at the
+    statement or expression edge that needs it."""
     if isinstance(a, gimple_ctypes.ListExpr):
-        return _cpp_list_literal_arg_expr(gen, a).show()
-    return gen._cpp_expr(a)
+        return _cpp_list_literal_arg_expr(gen, a)
+    return gen._cpp_expr_ex(a)
 
 
 def _cpp_list_literal_arg_expr(gen, lit) -> Ex:
@@ -4984,14 +4985,14 @@ def _cpx_call_ident(gen, e) -> Ex:
         if _lct == 'MojoSet *':
             return _cpp_call_ex('mojo_set_len', [_cpp_as('MojoSet *', args[0])])
         if gimple_ctypes.TypeLattice.is_cstr(_lct):
-            return _cpp_call_ex('mojo_strlen', [f"(char *)({args[0]})"])
+            return _cpp_call_ex('mojo_strlen', [_cpp_cast_ex('char *', _paren_ex(args[0]))])
         # mojo_len takes the boxed int64_t representation of a
         # container/string pointer — exactly what this emitter's
         # locals hold.
         if gimple_ctypes.TypeLattice.is_word_or_none(_lct):
             # an unsolved word: ask the runtime what it is
-            return _cpp_call_ex('mojo_len_word', [f"(int64_t)({args[0]})"])
-        return _cpp_call_ex('mojo_len', [f"(int64_t)({args[0]})"])
+            return _cpp_call_ex('mojo_len_word', [_cpp_cast_ex('int64_t', _paren_ex(args[0]))])
+        return _cpp_call_ex('mojo_len', [_cpp_cast_ex('int64_t', _paren_ex(args[0]))])
     if (fname in ('str', 'String') and len(e.args) == 1
             and not gen._locally_binds_name(fname)):
         # `str(x)` / Mojo's `String(x)` stringification. Dispatch
@@ -5014,12 +5015,12 @@ def _cpx_call_ident(gen, e) -> Ex:
         except Exception:
             _sct = None
         if gimple_ctypes.TypeLattice.is_cpp_int_scalar(_sct):
-            return _cpp_call_ex('mojo_str_from_int', [f"(int64_t)({args[0]})"])
+            return _cpp_call_ex('mojo_str_from_int', [_cpp_cast_ex('int64_t', _paren_ex(args[0]))])
         if gimple_ctypes.TypeLattice.is_double(_sct):
-            return _cpp_call_ex('mojo_repr_float', [f"(double)({args[0]})"])
+            return _cpp_call_ex('mojo_repr_float', [_cpp_cast_ex('double', _paren_ex(args[0]))])
         if gimple_ctypes.TypeLattice.is_cstr(_sct):
-            return _paren_ex(_cpp_cast_ex('char *', _paren_ex(ex_text(args[0]))))
-        return _cpp_call_ex('mojo_str', [f"(void *)({args[0]})"])
+            return _paren_ex(_cpp_cast_ex('char *', _paren_ex(args[0])))
+        return _cpp_call_ex('mojo_str', [_cpp_cast_ex('void *', _paren_ex(args[0]))])
     if (fname == 'int' and len(e.args) == 1
             and not gen._locally_binds_name('int')):
         # int(x) — mirrors the ordinary GIMPLE path's own
@@ -5059,8 +5060,8 @@ def _cpx_call_ident(gen, e) -> Ex:
                 if gen._cpp_declared is not None
                 and isinstance(_int_arg, gimple_ctypes.IdentExpr) else None)
         if gimple_ctypes.TypeLattice.is_cstr(_ict):
-            return _cpp_call_ex('mojo_make_int', [f"(char *)({args[0]})"])
-        return _paren_ex(_cpp_cast_ex('int64_t', _paren_ex(ex_text(args[0]))))
+            return _cpp_call_ex('mojo_make_int', [_cpp_cast_ex('char *', _paren_ex(args[0]))])
+        return _paren_ex(_cpp_cast_ex('int64_t', _paren_ex(args[0])))
     if (fname == 'float' and len(e.args) == 1
             and not gen._locally_binds_name('float')):
         # float(x) — same shape as int(x) just above, mirroring
@@ -5071,14 +5072,14 @@ def _cpx_call_ident(gen, e) -> Ex:
                 if gen._cpp_declared is not None
                 and isinstance(_flt_arg, gimple_ctypes.IdentExpr) else None)
         if gimple_ctypes.TypeLattice.is_cstr(_fct):
-            return _cpp_call_ex('mojo_make_float', [f"(char *)({args[0]})"])
-        return _paren_ex(_cpp_cast_ex('double', _paren_ex(ex_text(args[0]))))
+            return _cpp_call_ex('mojo_make_float', [_cpp_cast_ex('char *', _paren_ex(args[0]))])
+        return _paren_ex(_cpp_cast_ex('double', _paren_ex(args[0])))
     if (fname == 'repr' and len(e.args) == 1
             and not gen._locally_binds_name('repr')):
-        return _cpp_call_ex('mojo_repr_str_or_none', [f"(char *)({args[0]})"])
+        return _cpp_call_ex('mojo_repr_str_or_none', [_cpp_cast_ex('char *', _paren_ex(args[0]))])
     if (fname == 'hasattr' and len(e.args) == 2
             and not gen._locally_binds_name('hasattr')):
-        return _cpp_call_ex('mojo_hasattr', [f"(int)({args[0]})", args[1]])
+        return _cpp_call_ex('mojo_hasattr', [_cpp_cast_ex('int', _paren_ex(args[0])), args[1]])
     if fname == 'getattr' and not gen._locally_binds_name('getattr'):
         # `getattr(obj, name_expr)` — dynamic, runtime-string-keyed
         # attribute lookup (save_env.py's `resource_info`:
@@ -5089,9 +5090,9 @@ def _cpx_call_ident(gen, e) -> Ex:
         # uses for a member read off a word. A 2-arg miss raises
         # AttributeError; a 3-arg miss yields the default.
         if len(e.args) == 2:
-            return _cpp_call_ex('mojo_getattr_any', [f"(void *)(intptr_t)({args[0]})", f"(char *)({args[1]})"])
+            return _cpp_call_ex('mojo_getattr_any', [_cpp_cast_ex('void *', _cpp_cast_ex('intptr_t', _paren_ex(args[0]))), _cpp_cast_ex('char *', _paren_ex(args[1]))])
         if len(e.args) == 3:
-            return (_cpp_call_ex('mojo_getattr_default', [f"(void *)(intptr_t)({args[0]})", f"(char *)({args[1]})", f"(int64_t)({args[2]})"]))
+            return (_cpp_call_ex('mojo_getattr_default', [_cpp_cast_ex('void *', _cpp_cast_ex('intptr_t', _paren_ex(args[0]))), _cpp_cast_ex('char *', _paren_ex(args[1])), _cpp_cast_ex('int64_t', _paren_ex(args[2]))]))
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"getattr() with {len(e.args)} arguments is not a "
             "supported compiled generator/coroutine shape")
@@ -5243,8 +5244,7 @@ def _cpx_call_ident(gen, e) -> Ex:
             _cpp_opaque("struct _W { int64_t w; operator int64_t() const { return w; } "
                         "operator char *() const { return (char *)w; } "
                         + gen._cpp_word_container_operator('MojoList', False) + " };"),
-            _cpp_instr('decl', "MojoList *_mg_cp = mojo_list_copy("
-                               f"mojo_iter_word((int64_t)(intptr_t)({args[0]})))"),
+            _cpp_instr('decl', ex_cat("MojoList *_mg_cp = mojo_list_copy(", _cpp_iter_word_ex(args[0]), ")")),
                 # `tuple(x)` IS a tuple in Python (a `list(x)` copy is
                 # not): mark the copy so a later repr uses parens and
                 # a tuple-specific consumer sees the same kind. The
@@ -5513,13 +5513,13 @@ def _cpx_call_ident(gen, e) -> Ex:
                 or (isinstance(_mm_arg, gimple_ctypes.IdentExpr)
                     and _mm_arg.name in getattr(gen, '_cpp_list_iter_cursor', {})))
             if _mm_is_iter:
-                return _cpp_call_ex(f"mojo_{fname}", [f"(void *)({args[0]})"])
+                return _cpp_call_ex(f"mojo_{fname}", [_cpp_cast_ex('void *', _paren_ex(args[0]))])
         elif len(e.args) >= 2:
             _mv = gen._cpp_fresh_name("_mg_mm")
-            _body = f"int64_t {_mv} = (int64_t)({args[0]}); "
+            _body = f"int64_t {_mv} = (int64_t)({args[0].show()}); "
             _ai = 1
             while _ai < len(args):
-                _a = args[_ai]
+                _a = args[_ai].show()
                 if fname == 'min':
                     _cmp = f"_c < {_mv}"
                 else:
@@ -5606,9 +5606,9 @@ def _cpx_call_ident(gen, e) -> Ex:
                 _fn = 'mojo_list_sorted_str'
             else:
                 _fn = 'mojo_sorted'
-            _res = f"{_fn}((void *)({args[0]}))"
+            _res = _cpp_call_ex(_fn, [_cpp_cast_ex('void *', _paren_ex(args[0]))])
             if _reverse:
-                _res = f"mojo_reversed((void *)({_res}))"
+                _res = _cpp_call_ex('mojo_reversed', [_cpp_cast_ex('void *', _paren_ex(_res))])
             return _cpp_as('MojoList *', _res)
         if _iter_ctype not in ('MojoList *', None):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
@@ -5948,7 +5948,7 @@ def _cpx_call_ident(gen, e) -> Ex:
                 if gimple_ctypes.TypeLattice.is_cpp_int_scalar(_act):
                     _pack_stmts.append(
                         f"mojo_list_append_int({_listvar}, "
-                        f"(int64_t)({args[_i]}));")
+                        f"(int64_t)({args[_i].show()}));")
                 else:
                     # The body reads `a[i]` through the int64-box
                     # getter (this narrow model tracks no
@@ -6061,11 +6061,11 @@ def _cpx_call_ident(gen, e) -> Ex:
         _cargs = ', '.join(
             f"(char *)(intptr_t)({a})" if (fname in ('mojo_os_scandir',) or
                                           (fname == 'mojo_os_openat' and i == 0))
-            else f"(int64_t)({a})" for i, a in enumerate(args))
+            else f"(int64_t)({a})" for i, a in enumerate([x.show() for x in args]))
         return _as_ex(_cpp_rethrow_pending(_rt, f"{fname}({_cargs})"))
     if fname == 'mojo_list_slice_word' and len(args) == 6:
         return _cpp_call_ex('mojo_list_slice_word',
-                            [f"(int64_t)(intptr_t)({args[0]})"] + [f"(int64_t)({a})" for a in args[1:]])
+                            [_cpp_cast_ex('int64_t', _cpp_cast_ex('intptr_t', _paren_ex(args[0])))] + [_cpp_cast_ex('int64_t', _paren_ex(a)) for a in args[1:]])
     if fname in (
             'mojo_c_getenv', 'mojo_platform_system',
             'mojo_platform_machine', 'mojo_stdin_read',
@@ -6081,7 +6081,7 @@ def _cpx_call_ident(gen, e) -> Ex:
     if fname == 'mojo_fsencode_w' and len(args) == 1:
         # the argument is a str pointer or a bytes pointer or a word: the
         # runtime tells them apart, so pass the bits as a word
-        return _cpp_call_ex('mojo_fsencode_w', [f"(int64_t)(intptr_t)({args[0]})"])
+        return _cpp_call_ex('mojo_fsencode_w', [_cpp_cast_ex('int64_t', _cpp_cast_ex('intptr_t', _paren_ex(args[0])))])
     # A call to a C-stdlib / POSIX function with a curated, known
     # signature (`_LIBC_SIGS`) — e.g. `close(fd)` inside a compiled
     # generator (Lib/os.py's `_fwalk`, reached via
@@ -10462,15 +10462,14 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     # An argument whose own C type differs from the callee's slot (a string
     # into an unsolved `int64_t` word parameter) is converted by `_mj_w`.
     arg_exprs = [(_ae if (_i < len(sub_params) and sub_params[_i] in ('double', 'float'))
-                  or _i >= len(sub_params) else f"_mj_w({_ae})")
+                  or _i >= len(sub_params) else _cpp_call_ex('_mj_w', [_ae]))
                  for _i, _ae in enumerate(arg_exprs)]
-    args_text = ', '.join(arg_exprs)
     lines = [_cpp_ir_line(indent, 'block')]
     if index_var is not None:
         if index_var not in declared:
             declared[index_var] = 'int64_t'
         lines.append(_cpp_assign_line(f"int64_t {index_var}", f"({index_start_expr})", indent + '    '))
-    lines.append(_cpp_ir_line(indent + '    ', 'decl', f"_mojogen_sub_guard {guard}{{ {base}_start({args_text}), &{base}_destroy }}"))
+    lines.append(_cpp_ir_line(indent + '    ', 'decl', ex_cat(f"_mojogen_sub_guard {guard}{{ ", _cpp_call_ex(f"{base}_start", arg_exprs), f", &{base}_destroy }}")))
     lines.append(_cpp_ir_line(indent + '    ', 'while', f"{base}_resume({guard}.g)"))
     body_indent = indent + '        '
     if is_tuple:
@@ -13686,11 +13685,11 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[Instr]:
         if (isinstance(_an, gimple_ctypes.IdentExpr)
                 and getattr(gen, '_cpp_declared', None) is not None
                 and gimple_ctypes.TypeLattice.is_word(gen._cpp_declared.get(_an.name))):
-            arg_exprs[_ai] = f"({_pt})(intptr_t)({arg_exprs[_ai]})"
+            arg_exprs[_ai] = _cpp_cast_ex(_pt, _cpp_cast_ex('intptr_t', _paren_ex(arg_exprs[_ai])))
     for _ai in range(len(arg_exprs)):
         if _ai < len(sub_params) and gimple_ctypes.TypeLattice.is_word(sub_params[_ai]) and not re.fullmatch(
-                r'-?\d+|true|false', arg_exprs[_ai].strip()):
-            arg_exprs[_ai] = f"(int64_t)(intptr_t)({arg_exprs[_ai]})"
+                r'-?\d+|true|false', arg_exprs[_ai].show().strip()):
+            arg_exprs[_ai] = _cpp_cast_ex('int64_t', _cpp_cast_ex('intptr_t', _paren_ex(arg_exprs[_ai])))
     sub_base = api['base']
     # Record a forward declaration for this callee's four `extern "C"`
     # wrappers when its own unit comes LATER in this .cpp -- see
@@ -13709,7 +13708,6 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[Instr]:
                          api.get('value_ctype') or 'int64_t')))
     gen._yield_from_seq = getattr(gen, '_yield_from_seq', 0) + 1
     guard = f"__mojogen_sub{gen._yield_from_seq}"
-    args_text = ', '.join(arg_exprs)
     # `yield from` forwards `send()` to the sub-generator, as Python does. The
     # first step is Python's implicit `next()` on the sub-generator, which is
     # `{sub_base}_resume` (it delivers the None box). Every later step hands
@@ -13734,7 +13732,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[Instr]:
         _fw_step = f"__mojo_gen_resume ((int64_t)(intptr_t){guard}.g, {_fw})"
     return [
         _cpp_ir_line(indent, 'block'),
-        _cpp_ir_line(indent + '    ', 'decl', f"_mojogen_sub_guard {guard}{{ {sub_base}_start({args_text}), &{sub_base}_destroy }}"),
+        _cpp_ir_line(indent + '    ', 'decl', ex_cat(f"_mojogen_sub_guard {guard}{{ ", _cpp_call_ex(f"{sub_base}_start", arg_exprs), f", &{sub_base}_destroy }}")),
         *_fw_decl,
         _cpp_assign_line(f"int64_t {_fw}", "mojo_box_none()", indent + '    '),
         _cpp_ir_line(indent + '    ', 'if', _fw_first),
