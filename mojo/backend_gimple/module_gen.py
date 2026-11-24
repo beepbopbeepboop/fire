@@ -21732,7 +21732,7 @@ def gen_module_impl(self, stmts: list):
         # into EVERY module's artifact, so every closure carried a stub
         # definition whether or not a call reached it, and the closure check
         # (`fire.py --dump-full`, bootstrap-stage1-transitive) reads that as an
-        # incomplete closure (bugs/mid/CODEGEN_prelude_sort_is_not_resolved.md).
+        # incomplete closure (bugs/hard/CODEGEN_prelude_sort_is_not_resolved.md).
         # FIXME: should be void sort(MojoList *list) [takes MojoList * boxed as int64_t]; variadic so both int and pointer call sites typecheck
         ('Span_byte_length',       'int64_t Span_byte_length(...);'),
         ('_stat_macos',            'int64_t _stat_macos(...);'),
