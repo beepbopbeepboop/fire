@@ -807,3 +807,32 @@ Status: stage 7 T1 (statement helpers return `Instr`) and T2 (statement printers
 master and verified. T3 to T6 are done since (see their entries). Status (2026-11-23): still open: T7 and T8.
 This file is the only GIR document; the dated history of
 the stage 7 work is in git history (the stage 6 and 7 bug log, deleted 2026-11-23).
+
+## Selfhost closure: remaining errors (2026-11-24)
+
+`python3 test_selfhost.py` compiles the whole compiler closure into one C translation unit and
+runs gcc on it. On master it failed with 67 gcc `error:` lines at `8f244354d`. The state after
+the fixes merged on 2026-11-24:
+
+Fixed (merged; each is a real fix, not a workaround):
+- `expected expression before '('` (13): `_ensure_local` materialises a literal cast into a
+  register (`92e4e806a`, coro for-loop family).
+- `invalid operands to binary` on doubles (13): a may-box operand of a bitwise operator is read
+  as its integer (`65454bf70`, float8 family).
+- `'_FLOAT'/'_SIGNED'/'_UNSIGNED' undeclared` (3) and `makes integer from pointer` for
+  `MojoDict *` in `emit_funcs.py` (2): an imported container global keeps its real C type, and a
+  global_var export is not a function's return type (`77abd738a`, `fa8f13afa`, funcptr family).
+- The `_mj_w` and struct-constructor `Ex` reprs in generated C++ (`ead016231`, `9ba501e2b`), which
+  broke `test_gimple_generator_runner.py` (520/0 on master).
+
+Open, with bug docs:
+- `bugs/GIR_selfhost_extern_return_types.md`: `conflicting types` (30). A WIP commit
+  (`e9e4ea4a9`, merged to master as `913aa3780`) removes those 30 but adds pointer-conversion
+  errors, so it is RED. The fix is a pre-pass that records each definer's return type before any
+  importer is generated.
+- `bugs/GIR_selfhost_unexplained_error_kinds.md`: `'Scope' has no member 'declared_types'` (11),
+  `'MojoFunction' has no member 'param_types'` (10), `non-trivial conversion in 'component_ref'`
+  (10), `'Interpreter' has no member '_try_depth'` (8), and the smaller rows. Not diagnosed.
+
+The self-host gate (`bootstrap-stage1-transitive`, disabled, `bugs/gate-bootstrap-stage1-transitive.md`)
+stays disabled until the closure compiles with zero gcc errors and the stage 2/3 chain runs.
