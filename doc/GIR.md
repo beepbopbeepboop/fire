@@ -597,7 +597,7 @@ functions returning `str`; the three statement helpers have 186 (`_cpp_ir_line`)
 - [x] T1. Statement helpers return `Instr` (with `indent` set), not `str`: `_cpp_ir_line`, `_cpp_assign_line`,
       `_cpp_call_line`, `_cpp_instr`, `_cpp_opaque`, `_cpp_if_break_line`. Consumers that test a line as text (for
       example `'co_yield' in ln` over `finally_lines`) must test the Instr's `show()`.
-- [ ] T2. The 39 statement printers return `list[Instr]`.
+- [x] T2. The statement printers return `list[Instr]` (merged `cec0b197f`; verified on master 2026-11-23).
 - [ ] T3. The 11 `-> str` functions become `Ex` (or stay as text only at a named boundary).
 - [ ] T4. The 24 `.show()` boundaries are removed as their consumers take `Ex`/`Instr`.
 - [ ] T5. One rendering edge: the function-assembly site renders each `Instr` with `.line()` (the one `'\n'.join` site).
