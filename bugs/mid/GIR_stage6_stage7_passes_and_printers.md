@@ -1105,3 +1105,23 @@ expression leaves in `_cpx_binary_op` (three lambda-body returns), `_cps_return_
 
 Verified: `c_oracle check --base 9b998053c` identical on all 285 pydiff programs and all 35 coroutine programs;
 `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
+
+## Todo: what stage 7 still needs (measured 2026-11-23)
+
+Measured on master with an AST pass over `cpp_core.py`: 0 statement f-strings left; 0 expression f-string leaves left
+(the last two are ported on this branch); 24 `.show()` boundaries; 39 functions returning `list[...]` of statement text; 11
+functions returning `str`; the three statement helpers have 186 (`_cpp_ir_line`), 112 (`_cpp_assign_line`), 52
+(`_cpp_call_line`) and 60 (`_cpp_instr`) call sites, plus 20 `_cpp_opaque` and 3 `_cpp_if_break_line`.
+
+- [ ] T1. Statement helpers return `Instr` (with `indent` set), not `str`: `_cpp_ir_line`, `_cpp_assign_line`,
+      `_cpp_call_line`, `_cpp_instr`, `_cpp_opaque`, `_cpp_if_break_line`. Consumers that test a line as text (for
+      example `'co_yield' in ln` over `finally_lines`) must test the Instr's `show()`.
+- [ ] T2. The 39 statement printers return `list[Instr]`.
+- [ ] T3. The 11 `-> str` functions become `Ex` (or stay as text only at a named boundary).
+- [ ] T4. The 24 `.show()` boundaries are removed as their consumers take `Ex`/`Instr`.
+- [ ] T5. One rendering edge: the function-assembly site renders each `Instr` with `.line()` (the one `'\n'.join` site).
+- [ ] T6. Call-slot text lists (`_cpp_call_arg_expr` and its consumers) take `Ex`.
+- [ ] T7. Verify: `test_gimple_cpp_core_arms.py`; `c_oracle check` identical on all 285 pydiff and all coroutine
+      programs; `compile_stdlib.py` `FAILED: 0`, no skips; the transcription-only sites (listed in the Status entries)
+      probed until each is reached or its probe is recorded as impossible.
+- [ ] T8. Done criterion: delete this doc in the same commit, with `python3 tools/dangling_doc_refs.py --ratchet`.

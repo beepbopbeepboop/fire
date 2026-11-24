@@ -6480,7 +6480,7 @@ def _cpx_slice_expr(gen, e) -> Ex:
             return ex_text(gen._cpp_container_cast_prefix('MojoList', True) + _cpp_call_ex(
                 'mojo_word_slice_step', [f"(int64_t)({gen._cpp_expr(_sx)})", _hs,
                 f"(int64_t)({_st0})", _he, f"(int64_t)({_sp0})", f"(int64_t)({step})"]).show())
-        return _paren_ex(ex_text(f"{start}, {stop}, {step}"))
+        return _paren_ex(_cpp_comma_ex(start, _cpp_comma_ex(stop, step)))
     # Python `s[i:j]` on a string (this emitter's `char *`) → the
     # substring, via the same mojo_cstr_slice helper the GIMPLE path's
     # _lower_slice uses for a char* slice (pprint.py's
@@ -8889,7 +8889,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         _vfp.a = _vf
         _vf_call = _cpp_call_ex('mojo_vararg_fn_new', [
             _cpp_cast_ex('void *', _vfp),
-            _cpp_cast_ex('void *', ex_text(f"new {_sf}({val})")),
+            _cpp_cast_ex('void *', _cpp_call_ex(f"new {_sf}", [val])),
             '0', '1', '1'])
         return [_cpp_assign_line(cpp_name, _cpp_cast_ex('int64_t', _cpp_cast_ex('intptr_t', _vf_call)), indent)]
     return [_cpp_assign_line(ex_text(cpp_name), ex_text(val), indent)]
