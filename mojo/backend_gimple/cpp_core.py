@@ -423,6 +423,12 @@ def _cpp_pad_struct_method_call_args(gen, sym: str, bare: str,
     (unknown arity); kwargs are not modeled here (the coroutine emitter's
     CallExpr handling never produced them for these branches).
     """
+    # The contract is a list of C argument TEXT (the caller joins it). An
+    # argument that arrives as an `Ex` is rendered once here, on every path:
+    # formatting the object itself put its repr into the C (`(int64_t)(<Ex
+    # object at 0x...>)`), and that is the generator runner's struct-ctor
+    # failure.
+    args = [a.show() if isinstance(a, Ex) else a for a in args]
     expected = gen.func_param_types.get(sym) or gen.func_param_types.get(bare)
     if not expected or len(expected) == 0 or '...' in expected:
         return args
