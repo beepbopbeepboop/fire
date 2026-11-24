@@ -91,9 +91,16 @@ shape: its str arrives through a TUPLE-UNPACK target (`s, n = pair()`), which is
 not a literal, so the mixed-evidence arm never sees a `char *` for it. It still
 raises the `_gmh_refuse_mixed_container_params` refusal -- whose stated reason
 ("the `int64_t` box cannot tell a `MojoList *` from a `char *`") is now false,
-since the word dispatch does exactly that. Next step is to extend the tuple-slot
-exemption to a slot whose callee returns a str beside a scalar, or to drop the
-refusal for a param the call sites prove mixed.
+since the word dispatch does exactly that.
+
+A first attempt at this case was reverted: teaching `_unpack_from_scalar_slot`
+to separate a STRING-returning slot from an int one and retyping to `int64_t`
+from inside the refusal built successfully but SEGFAULTED at run time -- the
+write does not survive whatever promotes the container guess after the refusal
+runs, so it traded a clean compile-time refusal for a crash. The refusal is the
+better failure and is restored. The real fix needs the str slot to feed the same
+`gen._mixed_kind_params` exemption BEFORE `_gmh_reconcile_param_container_kinds`
+reads it, not from the refusal.
 
 
 - **Last known working:** `128bc1eb82` integrate fix-proof-fix-gate-type-string-ratchet
