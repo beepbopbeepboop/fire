@@ -1463,8 +1463,7 @@ def register_module_member_value(gen, module_name: str, member_name: str):
     # own `int64_t` is only a default for an unannotated `def`; left in place
     # it declares `int64_t sym (void)` against a definition that returns
     # `MojoList *` (measured: `import fgn_b; fgn_b.make()` conflicting types).
-    _measured_ret = _as_dict(getattr(gen, '_home_def_return_types', None)).get(
-        _pair_key(sanitize_module_qualifier(gen, definer), def_name))
+    _measured_ret = gen._home_def_return_type_of(sanitize_module_qualifier(gen, definer), def_name)
     if _measured_ret:
         _ret = _as_str(_measured_ret)
         _entry['c_return_type'] = _ret

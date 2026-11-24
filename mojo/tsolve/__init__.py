@@ -20,6 +20,10 @@ class Solution:
     def __init__(self, prog):
         self.prog: object = prog
 
+    def knows(self, path: str, name: str) -> bool:
+        """True when `name` in module `path` is a definition the closure has."""
+        return func_key(path, name) in self.prog.fns
+
     def ret_sty(self, path: str, name: str):
         """The solved return type of `name` in module `path`, as an STy.
 

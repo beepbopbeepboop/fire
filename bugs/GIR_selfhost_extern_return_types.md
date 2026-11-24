@@ -238,3 +238,18 @@ and no `conflict` or `undecided` line. Commit with step 4 if you prefer.
   30 errors, 32 back-edge reads) and the existing engine ruled out as the early
   resolver (it is not pure). The design above and `bugs/GIR_type_solver.md` were
   written. Next: step 0.
+
+- 2026-11-24 (session 2): steps 0-2 landed (`2812a27c0`, `61fbbf591`, `fb2a9269b`). Steps 3-5 are
+  in the working tree and verified as follows: the import-cycle program (`test_import_cycle_sigs.py`)
+  prints what `python3 main.py` prints, and its ledger has only `early a.make` and `early a.name_of`
+  (no `conflict`, no `undecided`); byte-identical C on 286 pydiff and 35 coroutine programs against
+  `fb2a9269b`; `compile_stdlib.py` PASSED 610, FAILED 0, no skips.
+  Deviations from the plan above, decided while implementing:
+  - The solver's loader resolves through `_module_candidate_paths_from`, the lookup the compile
+    uses, not `imports.resolve_source` (the plan's premise was wrong about what the compile uses).
+  - `parse_module_source` lives in `mojo/middle/module_parse.py`, a leaf module (no import cycle).
+  - The early decision answers only for NAMES THE CLOSURE DEFINES (`Solution.knows`). An
+    imported-symbol key (`a_make_<hash>`) is a symbol, not a definition, so it is not decided.
+  - A lookup by an imported alias uses the definer's `original_name` (`_func_csym`).
+  NOT done: the self-host translation unit acceptance (item 2 of Acceptance above), and the
+  `--ratchet` / doc deletion, which depend on it.

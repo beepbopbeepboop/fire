@@ -2510,7 +2510,7 @@ def _commit_home_def_pts(gen, node) -> list:
     return sig
 
 
-def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> None:
+def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> str:
     """Publish one free function's DEFINITION-side return ctype into the
     whole-program-shared `_home_def_return_types`, under the qualifier its own
     emitted symbol was built from — the return-type twin of
@@ -2536,22 +2536,38 @@ def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> None:
     knows most. That is the discipline `func_return_types[bare_name]` itself
     follows, and it is why `_func_csym` re-mirrors on every call rather than
     freezing the first value it sees.
+
+    Returns the EFFECTIVE ctype, which the definer must use for its own
+    function: the early answer the type solver froze for this name when an
+    importer needed it before this unit ran (`_early_return_decision`). A
+    frozen answer wins over the measured one, and a disagreement is a ledger
+    `conflict` line (bugs/GIR_type_solver.md, S1; the acceptance count is 0).
+    Without a freeze, or when nothing is recorded, the measured ctype comes back.
     """
     store = getattr(gen, '_home_def_return_types', None)
     if store is None or not ctype:
-        return
+        return ctype
     if id(stmt) not in getattr(gen, '_local_top_level_func_stmt_ids', ()):
-        return
+        return ctype
     # Overload sets: see `_commit_home_def_pts`. The bare-name key can hold
     # only the canonical overload's answer; the others publish their own
     # return type under their own symbol at the definition (gen_func).
     if not _def_is_canonical(gen, stmt):
-        return
+        return ctype
     # Never raises for a name this unit defines: `_func_qualifier`'s tier-1
     # check (`bare_name in _local_top_level_func_names`) answers from the
     # module being compiled itself, ahead of the `_AMBIGUOUS_FUNC_HOME`
     # refusal that tiers 2/3 can raise.
-    store[_pair_key(_func_qualifier(gen, bare_name), bare_name)] = ctype
+    qualifier = _func_qualifier(gen, bare_name)
+    key = _pair_key(qualifier, bare_name)
+    frozen = gen._tsolve_frozen.get(key)
+    if frozen is not None:
+        if frozen != ctype:
+            gen._tsolve_ledger.append('conflict ' + qualifier + '.' + bare_name
+                                      + ' early=' + frozen + ' measured=' + ctype)
+        return frozen
+    store[key] = ctype
+    return ctype
 
 
 def _home_def_return_type(gen, qualifier: str, bare_name: str):
@@ -2576,9 +2592,44 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     about exactly that definition.
     """
     store = getattr(gen, '_home_def_return_types', None)
-    if not store:
+    if store is None:
         return None
-    return store.get(_pair_key(qualifier, bare_name))
+    key = _pair_key(qualifier, bare_name)
+    got = store.get(key)
+    if got is None:
+        return _early_return_decision(gen, qualifier, bare_name)
+    return got
+
+
+def _early_return_decision(gen, qualifier: str, bare_name: str):
+    """The solver's return ctype for a definition whose module has started but has
+    not finished its return-type analysis (an import-cycle back-edge): stored and
+    frozen, so the importer and the definer agree. None otherwise.
+
+    A module reading its OWN functions before its own return passes run is not a
+    back-edge (its passes are about to answer), so it is not decided here.
+    Deciding it would freeze every program's functions, not just cyclic ones."""
+    sol = getattr(gen, '_tsolve', None)
+    if sol is None:
+        return None
+    path = gen._qualifier_paths.get(qualifier)
+    if not path or path in gen._analyzed_paths:
+        return None
+    if gen._current_filename and path == os.path.abspath(gen._current_filename):
+        return None
+    # Only a NAME the closure defines is a decision. An imported-symbol key (a
+    # mangled `a_make_<hash>`) is not a definition, so there is nothing to decide.
+    if not sol.knows(path, bare_name):
+        return None
+    ctype = sol.ret_ctype(gen, path, bare_name)
+    key = _pair_key(qualifier, bare_name)
+    if ctype is None:
+        gen._tsolve_ledger.append('undecided ' + qualifier + '.' + bare_name)
+        return None
+    gen._home_def_return_types[key] = ctype
+    gen._tsolve_frozen[key] = ctype
+    gen._tsolve_ledger.append('early ' + qualifier + '.' + bare_name + ' ' + ctype)
+    return ctype
 
 
 def _imported_def_pts(gen, bare_name: str) -> list | None:
@@ -3800,7 +3851,10 @@ def _func_csym_impl(gen, bare_name: str, def_pts: list | None = None) -> str:
         _ov_set = (getattr(gen, '_local_def_overloads', None) or {}).get(bare_name)
         if _ov_set and len(_ov_set) >= 2:
             return mangled
-        _eff_ret = _home_def_return_type(gen, qualifier, bare_name)
+        # The store is keyed by the DEFINER's name, which is `_orig` for an
+        # imported alias (the same name the symbol base above was built from).
+        _def_name = _orig if (_orig and _orig != bare_name) else bare_name
+        _eff_ret = _home_def_return_type(gen, qualifier, _def_name)
         if _eff_ret is None:
             _eff_ret = gen.func_return_types.get(bare_name)
         if _eff_ret is not None:
@@ -4189,6 +4243,9 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         if node.name == 'main' and gimple_ctypes.TypeLattice.is_void(ret_type):
             ret_type = 'int64_t'
 
+    # The definer's answer, made effective first: a frozen early answer (the
+    # solver decided this return type for an importer) wins over the measured one.
+    ret_type = _record_home_def_return_type(gen, node, node.name, ret_type)
     gen.func_ret_type = ret_type
     gen.current_func_ret_ann = (
         node.return_type if isinstance(node.return_type, str) else '')
@@ -4209,8 +4266,6 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # (generated line 885606) precedes its own definition (885849), so the
     # definition's own answer was not in the slot yet and the call site read
     # elab_intu's `MojoList *`.
-    _record_home_def_return_type(gen, node, node.name, ret_type)
-
     # Run layout solver for struct locals
     solver = gimple_solvers.LayoutSolver(gen.struct_field_types)
     gen._struct_layout = solver.solve(node.params, node.body)

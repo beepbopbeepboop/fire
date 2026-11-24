@@ -2000,6 +2000,14 @@ test('tsolve', [PY, 'test_tsolve.py'], cache=True, mem='tiny',
          for p in glob.glob(os.path.join(REPO, 'mojo', 'tsolve', '*.py'))) + [
          'fire_compiler.py', 'ast_rewriter.py'],
      desc='whole-closure type solver: join/from_annotation/ret_ctype rows, summaries, fixpoint (bugs/GIR_type_solver.md, 4)')
+test('import-cycle-sigs', [PY, 'test_import_cycle_sigs.py'], cache=True, mem='tiny',
+     extra=['test_import_cycle_sigs.py', 'fire.py', 'gimple_codegen.py',
+            'mojo/backend_gimple/emit_funcs.py', 'mojo/backend_gimple/module_gen.py',
+            'mojo/backend_gimple/emit_resolve.py', 'mojo/middle/funcs_shared.py',
+            'mojo/middle/resolve_shared.py', 'mojo/tsolve/__init__.py'] +
+           sorted(os.path.relpath(p, REPO)
+                  for p in glob.glob(os.path.join(REPO, 'mojo', 'tsolve', '*.py'))),
+     desc='an import-cycle back-edge gets the solver return type: output matches python, no conflicts (bugs/GIR_type_solver.md, S1)')
 test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + sorted(
          os.path.relpath(p, REPO)
@@ -4953,7 +4961,7 @@ BUCKETS = {
 
               'reg-conditional-conformance-candidate-diagnostic',
               'interp-tokenizer-oracle',
-              'linkmode', 'no-new-casts', 'gimple-lint', 'tsolve', 'pydiff-ratchet', 'type-string-ratchet', 'nonlocal', 'gimplerunner',
+              'linkmode', 'no-new-casts', 'gimple-lint', 'tsolve', 'import-cycle-sigs', 'pydiff-ratchet', 'type-string-ratchet', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
 # `ptrreg-boxed-str` is master's split-out dedicated group of the
               # pointer-registry harness and `formal-ast` is the batch's

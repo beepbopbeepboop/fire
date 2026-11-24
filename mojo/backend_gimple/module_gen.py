@@ -12500,9 +12500,9 @@ def _gmp_infer_return_types_late(self, all_functions: list) -> None:
             self.var_types = _saved_vt_3b
             self._scan_scratch_top = _scratch_mark_3b
             self.current_func_name = _saved_fcn_3b
-            self.func_return_types[_p3b_s.name] = inferred
-            _ggf_dup._record_home_def_return_type(
+            inferred = _ggf_dup._record_home_def_return_type(
                 self, _p3b_raw, _p3b_s.name, inferred)
+            self.func_return_types[_p3b_s.name] = inferred
 
 
 def _gmp_discover_closures(self, stmts: list) -> None:
@@ -13155,9 +13155,9 @@ def _gmp_infer_return_types(self, stmts: list, all_functions: list) -> None:
             inferred = self._infer_return_type(_as_s_p1.body, _as_s_p1)
             if _as_s_p1.name == 'main' and gimple_ctypes.TypeLattice.is_void(inferred):
                 inferred = 'int64_t'
-            self.func_return_types[_as_s_p1.name] = inferred
-            _ggf_dup._record_home_def_return_type(
+            inferred = _ggf_dup._record_home_def_return_type(
                 self, s, _as_s_p1.name, inferred)
+            self.func_return_types[_as_s_p1.name] = inferred
             self.var_types.clear()
             self.current_func_name = _saved_fcn_p1
 
@@ -13189,9 +13189,8 @@ def _gmp_annotated_return_types(self, stmts: list, all_functions: list) -> None:
                     self._ensure_tuple_struct(s.return_type)
                 else:
                     _fn_ret_ct = 'MojoList *'
+            _fn_ret_ct = _ggf_dup._record_home_def_return_type(self, s, s.name, _fn_ret_ct)
             self.func_return_types[s.name] = _fn_ret_ct
-            _ggf_dup._record_home_def_return_type(
-                self, s, s.name, self.func_return_types[s.name])
         _s_pts = None
         if isinstance(s, FunctionDef) and s.params:
             if gimple_ctypes._params_have_vararg(s.params):
@@ -14834,8 +14833,8 @@ def _gmp_infer_unannotated_function_returns(self, all_functions: list) -> None:
                 inferred = 'int64_t'
             self.var_types = _saved_vt_23e
             self._scan_scratch_top = _scratch_mark_23e
+            inferred = _ggf_dup._record_home_def_return_type(self, s, s.name, inferred)
             self.func_return_types[s.name] = inferred
-            _ggf_dup._record_home_def_return_type(self, s, s.name, inferred)
 
 
 def _gmp_propagate_generator_returns(self, _ret_changed: bool, _ret_defs: list) -> None:
@@ -15085,6 +15084,9 @@ def gen_module_impl(self, stmts: list):
     self._actual_types['stmts'] = 'MojoList *'
     if self._current_filename:
         self._inline_module_qualifiers[os.path.abspath(self._current_filename)] = self.module_name
+        # The solver's early decision needs the qualifier -> file map before this
+        # module's imports compile (see emit_funcs._early_return_decision).
+        self._qualifier_paths[self.module_name] = os.path.abspath(self._current_filename)
     self._toplevel_dep_init_modules: list[str] = []
     self._import_module_comptime_vals = {}  # module qualifier → {name: comptime value} for import X
     _gmi_prefold_toplevel_comptime(self, stmts)
@@ -20400,6 +20402,8 @@ def gen_module_impl(self, stmts: list):
     # first line below, because `_record_home_def_return_type`'s identity test
     # is the one thing here that must see the ORIGINAL node.
     _gmp_infer_return_types_late(self, all_functions)
+    if self._current_filename:
+        self._analyzed_paths.add(os.path.abspath(self._current_filename))
 
     def _flatten_resolved_conditionals(_root_list: list) -> list:
         _out = []

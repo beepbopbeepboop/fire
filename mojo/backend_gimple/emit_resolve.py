@@ -1027,6 +1027,12 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 # only the defining unit's own answer for that qualifier can
                 # type that call.
                 temp_gen._home_def_return_types = gen._home_def_return_types
+                # The type solver's state, shared by reference (see GimpleGen.__init__).
+                temp_gen._tsolve = gen._tsolve
+                temp_gen._qualifier_paths = gen._qualifier_paths
+                temp_gen._analyzed_paths = gen._analyzed_paths
+                temp_gen._tsolve_frozen = gen._tsolve_frozen
+                temp_gen._tsolve_ledger = gen._tsolve_ledger
                 # Once per TRANSLATION UNIT, not once per module: a
                 # single-TU closure carries ~160 modules and the GPU
                 # introspection definitions are program-wide. Shared by

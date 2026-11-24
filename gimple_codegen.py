@@ -3403,6 +3403,17 @@ class GimpleGen:
         # `test_gimple.py`'s
         # `two_modules_one_same_named_function_keep_their_own_return_types`.
         self._home_def_return_types: dict[str, str] = {}
+        # The whole-closure type solver (bugs/GIR_type_solver.md, S1). `_tsolve` is
+        # the solution for this compile (None without imports); `_qualifier_paths`
+        # maps a module qualifier to its abspath once the module starts compiling;
+        # `_analyzed_paths` holds the modules whose return-type passes have finished;
+        # `_tsolve_frozen` is the early answers (pair key -> ctype); the ledger lists
+        # every decision. Shared by reference with every sub-generator.
+        self._tsolve = None
+        self._qualifier_paths: dict = {}
+        self._analyzed_paths: set = set()
+        self._tsolve_frozen: dict = {}
+        self._tsolve_ledger: list = []
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen
@@ -6136,6 +6147,10 @@ class GimpleGen:
         return grsl._locally_bound_names(self, body, params)
     def _module_candidate_paths(self, module_name: str) -> list:
         return grsl._module_candidate_paths(self, module_name)
+    def _home_def_return_type_of(self, qualifier: str, bare_name: str):
+        # The defining unit's return ctype, or the solver's early answer (see
+        # emit_funcs._home_def_return_type). Readers outside emit_funcs use this.
+        return gfn._home_def_return_type(self, qualifier, bare_name)
     def _module_candidate_paths_from(self, module_name: str, importer) -> list:
         return grsl._module_candidate_paths_from(self, module_name, importer)
     def _submodule_source_path(self, module_name: str) -> str | None:
@@ -6768,6 +6783,26 @@ _PIPELINE_RESULT_ATTRS = frozenset({'_link_dylibs', '_link_objects', '_link_need
                                     '_dropped_companion_cpp'})
 
 
+def _solve_import_closure(gen, filename: str, stmts: list):
+    """The whole-closure type solution for this compile (bugs/GIR_type_solver.md,
+    S1). It runs once, before any code generation, over the same import closure
+    the compile walks, and reads each module through the compile's own lookup."""
+    from mojo.tsolve import solve_closure
+    from mojo.middle.funcs_shared import ModuleLoader
+    root = os.path.abspath(filename) if filename else ''
+    return solve_closure(root, stmts, ModuleLoader(gen).load)
+
+
+def _write_tsolve_ledger(gen) -> None:
+    """With FIRE_TSOLVE_LEDGER=<file> set, write the decisions of this compile to it."""
+    path = os.environ.get('FIRE_TSOLVE_LEDGER', '')
+    if not path:
+        return
+    with open(path, 'w') as f:
+        for line in gen._tsolve_ledger:
+            f.write(line + '\n')
+
+
 def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = "",
                   link_mode: bool = False, auto_gpu: bool = True):
     """Shared driver behind every public compile_* entry point.
@@ -6992,7 +7027,10 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # consistent with `stmts` — unlike an on-disk file that could have been
     # modified after parse or be unreadable (empty `_current_filename`).
     gen._source_text = mojo_src
+    if do_imports or link_mode:
+        gen._tsolve = _solve_import_closure(gen, filename, stmts)
     code = gen.gen_module(stmts)
+    _write_tsolve_ledger(gen)
     if do_imports or link_mode:
         code = _dedup_guarded_blocks(code)
         code = _relocate_module_instance_defs(code)
