@@ -102,6 +102,29 @@ CASES = {
         '41\n1.5\ntag\n',
         'helper__mojo_global_get_CONST',
     ),
+    # A global an augmented assignment WIDENS. The definer's accessor is the
+    # widened type (`double` for true division, measured through
+    # compile_module_to_c), so the export must carry it: exporting the
+    # pre-widening `int` would read a double return register as an int.
+    'augmented_true_div': (
+        'A = 9\nA /= 2\n',
+        'from helper import A\nprint(A)\n',
+        '4.5\n',
+        'helper__mojo_global_get_A',
+    ),
+    'augmented_true_div_annotated': (
+        'A: int = 9\nA /= 2\n',
+        'from helper import A\nprint(A)\n',
+        '4.5\n',
+        'helper__mojo_global_get_A',
+    ),
+    # `int64_t` widening: the join of the int literal and the int64_t RHS.
+    'augmented_int_add': (
+        'C = 3\nC += 1\n',
+        'from helper import C\nprint(C)\n',
+        '4\n',
+        'helper__mojo_global_get_C',
+    ),
 }
 
 
@@ -218,34 +241,60 @@ def test_classifier_types_every_literal_the_definer_types():
     assert module_loader._ml_py_global_ctype('str', "'x'", {}) == 'char *'
 
 
-def test_augmented_reassignment_withholds_the_export():
-    # `A = 9` then `A /= 2` makes the defining module's accessor `double`
-    # (measured through compile_module_to_c: its
-    # `_phase17_apply_augmented_global_types` widens AFTER the literal row;
-    # `C = 3; C += 1` comes out `int64_t`, and the ANNOTATED `A: int = 9;
-    # A /= 2` comes out `double` too). No export is better than an `int`
-    # extern that reads a double register as an int: the unexported read keeps
-    # the old stub, a wrong extern reads garbage. The widening itself is
-    # recorded as bugs/CODEGEN_augmented_global_import_type.md.
+def test_augmented_reassignment_exports_the_widened_type():
+    # The export for a widened global is the type the definer's accessor
+    # returns after `_phase17_apply_augmented_global_types`: `double` for
+    # `A = 9; A /= 2` (the ANNOTATED `A: int = 9; A /= 2` too), `int64_t` for
+    # `C = 3; C += 1`. The end-to-end cases in CASES link and run them; this
+    # pins the parser, the export C type, and the cases that stay withheld.
     import module_loader as ml
-    assert ml._ml_augmented_assign_target('A /= 2') == 'A'
-    assert ml._ml_augmented_assign_target('    B //= 3') == 'B'
-    assert ml._ml_augmented_assign_target('C >>= 1') == 'C'
-    assert ml._ml_augmented_assign_target('D @= m') == 'D'
+    assert ml._ml_augmented_assign('A /= 2') == ('A', '/', '2')
+    assert ml._ml_augmented_assign('    B //= 3') == ('B', '//', '3')
+    assert ml._ml_augmented_assign('C >>= 1') == ('C', '>>', '1')
+    assert ml._ml_augmented_assign('D @= m') == ('D', '@', 'm')
     # Not augmented assignments: plain, comparison, comment, string, arg.
-    assert ml._ml_augmented_assign_target('E = 1') == ''
-    assert ml._ml_augmented_assign_target('E == 1') == ''
-    assert ml._ml_augmented_assign_target('# E += 1') == ''
-    assert ml._ml_augmented_assign_target('print("E += 1")') == ''
+    assert ml._ml_augmented_assign('E = 1') == ('', '', '')
+    assert ml._ml_augmented_assign('E == 1') == ('', '', '')
+    assert ml._ml_augmented_assign('# E += 1') == ('', '', '')
+    assert ml._ml_augmented_assign('print("E += 1")') == ('', '', '')
+
+    assert ml._ml_augmented_global_ctype('int', [('/', '2')]) == 'double'
+    assert ml._ml_augmented_global_ctype('int', [('+', '1')]) == 'int64_t'
+    assert ml._ml_augmented_global_ctype('double', [('+', '1')]) == 'double'
+    # Sequential fold, as the definer's pass runs: the second statement sees
+    # the first one's widening.
+    assert ml._ml_augmented_global_ctype('int', [('+', '1'), ('/', '2')]) == 'double'
+    # Withheld (''): an RHS the text scan cannot type, a non-numeric base.
+    assert ml._ml_augmented_global_ctype('int', [('/', 'n')]) == ''
+    assert ml._ml_augmented_global_ctype('int', [('+', '-1')]) == ''
+    assert ml._ml_augmented_global_ctype('char *', [('+', '1')]) == ''
 
     with tempfile.TemporaryDirectory() as td:
-        helper_path = _write(td, 'helper.py', 'A = 9\nA /= 2\n')
-        main_path = _write(td, 'main.py', 'from helper import A\nprint(A)\n')
+        # A second plain binding (here under `global A` in a body) makes the
+        # definer's base type a join the text scan cannot see: withheld.
+        helper_path = _write(
+            td, 'helper.py',
+            'A = 9\ndef f():\n    global A\n    A = 2.5\nA /= 2\n')
         exports = ml.ModuleLoader().load_module_from_path(helper_path)
         assert 'A' not in exports, exports.get('A')
         main_c = compile_module_to_c(
-            'from helper import A\nprint(A)\n', main_path, 'main')
-        assert 'extern int helper__mojo_global_get_A' not in main_c, main_c
+            'from helper import A\nprint(A)\n',
+            os.path.join(td, 'main.py'), 'main')
+        assert 'helper__mojo_global_get_A' not in main_c, main_c
+        # A non-literal RHS in the widening statement is withheld too.
+        helper_path = _write(td, 'helper2.py', 'A = 9\nn = 2\nA /= n\n')
+        exports = ml.ModuleLoader().load_module_from_path(helper_path)
+        assert 'A' not in exports, exports.get('A')
+        # The widened case itself: exported with the accessor's type.
+        helper_path = _write(td, 'helper3.py', 'A = 9\nA /= 2\n')
+        exports = ml.ModuleLoader().load_module_from_path(helper_path)
+        assert exports.get('A', {}).get('c_return_type') == 'double', exports
+        # A bool literal that is then augmented is an int, not a bool: the
+        # export is widened and never carries the `py_bool` flag.
+        helper_path = _write(td, 'helper4.py', 'FLAG = True\nFLAG += 1\n')
+        exports = ml.ModuleLoader().load_module_from_path(helper_path)
+        assert exports.get('FLAG', {}).get('c_return_type') == 'int64_t', exports
+        assert 'py_bool' not in exports.get('FLAG', {}), exports
 
 
 def test_scalar_lines_inside_a_multiline_string_are_not_exports():
@@ -292,7 +341,7 @@ def test_bool_literal_export_is_int_typed_like_the_accessor():
 def main() -> int:
     test_unannotated_scalar_globals_read_the_definers_accessor()
     test_classifier_types_every_literal_the_definer_types()
-    test_augmented_reassignment_withholds_the_export()
+    test_augmented_reassignment_exports_the_widened_type()
     test_scalar_lines_inside_a_multiline_string_are_not_exports()
     test_bool_literal_export_is_int_typed_like_the_accessor()
     print(f'PASS: an unannotated scalar global imported by name reads the '

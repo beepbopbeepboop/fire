@@ -716,6 +716,24 @@ def _true_div_cotype(op, lt, rt):
     return None
 
 
+def augmented_result_ctype(base_op, target_ctype, value_ctype) -> str:
+    """The C type `target OP= value` binds the target to, for a `base_op`
+    such as `'/'` (the augmented operator without its `=`).
+
+    The one rule every answer to "what does an augmented assignment do to its
+    target's type" goes through: `resolve_shared._aug_assign_value_type` (the
+    local-type pre-pass and the module-global widening pass) and
+    `module_loader`'s export scan for a `.py` global, which has no AST and
+    types the same rebinding from the literal RHS it can read. True division
+    answers `double` (`_true_div_cotype`); anything else is the lattice join of
+    the target and the value. The caller joins the result back against the
+    target, as `_phase17_apply_augmented_global_types` does."""
+    td = _true_div_cotype(base_op, target_ctype, value_ctype)
+    if td is not None:
+        return td
+    return TypeLattice.join(target_ctype, value_ctype)
+
+
 def _seedable_local_ctype(t) -> bool:
     """True when `_infer_local_var_types`' answer for a local is real
     EVIDENCE and may therefore be seeded into `var_types` so a
