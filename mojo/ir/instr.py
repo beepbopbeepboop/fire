@@ -17,6 +17,10 @@ Ex.kind
   'call'   a (callee), args
   'bin'    op, a, b
   'cond'   a ? b : c
+  'brace'  a, args, tight             `a{args}` (tight) or `a{ args }` -- a braced construction
+  'comma'  a, b                       `a, b` inside a parenthesized comma expression
+  'lambda' text (return C type), body   `[&]() -> text { body }()`; body is Instr
+  'closure' name (params), text, body  `[&](params) -> text { body }`, a lambda value
   'opaque' ty                         something the reader does not model
 
 Instr.kind
@@ -30,7 +34,13 @@ Instr.kind
   'if'     rhs (condition)            `if (c) {` -- opens a block
   'else'                              `else {`
   'elseif' rhs (condition)            `else if (c) {`
+  'endelse'                           `} else {` -- closes a block and opens its `else` on one line
+  'try'                               `try {`
+  'catch' rhs (exception decl)        `catch (<decl>) {`
+  'catch_rethrow'                     `catch (...) { throw; }` -- a one-line catch-all that rethrows
   'end'                               `}` -- closes a block
+  'scope_open' rhs (guard name)        `_MojoScopeExit <g>([&]() {` -- a finally guard opens
+  'scope_close'                       `});` -- the finally guard closes
   'ifbody' rhs (condition), body      `if (c) <body>` -- one-statement body
   'opaque' text                       not three-address; not checked
 """
@@ -54,6 +64,7 @@ class Ex:
         self.b: Ex = self
         self.c: Ex = self
         self.args: list[Ex] = []
+        self.body: list = []        # 'lambda': the statements (Instr) of its body
 
     def show(self) -> str:
         k = self.kind
@@ -74,6 +85,14 @@ class Ex:
         if k == 'coawait':
             # A C++ `co_await <expr>` (an awaited expression).
             return 'co_await ' + self.a.show()
+        if k == 'comma':
+            return self.a.show() + ', ' + self.b.show()
+        if k == 'brace':
+            # `T{a, b}` (tight) or `T{ a, b }`: a C++ braced construction; `a` is the type/callee text.
+            inner = ', '.join(x.show() for x in self.args)
+            if getattr(self, 'tight', False):
+                return self.a.show() + '{' + inner + '}'
+            return self.a.show() + '{ ' + inner + ' }'
         if k == 'paren':
             # A parenthesized operand: `(a)`.
             return '(' + self.a.show() + ')'
@@ -89,6 +108,19 @@ class Ex:
             return self.a.show() + ' ' + self.op + ' ' + self.b.show()
         if k == 'cond':
             return self.a.show() + ' ? ' + self.b.show() + ' : ' + self.c.show()
+        if k == 'closure':
+            # `[&](params) -> T { stmt }`: a lambda VALUE, passed on rather than called in place;
+            # `name` is its parameter list text, `text` its return type ('' = none), `capture` its capture (default '&').
+            head = '[' + getattr(self, 'capture', '&') + '](' + self.name + ')' + (' -> ' + self.text if self.text else '')
+            parts = [st.show() for st in self.body]
+            return head + ' { ' + ' '.join(p for p in parts if p != '') + ' }'
+        if k == 'lambda':
+            # `[&]() -> T { stmt stmt }()`: a call-once lambda; `text` is T's C spelling,
+            # or '' for a lambda with no return type (`[&]() { ... }()`). An empty
+            # statement (an opaque block that came out empty) takes no separator.
+            head = '[&]() -> ' + self.text if self.text else '[&]()'
+            parts = [st.show() for st in self.body]
+            return head + ' { ' + ' '.join(p for p in parts if p != '') + ' }()'
         if k == 'none':
             return ''
         return '<opaque>'
@@ -175,6 +207,8 @@ class Instr:
             return 'for (' + self.rhs.show() + ') {'
         if k == 'break':
             return 'break;'
+        if k == 'continue':
+            return 'continue;'
         if k == 'coyield':
             # A C++ coroutine's `co_yield <expr>;` (the generator printer).
             return 'co_yield ' + self.rhs.show() + ';'
@@ -193,6 +227,21 @@ class Instr:
             return 'else {'
         if k == 'elseif':
             return 'else if (' + self.rhs.show() + ') {'
+        if k == 'endelse':
+            return '} else {'
+        if k == 'try':
+            return 'try {'
+        if k == 'catch':
+            # `catch (_MojoCppExc &e) {`: the handler of a `try` (the rhs is the exception declaration).
+            return 'catch (' + self.rhs.show() + ') {'
+        if k == 'catch_rethrow':
+            return 'catch (...) { throw; }'
+        if k == 'scope_open':
+            # `_MojoScopeExit <guard>([&]() {`: a scope guard whose body (a `finally`) is a capturing lambda.
+            return '_MojoScopeExit ' + self.rhs.show() + '([&]() {'
+        if k == 'scope_close':
+            # `});`: closes the guard's lambda and the guard call.
+            return '});'
         if k == 'end':
             return '}'
         if k == 'ifbody':

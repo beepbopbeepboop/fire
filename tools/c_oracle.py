@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The byte-identical oracle for behaviour-preserving backend changes (doc/GIR_WORKERS.md §2).
+"""The byte-identical oracle for behaviour-preserving backend changes (doc/GIR.md §5).
 
     python3 tools/c_oracle.py base  [--commit SHA] [--closure] [-j N]
     python3 tools/c_oracle.py check [--base SHA]   [--closure] [-j N] [--show N]

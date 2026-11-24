@@ -11,6 +11,8 @@ import sys
 import hashlib
 import dataclasses
 
+from mojo.ir.instr import Instr
+
 from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
@@ -3148,6 +3150,30 @@ class GimpleGen:
         # `_reconcile_imported_global_accessors` to take the definer's final
         # C type once that module is compiled into this unit.
         self._imported_global_module: dict = {}
+        # Imported global names whose DEFINING value is a Python bool (`FLAG
+        # = True`). Their accessor is a C `int`, so the bool-ness has to ride
+        # beside it for `print` to render True/False. Set beside
+        # `_imported_global_accessors` by `_emit_imported_global_accessors`;
+        # read by `gimple_exprtypes.is_python_bool_expr`.
+        self._imported_global_bool: set = set()
+        # Module-alias-qualified data global name -> (c_return_type,
+        # accessor_c_symbol, DEFINING module's qualified name, the global's
+        # name in that module), keyed by the alias LOCAL name first
+        # (`alias -> {member -> entry}`). Populated by
+        # `_emit_imported_global_accessors` for a `import X as alias`
+        # statement (or a bare `import X`), the same export table and the
+        # same accessor symbol the `from X import <global>` spelling uses —
+        # but kept OUT of `_imported_global_accessors`, which is keyed by
+        # the bare name a `from` import binds and is consulted by the bare
+        # read in `_lower_IdentExpr`. A bare name in an `import` statement
+        # is never bound by that import, so registering it there would
+        # route a bare read to an accessor that is not this module's to
+        # read. Consulted by `_lower_MemberExpr`'s module-alias branch.
+        self._imported_alias_accessors: dict = {}
+        # `(alias local name, member)` pairs whose DEFINING value is a Python
+        # bool — the alias spelling's counterpart of `_imported_global_bool`.
+        # Read by `is_python_bool_expr`'s alias-qualified read arm.
+        self._imported_alias_global_bool: set = set()
         # Concrete imported structs used as parameter types here: their StructDefs
         # (so the layout typedef is emitted in dylib mode) and their names (so only
         # these — not local structs — get the authoritative struct-pointer param
@@ -5684,27 +5710,27 @@ class GimpleGen:
         return gcc_._cpp_expr(self, e)
     def _cpp_expr_ex(self, e):
         return gcc_._cpp_expr_ex(self, e)
-    def _cpp_yield_tuple(self, tup: 'TupleExpr', declared: dict, indent: str) -> list[str]:
+    def _cpp_yield_tuple(self, tup: 'TupleExpr', declared: dict, indent: str) -> list[Instr]:
         return gcc_._cpp_yield_tuple(self, tup, declared, indent)
-    def _cpp_hoist_walrus_decls(self, expr, declared: dict, indent: str) -> list[str]:
+    def _cpp_hoist_walrus_decls(self, expr, declared: dict, indent: str) -> list[Instr]:
         return gcc_._cpp_hoist_walrus_decls(self, expr, declared, indent)
-    def _cpp_stmt(self, s, declared: dict, indent: str) -> list[str]:
+    def _cpp_stmt(self, s, declared: dict, indent: str) -> list[Instr]:
         return gcc_._cpp_stmt(self, s, declared, indent)
-    def _cpp_with_stmt(self, s, declared: dict, indent: str) -> list[str]:
+    def _cpp_with_stmt(self, s, declared: dict, indent: str) -> list[Instr]:
         return gcc_._cpp_with_stmt(self, s, declared, indent)
-    def _cpp_for_generator_delegate(self, target, call: 'CallExpr', body: list, declared: dict, indent: str, index_var: str=None, index_start_expr: str='0') -> list[str]:
+    def _cpp_for_generator_delegate(self, target, call: 'CallExpr', body: list, declared: dict, indent: str, index_var: str=None, index_start_expr: str='0') -> list[Instr]:
         return gcc_._cpp_for_generator_delegate(self, target, call, body, declared, indent, index_var, index_start_expr)
-    def _cpp_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
+    def _cpp_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[Instr]:
         return gcc_._cpp_for_stmt(self, s, declared, indent)
     def _cpp_build_container_from_iterable(self, kind: str, iter_node, target_name: str, elem_node, cond_nodes: list) -> str:
         return gcc_._cpp_build_container_from_iterable(self, kind, iter_node, target_name, elem_node, cond_nodes)
-    def _cpp_async_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
+    def _cpp_async_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[Instr]:
         return gcc_._cpp_async_for_stmt(self, s, declared, indent)
-    def _cpp_raise_stmt(self, s, indent: str) -> list[str]:
+    def _cpp_raise_stmt(self, s, indent: str) -> list[Instr]:
         return gcc_._cpp_raise_stmt(self, s, indent)
-    def _cpp_try_stmt(self, node, declared: dict, indent: str) -> list[str]:
+    def _cpp_try_stmt(self, node, declared: dict, indent: str) -> list[Instr]:
         return gcc_._cpp_try_stmt(self, node, declared, indent)
-    def _cpp_yield_from(self, yf: 'YieldFromExpr', indent: str) -> list[str]:
+    def _cpp_yield_from(self, yf: 'YieldFromExpr', indent: str) -> list[Instr]:
         return gcc_._cpp_yield_from(self, yf, indent)
     def _cls_refs_supported(self, body, struct_name: str) -> bool:
         return gcc_._cls_refs_supported(self, body, struct_name)
@@ -5722,15 +5748,15 @@ class GimpleGen:
         return gca._cpp_dict_key_expr(self, idx_node, idx_cpp)
     def _cpp_fresh_name(self, prefix: str='_mg_t') -> str:
         return gca._cpp_fresh_name(self, prefix)
-    def _cpp_stmt_with_break_flag(self, s, declared: dict, indent: str, brk_var: str) -> list[str]:
+    def _cpp_stmt_with_break_flag(self, s, declared: dict, indent: str, brk_var: str) -> list[Instr]:
         return gca._cpp_stmt_with_break_flag(self, s, declared, indent, brk_var)
     def _cpp_with_guard_type_name(self, expr) -> str | None:
         return gca._cpp_with_guard_type_name(self, expr)
     def _cpp_iterable_is_delegatable_generator_call(self, iterable) -> bool:
         return gca._cpp_iterable_is_delegatable_generator_call(self, iterable)
-    def _cpp_match_stmt(self, s, declared: dict, indent: str) -> list[str]:
+    def _cpp_match_stmt(self, s, declared: dict, indent: str) -> list[Instr]:
         return gca._cpp_match_stmt(self, s, declared, indent)
-    def _cpp_except_handler_body(self, handler, caught_var: str, declared: dict, indent: str) -> list[str]:
+    def _cpp_except_handler_body(self, handler, caught_var: str, declared: dict, indent: str) -> list[Instr]:
         return gca._cpp_except_handler_body(self, handler, caught_var, declared, indent)
     def _gen_cpp_generator_unit(self, fn: FunctionDef, struct_name: str | None=None,
                                 extra_captures: list | None=None,

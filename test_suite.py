@@ -2378,6 +2378,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_invalid_downcast_build.py': 1,
     'test_overload_diagnostic.py': 1,
     'test_predicate_where_diagnostic.py': 1,
+    'test_measure_proof_peaks.py': 1,
     'test_srcless_package_diagnostics.py': 1,
     'test_static_call_diagnostics.py': 5,
     'test_t_func_dump_regression.py': 1,
@@ -3003,6 +3004,7 @@ def test_a_disabled_test_is_registered_but_never_runs():
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
+        'doc-refs-stale-verdicts',
         'gimple',
         'gimplerunner',
         'suite-self-test',
@@ -3218,6 +3220,7 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
+        'doc-refs-stale-verdicts',
         'gimple',
         'gimplerunner',
         'suite-self-test',
@@ -4506,18 +4509,26 @@ _OPEN_STDLIB_DYLIB_PROBE_REASON = (
 
 UNREGISTERED = {
     'test_codegen_erased_container_values.py': _OPEN_PROBE_HARNESS_REASON,
-    # The `_as_comptimevar_node` stage2 `AttributeError` pin (2026-11-21): the
-    # per-file (`do_imports=False`) compile's module-alias function VALUE.
-    # Added with its fix and run directly (`python3
-    # test_codegen_module_alias_function_value.py`); the landing was told not
-    # to register in tools/suite.py, and this is a build-and-RUN case that
-    # wants a bucket beside `linkmode` when one is next touched.
-    'test_codegen_module_alias_function_value.py': _STANDALONE_TEST_REASON,
     # A predicate-only pin for `mixed_field_names` (GIR stage 5c): asserts the
     # box-holding kind for a field stored a None literal AND a scalar literal.
     # It changes no C, so it has no job of its own; run directly like the
     # sibling analyzer pins below.
     'test_gimple_mixed_field_names.py': _STANDALONE_TEST_REASON,
+    # Four more direct-run pins: two per-file module-alias/global-read codegen
+    # cases, the GIR stage 7 build-API pin, and the proof-peak measurement.
+    'test_codegen_module_alias_global_read.py': _STANDALONE_TEST_REASON,
+    'test_codegen_module_attr_module_value.py': _STANDALONE_TEST_REASON,
+    'test_gir_stage7_build_api.py': _STANDALONE_TEST_REASON,
+    'test_measure_proof_peaks.py': _STANDALONE_TEST_REASON,
+    # The same per-file compile's UNANNOTATED scalar-global export (2026-11-23:
+    # a bare `from helper import CONST` read 0 for `CONST = 41`). Added with
+    # its fix and run directly (`python3 tools/memslot.py --gb 8 --label
+    # imported-global-unannotated -- python3
+    # test_codegen_imported_global_unannotated_scalar.py`, 0.2 GB); the
+    # landing was told not to register in tools/suite.py, and it is a
+    # build-and-RUN case that wants a bucket when one is next touched.
+    'test_codegen_imported_global_unannotated_scalar.py':
+        _STANDALONE_TEST_REASON,
     # The cases-generator analyzer landing (2026-11-17) left these regression
     # pins next to their fixes without registering them. Each runs directly;
     # the `*_build.py` siblings compile one small source with `fire.py build`

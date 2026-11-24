@@ -202,6 +202,130 @@ def _ml_container_global(line: str) -> list[str]:
     return out
 
 
+_AUG_OPS = ('//=', '**=', '>>=', '<<=', '+=', '-=', '*=', '/=', '%=', '&=',
+            '|=', '^=', '@=')
+
+
+def _ml_triple_quote_state(line: str, open_q: str) -> str:
+    """The triple-quote delimiter still OPEN after `line`, given the one open
+    before it (empty when none). A delimiter is a run of three quotes, spelled
+    with `chr(39)`/`chr(34)` below so this docstring cannot open one itself.
+
+    A run inside a SINGLE-line string or after a `#` is not a delimiter, which
+    is what makes the answer agree with Python: this file itself has a
+    three-double-quote substring inside a single-quoted string in
+    `_out_name_read_in_body`, and treating that as an opener inverted the state
+    for the rest of the module. The answer is used to skip column-0 lines that
+    are the body of a multi-line string -- exporting `NAME = 41` from one
+    declares an accessor the defining module never emits, i.e. an undefined
+    symbol at link time."""
+    q3 = chr(39) * 3
+    d3 = chr(34) * 3
+    n = len(line)
+    i = 0
+    q = open_q
+    while i < n:
+        c = line[i]
+        if q != '':
+            if c == '\\':
+                i += 2
+                continue
+            if line.startswith(q, i):
+                q = ''
+                i += 3
+                continue
+            i += 1
+            continue
+        if c == '#':
+            return ''
+        if line.startswith(q3, i):
+            q = q3
+            i += 3
+            continue
+        if line.startswith(d3, i):
+            q = d3
+            i += 3
+            continue
+        if c == "'" or c == '"':
+            i += 1
+            while i < n:
+                if line[i] == '\\':
+                    i += 2
+                    continue
+                if line[i] == c:
+                    i += 1
+                    break
+                i += 1
+            continue
+        i += 1
+    return q
+
+
+def _ml_augmented_assign(line: str) -> tuple:
+    """`(name, base_op, rhs)` for a `NAME <augop>= RHS` line, where `base_op`
+    is the operator without its `=` (`'/'` for `A /= 2`), else `('', '', '')`.
+    `x += 1`, `x //= 2`, `x >>= 3` qualify; a plain `x = 1`, a comparison
+    (`x == 1`), a `#` comment and a name inside a string all answer empty (the
+    name must be the line's first token and the operator must follow it
+    directly). Indentation is deliberately ignored: a function-scope `global x`
+    followed by `x += 1` rebinds the same module global."""
+    n = len(line)
+    i = 0
+    while i < n and _ml_is_space(line[i]):
+        i += 1
+    e = _ml_ident_end(line, i)
+    if e == i:
+        return ('', '', '')
+    j = e
+    while j < n and _ml_is_space(line[j]):
+        j += 1
+    for op in _AUG_OPS:
+        if line.startswith(op, j):
+            after = j + len(op)
+            if after < n and line[after] == '=':
+                return ('', '', '')
+            return (line[i:e], op[:-1], line[after:].strip())
+    return ('', '', '')
+
+
+def _ml_aug_value_ctype(rhs: str) -> str:
+    """The C type of an augmented assignment's RHS when it is a whole-RHS
+    number literal, else ''. An integer literal is `int64_t` here, not the
+    `int` `_ml_py_number_ctype` answers for a small one: that is the type
+    `resolve_shared._local_value_type` gives an `IntLiteral` operand, which is
+    what the defining module's widening pass joins with."""
+    n = _ml_py_number_ctype(rhs)
+    if n == 'int' or n == 'int64_t':
+        return 'int64_t'
+    if n == 'double':
+        return 'double'
+    return ''
+
+
+def _ml_augmented_global_ctype(base: str, augs: list) -> str:
+    """The C type a module global ends up with after the augmented assignments
+    `augs` (`[(base_op, rhs), ...]`, in source order) rebind it, starting from
+    the type its one plain binding gave it (`base`). Mirrors
+    `module_gen._phase17_apply_augmented_global_types` step for step, with the
+    same `augmented_result_ctype` rule, so the export answers what the
+    defining module's accessor returns. Returns '' (withhold the export) when
+    the widening is not a numeric one the text scan can type: a non-numeric
+    base, or an RHS that is not a whole-RHS number literal (`A /= n`, `A +=
+    -1`, a string)."""
+    from mojo.middle.types import TypeLattice, augmented_result_ctype
+    if not TypeLattice.is_numeric(base):
+        return ''
+    cur = base
+    for base_op, rhs in augs:
+        rt = _ml_aug_value_ctype(rhs)
+        if rt == '':
+            return ''
+        cur = TypeLattice.join(cur, augmented_result_ctype(base_op, cur, rt))
+        if not TypeLattice.is_numeric(cur):
+            return ''
+    return cur
+
+
 def _ml_scalar_global(line: str) -> list[str]:
     """`[name, annotation, rhs]` for a column-0 `NAME[: ANN] = RHS` line (a
     plain `=`, not `==`), else `[]`. ANN is returned stripped, '' when absent;
@@ -267,18 +391,164 @@ def _ml_plain_str_literal(rhs: str) -> bool:
     return rhs[0] not in rhs[1:-1] and '\\' not in rhs
 
 
+def _ml_radix_digit(c: str, radix: int) -> bool:
+    """`c` is one ASCII digit of the given radix (16, 10, 8 or 2)."""
+    if radix == 16:
+        return ('0' <= c <= '9') or ('a' <= c <= 'f') or ('A' <= c <= 'F')
+    if radix == 8:
+        return '0' <= c <= '7'
+    if radix == 2:
+        return c == '0' or c == '1'
+    return '0' <= c <= '9'
+
+
+def _ml_radix_digit_value(c: str) -> int:
+    """The numeric value of one ASCII digit `_ml_radix_digit` accepted."""
+    if '0' <= c <= '9':
+        return ord(c) - 48
+    if 'a' <= c <= 'f':
+        return ord(c) - 87
+    return ord(c) - 55
+
+
+_ML_C_INT_MAX = 2147483647
+_ML_C_INT_MIN = -2147483648
+# The largest signed 64-bit word. Both constants fit a C int64_t, which matters
+# because this file is compiled by the self-hosted compiler: `0x10000000000000000`
+# (2**64) does NOT fit and would arrive here as 0, and `0xFFFFFFFFFFFFFFFF`
+# arrives as -1 -- see `_ml_int_literal_ctype` for why that is harmless.
+_ML_I64_MAX = 0x7FFFFFFFFFFFFFFF
+_ML_I64_MIN = -0x8000000000000000
+_ML_U64_MASK = 0xFFFFFFFFFFFFFFFF
+
+
+def _ml_int_literal_ctype(text: str, i: int, end: int, radix: int) -> str:
+    """`int` / `int64_t` for the literal digits `text[i:end]` in `radix`,
+    decided by VALUE the way the defining module decides it: the digits are
+    taken as a signed 64-bit word (two's complement, so `0xffffffffffffffff`
+    and its decimal spelling are -1) and the type is `int` only when that word
+    fits a C int. Measured at the boundaries through `compile_module_to_c`
+    (2026-11-23): `0xffffffff` -> int64_t, `0xffffffffffffffff` -> int,
+    `0x8000000000000000` -> int64_t, `0xffffffff80000000` -> int,
+    `0xffffffff7fffffff` -> int64_t.
+
+    The two worlds this runs in read the same expression differently, and both
+    readings are the answer: `_ML_U64_MASK` truncates to the low 64 bits under
+    CPython's arbitrary-precision ints, while the SELF-HOSTED build's ints are
+    already 64-bit, so the mask is `& -1` (a no-op) and `v` is already the
+    signed reading. That is also why the re-reading below is guarded by
+    `v > _ML_I64_MAX`: only CPython can get there."""
+    v = 0
+    for k in range(i, end):
+        c = text[k]
+        if c == '_':
+            continue
+        v = (v * radix + _ml_radix_digit_value(c)) & _ML_U64_MASK
+    if v > _ML_I64_MAX:
+        v = _ML_I64_MIN + (v - _ML_I64_MAX - 1)
+    return 'int' if _ML_C_INT_MIN <= v <= _ML_C_INT_MAX else 'int64_t'
+
+
+def _ml_digit_span(text: str, i: int, radix: int) -> int:
+    """The index just past the run of radix-`radix` digits starting at `i`,
+    where one `_` BETWEEN two digits of the run is allowed (`1_000`) and a
+    leading or trailing `_` ends it. Answers `i` itself when there is no digit
+    at `i`. Plain scanning, not a regex: this file is compiled by the
+    self-hosted compiler, where `re` is not available inside a function."""
+    n = len(text)
+    j = i
+    while j < n:
+        c = text[j]
+        if _ml_radix_digit(c, radix):
+            j += 1
+        elif (c == '_' and j > i and j + 1 < n
+              and _ml_radix_digit(text[j + 1], radix)):
+            j += 1
+        else:
+            break
+    return j
+
+
+def _ml_py_number_ctype(rhs: str) -> str:
+    """`int` / `int64_t` / `double` for a whole-RHS Python NUMBER literal,
+    else ''.
+
+    Int: `41`, `0`, `1_000`, `0x29`, `0o17`, `0b101` -- typed by the VALUE
+    (`_ml_int_literal_ctype`: `int` while the literal's signed 64-bit word
+    fits a C int, `int64_t` otherwise; `_gscan_declare_global`'s IntLiteral
+    row says `int`, but the defining module's Phase 1.7 widening and the
+    accessor it emits follow the value -- measured at the boundaries
+    `2147483647` vs `2147483648`, `0x7fffffff` vs `0x80000000`, and
+    `0xffffffffffffffff`, which wraps to -1 and stays `int`).
+    Float: `1.5`, `.5`, `1.`, `1e9`, `1.5e-3` -- the exponent's sign is part
+    of the literal, a LEADING sign is not (`-41` is a UnaryOp, which the
+    defining module types from `_quick_type` as `int64_t`, so it must not be
+    claimed here)."""
+    n = len(rhs)
+    if n == 0:
+        return ''
+    # `0x29` / `0o17` / `0b101`: a radix marker then radix digits.
+    if n > 2 and rhs[0] == '0' and rhs[1] in 'xXoObB':
+        radix = 16 if rhs[1] in 'xX' else (8 if rhs[1] in 'oO' else 2)
+        end = _ml_digit_span(rhs, 2, radix)
+        if end != n or end == 2:
+            return ''
+        return _ml_int_literal_ctype(rhs, 2, end, radix)
+    i = _ml_digit_span(rhs, 0, 10)
+    int_end = i
+    is_float = False
+    if i < n and rhs[i] == '.':
+        is_float = True
+        frac = _ml_digit_span(rhs, i + 1, 10)
+        if i == 0 and frac == i + 1:
+            return ''          # a lone `.` with no digit on either side
+        i = frac
+    if i < n and rhs[i] in 'eE':
+        is_float = True
+        j = i + 1
+        if j < n and rhs[j] in '+-':
+            j += 1
+        exp = _ml_digit_span(rhs, j, 10)
+        if exp == j:
+            return ''          # `1e`, `1e+`
+        i = exp
+    if i != n or (i == 0):
+        return ''
+    if is_float:
+        return 'double'
+    return _ml_int_literal_ctype(rhs, 0, int_end, 10)
+
+
+def _ml_py_literal_ctype(rhs: str) -> str:
+    """The C type the DEFINING `.py` module gives a whole-RHS scalar literal
+    -- `char *` for a plain string, `int` / `int64_t` for a number or a bool,
+    `double` for a float -- or '' when `rhs` is not one. Each answer is the
+    type that module's own `__mojo_global_get_` accessor returns for the same
+    literal (module_gen's `_gscan_declare_global` literal rows plus the
+    out-of-range widening its Phase 1.7 pass applies), which is what makes the
+    importer's extern and the accessor agree by construction."""
+    if _ml_plain_str_literal(rhs):
+        return 'char *'
+    if rhs == 'True' or rhs == 'False':
+        return 'int'
+    return _ml_py_number_ctype(rhs)
+
+
 def _ml_py_global_ctype(ann: str, rhs: str, exports: dict) -> str:
     """The C type a `.py` sibling's `NAME[: ANN] = RHS` global is exported
     with, or '' to leave it unexported (its reads then keep the stub, as they
-    always did). An annotation decides it alone. Unannotated, only a whole-RHS
-    `callee(...)` to a same-file `def` whose C return is a pointer, `char *` or
-    `double` qualifies: that is the rule the defining module applies to the
-    same RHS, so the importer's extern matches its accessor. A whole-RHS plain
-    string literal (`NAME = 'x'`) is `char *` in the defining module too."""
+    always did). An annotation decides it alone. Unannotated, a whole-RHS
+    scalar literal (`NAME = 'x'`, `NAME = 41`, `NAME = 1.5`, `NAME = True`)
+    qualifies with the type the defining module's own accessor returns for it
+    (see `_ml_py_literal_ctype`), as does a whole-RHS `callee(...)` to a
+    same-file `def` whose C return is a pointer, `char *` or `double`: that is
+    the rule the defining module applies to the same RHS, so the importer's
+    extern matches its accessor."""
     if ann != '':
         return _ml_py_ann_ctype(ann)
-    if _ml_plain_str_literal(rhs):
-        return 'char *'
+    lit = _ml_py_literal_ctype(rhs)
+    if lit != '':
+        return lit
     callee = _ml_plain_call_callee(rhs)
     if callee == '' or callee not in exports:
         return ''
@@ -1288,8 +1558,10 @@ class ModuleLoader:
                         'kind': 'global_var', 'c_return_type': _crt,
                         'home_module_path': path}
             # Scalar globals: `NAME: str = ...`, `NAME: int = ...`,
-            # `NAME = callee(...)` (see `_ml_py_global_ctype`), in ANY `.py`
-            # module, not only the compiler's own directory. The scan types a
+            # `NAME = 41` / `NAME = 'x'` / `NAME = 1.5` / `NAME = True` (a
+            # whole-RHS scalar literal), `NAME = callee(...)` (all three
+            # decided by `_ml_py_global_ctype`), in ANY `.py` module, not
+            # only the compiler's own directory. The scan types a
             # global exactly as its home module's accessor is typed, so an
             # outside-dir definer exports the same entry a compiler sibling
             # does. Gating it to `_selfhost_dir` left a separate compile of
@@ -1311,7 +1583,53 @@ class ModuleLoader:
                 _sib_exp_by_name = self._py_sibling_exports(content, _pydir, path)
                 _callee_exports = dict(_sib_exp_by_name)
                 _callee_exports.update(exports)
+                # Names this module REBINDS with an augmented assignment
+                # (`X = 41` then `X /= 2`, at module scope or under `global
+                # X` in a body). The defining module's
+                # `_phase17_apply_augmented_global_types` widens the accessor
+                # after its literal/annotation rows: `double` for `A = 9; A /=
+                # 2` (also for the ANNOTATED `A: int = 9; A /= 2`), `int64_t`
+                # for `C = 3; C += 1`. The widening is typed here by
+                # `_ml_augmented_global_ctype`, which applies the SAME
+                # `augmented_result_ctype` rule as the definer, so the export
+                # is the accessor's type rather than a guess. The one case the
+                # text scan cannot decide is a name with more than one plain
+                # binding (a second `X = ...`, or one under `global X` in a
+                # body): its base type is the definer's join of all of them,
+                # so it is withheld and reads the old stub, where a
+                # wrong-typed extern reads garbage. Over-approximated (a LOCAL
+                # `X += 1` in a function without `global X` also counts), which
+                # again only withholds.
+                _aug_stmts: dict = {}
+                # Lines that are real module-level code. A `NAME = 41` line
+                # inside a multi-line string is not code: this tree's own
+                # fixtures embed whole generated programs in `"""..."""` (e.g.
+                # test_formal_x86_64_dylib.py's `BODY_MODULE` carries
+                # `LITERAL = 3` on its own column-0 line), and exporting those
+                # declares an accessor the defining module never emits -- an
+                # undefined symbol at link time.
+                _code_lines = []
+                _in_triple = ''
                 for _line in content.split('\n'):
+                    if _in_triple != '':
+                        _in_triple = _ml_triple_quote_state(_line, _in_triple)
+                        continue
+                    _in_triple = _ml_triple_quote_state(_line, '')
+                    if _in_triple == '':
+                        _code_lines.append(_line)
+                for _aline in _code_lines:
+                    _an, _aop, _arhs = _ml_augmented_assign(_aline)
+                    if _an != '':
+                        _aug_stmts.setdefault(_an, []).append((_aop, _arhs))
+                # Plain bindings of each name anywhere in the module, at any
+                # indentation (see the docstring: a `global` body binding
+                # rebinds the same global).
+                _plain_binds: dict = {}
+                for _line in _code_lines:
+                    _pb = _ml_scalar_global(_line.lstrip())
+                    if len(_pb) != 0:
+                        _plain_binds[_pb[0]] = _plain_binds.get(_pb[0], 0) + 1
+                for _line in _code_lines:
                     if not _line or _line[0] in ' \t#':
                         continue
                     _sg = _ml_scalar_global(_line)
@@ -1320,9 +1638,25 @@ class ModuleLoader:
                     _sgt = _ml_py_global_ctype(_sg[1], _sg[2], _callee_exports)
                     if _sgt == '':
                         continue
-                    exports[_sg[0]] = {
+                    if _sg[0] in _aug_stmts:
+                        if _plain_binds.get(_sg[0], 0) != 1:
+                            continue
+                        _sgt = _ml_augmented_global_ctype(_sgt, _aug_stmts[_sg[0]])
+                        if _sgt == '':
+                            continue
+                    # `FLAG = True` / `FLAG: bool = False`: the accessor is
+                    # `int` (a C word), but the VALUE is a Python bool, and
+                    # the importer's `print` must render True/False. Carried
+                    # as its own key so the C type stays what the definer's
+                    # accessor returns. An augmented name is no longer a bool
+                    # (`FLAG = True; FLAG += 1` is an int), so it never carries
+                    # the flag.
+                    _sg_entry = {
                         'kind': 'global_var', 'c_return_type': _sgt,
                         'home_module_path': path}
+                    if _sg[2] in ('True', 'False') and _sg[0] not in _aug_stmts:
+                        _sg_entry['py_bool'] = True
+                    exports[_sg[0]] = _sg_entry
                 # Re-exports: `from SIBLING import (a, b)` — a set global not
                 # defined locally but surfaced through this module carries the
                 # sibling's own home accessor.

@@ -551,3 +551,71 @@ stage 7 has an oracle before it has a builder.
   the unit that later returns an `Ex`. Both corpora are byte-identical.
   `test_gimple_cpp_core_arms.py` pins it. The builder it prints through
   (stage 2b, `mojo/ir/build.py`) is still the blocker.
+
+## 5. The two oracles every worker uses
+
+A worker is only as good as the check it runs. Two checks, and a worker never
+reports success without them.
+
+1. **Byte-identical C** (behaviour-preserving work: codemods, extractions,
+   builder migration). Hash the generated C of `tools/pydiff_corpus` at the base
+   commit and on the worker's tree; every hash must match. Today this is the
+   scratch script used on 2026-11-20/21; step W0.1 below turns it into
+   `tools/c_oracle.py`, which caches the base hashes per commit so a worker runs
+   only its own side.
+2. **CPython agreement** (behaviour-changing work: stage 5c, bug fixes).
+   `python3 tools/pydiff.py <repro>` prints `OK`, and `python3
+   test_pydiff_ratchet.py` keeps every listed program OK.
+
+Plus the cheap gates every change runs: `python3 test_gimple_lint.py`,
+`python3 test_type_string_ratchet.py`, `python3 tools/dangling_doc_refs.py
+--ratchet`, and `python3 -c "import ast; ..."` over every touched file (a
+regex codemod once turned `x not in (...)` into `x is_int_word(not)`).
+
+**The blind spot.** Both oracles run the Python reference compiler. Neither can
+see a self-host failure: stage 5b steps 1-3 passed both and still broke
+`make bootstrap` (the self-hosted compile stubbed every `WordFacts` method).
+A per-module `python3 fire.py --dump <module>.py` does NOT see it either
+(measured 2026-11-21 at `ef53815a1`: 0 stubs in `loops_shared.ci`, where the
+closure had ten). Only the whole-closure dump does, so the self-host check is
+
+    python3 tools/c_oracle.py check --base <sha> --closure
+
+which runs `fire.py --dump-full fire.py` (what `bootstrap-stage1-transitive`
+runs) for both sides and fails on any NEW weak stub. It costs 5-8 minutes and
+about 6 GB, so the orchestrator runs it once per wave on the merged tree, not
+each worker. Any change that adds a module, a class, or a method called across
+modules gets it. The full check is still `make bootstrap` (owner-run; see §6).
+
+## 6. Stage 7: status and todo (measured 2026-11-23)
+
+Measured on master with an AST pass over `cpp_core.py`: 0 statement f-strings left; 0 expression f-string leaves left
+(the last two are ported on master); 24 `.show()` boundaries; 39 functions returning `list[...]` of statement text; 11
+functions returning `str`; the three statement helpers have 186 (`_cpp_ir_line`), 112 (`_cpp_assign_line`), 52
+(`_cpp_call_line`) and 60 (`_cpp_instr`) call sites, plus 20 `_cpp_opaque` and 3 `_cpp_if_break_line`.
+
+- [x] T1. Statement helpers return `Instr` (with `indent` set), not `str`: `_cpp_ir_line`, `_cpp_assign_line`,
+      `_cpp_call_line`, `_cpp_instr`, `_cpp_opaque`, `_cpp_if_break_line`. Consumers that test a line as text (for
+      example `'co_yield' in ln` over `finally_lines`) must test the Instr's `show()`.
+- [x] T2. The statement printers return `list[Instr]` (merged `cec0b197f`; verified on master 2026-11-23).
+- [ ] T3. The 11 `-> str` functions become `Ex` (or stay as text only at a named boundary).
+- [ ] T4. The 24 `.show()` boundaries are removed as their consumers take `Ex`/`Instr`.
+- [ ] T5. One rendering edge: the function-assembly site renders each `Instr` with `.line()` (the one `'\n'.join` site).
+- [ ] T6. Call-slot text lists (`_cpp_call_arg_expr` and its consumers) take `Ex`.
+- [ ] T7. Verify: `test_gimple_cpp_core_arms.py`; `c_oracle check` identical on all 285 pydiff and all coroutine
+      programs; `compile_stdlib.py` `FAILED: 0`, no skips; the transcription-only sites (listed in the Status entries)
+      probed until each is reached or its probe is recorded as impossible.
+- [ ] T8. Done criterion: delete this doc in the same commit, with `python3 tools/dangling_doc_refs.py --ratchet`.
+
+### Status 2026-11-23: T2 verified on master (merge `cec0b197f`)
+
+T2 (statement printers return `list[Instr]`) was merged before verification and is verified now:
+- `test_gimple_cpp_core_arms.py`: 30 arms, 0 failures.
+- `c_oracle check --base 3dec79e25` (the commit before T2): identical C on all 285 pydiff programs and identical C++ on all 35 coroutine programs.
+- `compile_stdlib.py` (default parallelism): `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no skips. The run was served almost entirely from the content-addressed cache (100% codegen and GCC hits), so it confirms the same code compiles, not a fresh build.
+
+T2 is T2-done. Still open: T3 through T8.
+
+Status: stage 7 T1 (statement helpers return `Instr`) and T2 (statement printers return `list[Instr]`) are on
+master and verified. Still open: T3 to T8 below. This file is the only GIR document; the dated history of
+the stage 7 work is in git history (the stage 6 and 7 bug log, deleted 2026-11-23).

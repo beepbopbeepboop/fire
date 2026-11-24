@@ -63,7 +63,7 @@ class DeadRunning(unittest.TestCase):
 
 class RestartGuards(unittest.TestCase):
     POOL = {"slots": [{"name": "haiku", "model": "claude-haiku-5-5", "count": 0},
-                       {"name": "iceman", "model": "opencode-go/iceman-contributor-free", "count": 1}]}
+                       {"name": "mid-free", "model": "opencode-go/mid-free-model", "count": 1}]}
 
     def test_a_disabled_slot_is_never_restarted(self):
         reason = C.no_restart_reason({"model": "claude-haiku-5-5"}, self.POOL, {})
@@ -71,13 +71,13 @@ class RestartGuards(unittest.TestCase):
         self.assertIn("0/0", reason, "count 0 means the slot is off: nothing may restart on it")
 
     def test_a_full_slot_is_not_restarted(self):
-        counts = {"opencode-go/iceman-contributor-free": 1}
-        reason = C.no_restart_reason({"model": "opencode-go/iceman-contributor-free"}, self.POOL, counts)
+        counts = {"opencode-go/mid-free-model": 1}
+        reason = C.no_restart_reason({"model": "opencode-go/mid-free-model"}, self.POOL, counts)
         self.assertIsNotNone(reason)
         self.assertIn("1/1", reason)
 
     def test_a_free_slot_may_restart(self):
-        self.assertIsNone(C.no_restart_reason({"model": "opencode-go/iceman-contributor-free"}, self.POOL, {}))
+        self.assertIsNone(C.no_restart_reason({"model": "opencode-go/mid-free-model"}, self.POOL, {}))
 
     def test_a_banned_model_is_not_restarted(self):
         reason = C.no_restart_reason({"model": "m/x"}, {"slots": []}, {}, banned={"m/x": 1})

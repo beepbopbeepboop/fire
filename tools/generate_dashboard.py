@@ -61,8 +61,7 @@ ENVIRONMENT = {
     },
     "Models": [
         {"id": "opencode-go/deepseek-v4.1-flash", "use": "default worker; also decent at merging", "note": "Exactly one DeepSeek worker at a time (cost). opencode/big-pickle shares its quota bucket — do not use it as an alternative."},
-        {"id": "opencode/space-bunny-free", "use": "hard problems, hard merges", "note": "Free, replenishes daily. Rate limited only on explicit 429/Rate limit exceeded. A worker that stops with exit 0 and no error is NOT rate limited."},
-        {"id": "omlx/Qwen3.8-27B-oQ4e-mtp", "use": "local, slow; light merging", "note": "Server http://127.0.0.1:8000. Has exited early and with 'oMLX memory guard abort'. Too slow for hard conflict merges."},
+        {"id": "omlx/Inkling-2-Mini-oQ4e-mtp", "use": "local; the pool's default slot", "note": "Server http://127.0.0.1:8000."},
         {"id": "opencode/claude-* / openrouter/anthropic/*", "use": "—", "note": "Failed with 'Insufficient account funds' / 'Key limit exceeded'. Do not rely on them. (Claude Opus/Sonnet available only as Claude Code subagents when the controller is Claude Code.)"},
     ],
 }
@@ -142,9 +141,9 @@ WORKERS = [
     {
         "role": "Merger (hard)",
         "type": "Merger",
-        "model": "opencode/space-bunny-free (strongest model)",
+        "model": "strongest available model (Claude Opus/Sonnet subagents when the controller is Claude Code; otherwise the best opencode model)",
         "status": "Awaits work (branches merged once landed)",
-        "description": "Merges finished branches into master, resolves conflicts, verifies. Handed to the strongest model. Output branch then landed by controller.",
+        "description": "Merges finished branches into master, resolves conflicts, verifies. Handed to the strongest available model. Output branch then landed by controller.",
     },
     {
         "role": "Hard-Problem Agent",
@@ -154,18 +153,11 @@ WORKERS = [
         "description": "One agent on one hard problem: bootstrap self-host, Lean proof engineering, deep perf bug.",
     },
     {
-        "role": "Local (Qwen)",
-        "type": "Light merging / slow",
-        "model": "omlx/Qwen3.8-27B-oQ4e-mtp",
-        "status": "Not used (exited early)",
-        "description": "Local, slow; light merging only. Has exited early ('waiting for a background run') and with 'oMLX memory guard abort'. Too slow for hard conflict merges.",
-    },
-    {
-        "role": "Qwen free (hard)",
-        "type": "Hard problems / hard merges",
-        "model": "opencode/space-bunny-free",
-        "status": "Available",
-        "description": "Free, replenishes daily. Handed to space-bunny for hard problems and hard merges. Stops without error → restart, not 'rate limited'.",
+        "role": "Local (Inkling)",
+        "type": "Default / light merging",
+        "model": "omlx/Inkling-2-Mini-oQ4e-mtp",
+        "status": "Default pool slot",
+        "description": "Local; the pool's default slot. Server http://127.0.0.1:8000.",
     },
 ]
 
@@ -242,7 +234,7 @@ DIAGNOSIS = [
     },
     {
         "symptom": "Log has 'oMLX memory guard abort'",
-        "check": "local Qwen server",
+        "check": "local Inkling server",
         "action": "Restart; if recurs, give the work to a remote model.",
     },
     {
@@ -304,7 +296,7 @@ STANDING = [
     "Never lose work. Never discard uncommitted work; no git checkout / restore / stash (stash is shared by all worktrees).",
     "Workers are light (no gate, no heavy builds). The controller runs the gate once per batch. Formal work needs no gate.",
     "No time-boxing of bug work. A fixed bug's doc is deleted in the same commit; run the citation ratchet.",
-    "Model policy: exactly one DeepSeek worker; space-bunny for hard problems and hard merges; Qwen local is slow; big-pickle shares DeepSeek's bucket; a bunny that stops without an error line is restarted, not 'rate limited'. Bootstrap belongs to one hard-problem agent.",
+    "Model policy: exactly one DeepSeek worker; Inkling 2 Mini is the local default slot; deepseek v4.1 flash is the opencode free tier; big-pickle shares DeepSeek's bucket; a free/local model that stops without an error line is restarted, not 'rate limited'. Bootstrap belongs to one hard-problem agent.",
     "Check workers every 50 minutes. Record the facts, not guesses. Do not claim a cause you have not seen in a log.",
     "Prefer production-quality fixes over quick ones; consolidate duplicates; keep leftover processes and disk under control.",
 ]

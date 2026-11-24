@@ -1,5 +1,5 @@
 {
-  "default_slot": "qwen-local",
+  "default_slot": "inkling-local",
   "mode": "build",
   "mode_note": "build: high-volume campaign - no batch cap, land everything fast. drain: work the backlog down - finishing and gate-repair work starts first, batches of 8. Both gate with the cheap landing gate (tools/gates.json `landing`). `control.py mode build|drain` flips it; everything that used to guess the campaign reads this.",
   "slots": [
@@ -33,8 +33,8 @@
       }
     },
     {
-      "name": "qwen-local",
-      "model": "omlx/Qwen3.8-27B-oQ4e-mtp",
+      "name": "inkling-local",
+      "model": "omlx/Inkling-2-Mini-oQ4e-mtp",
       "count": 1,
       "kind": "opencode",
       "recover_hours": 0,
@@ -51,15 +51,18 @@
     {
       "name": "haiku",
       "model": "claude-haiku-5-5",
-      "count": 3,
+      "count": 2,
       "kind": "claude",
       "recover_hours": 4.23,
-      "class": "easy"
+      "class": "easy",
+      "also": [
+        "mid"
+      ]
     },
     {
       "name": "opencode-paid",
       "model": "opencode-go/deepseek-v4.1-flash",
-      "count": 2,
+      "count": 1,
       "kind": "opencode",
       "recover_hours": 2.5,
       "long_recover_days": 15,
@@ -72,17 +75,6 @@
       "kind": "claude",
       "class": "mid",
       "recover_hours": 4.23
-    },
-    {
-      "name": "iceman",
-      "model": "opencode-go/iceman-contributor-free",
-      "count": 1,
-      "kind": "opencode",
-      "recover_hours": 2.5,
-      "class": "mid",
-      "also": [
-        "easy"
-      ]
     },
     {
       "name": "opus",
@@ -114,7 +106,7 @@
   ],
   "classes": {
     "easy": "bugs/*.md, everything not in mid/ or hard/ (haiku and the free/local slots)",
-    "mid": "bugs/mid/*.md (Sonnet 5.5)",
+    "mid": "bugs/mid/*.md (Haiku)",
     "hard": "bugs/hard/*.md (Opus 5.5)",
     "escalate_after": 2,
     "unserved_policy": {

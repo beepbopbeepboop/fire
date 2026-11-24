@@ -1,9 +1,9 @@
-# Land: should finished branch bug-mid-gir-stage5c-none-representation land?
+# Land: should finished branch bug-codegen-prelude-sort-is-not-resolved-5 land?
 
-**Branch:** `work/bug-mid-gir-stage5c-none-representation` (task `bug-mid-gir-stage5c-none-representation`; its tip is also saved as `refs/archive/work/bug-mid-gir-stage5c-none-representation`, so dropping it loses nothing).
-**Age:** last commit 2026-11-23, first unlanded commit 2026-11-21; 12 commit(s) ahead of master, 374 behind it; task started 2026-11-23 12:51:09
-**Original work:** An earlier attempt left 11 commit(s) on branch work/bug-gir-stage5c-none-representation-3, which you start from. Read `git log master..HEAD` and `git diff master...HEAD` first. Fix the bug in bugs/GIR
-**Original claims:** bug:GIR_stage5c_none_representation
+**Branch:** `work/bug-codegen-prelude-sort-is-not-resolved-5` (task `bug-codegen-prelude-sort-is-not-resolved-5`; its tip is also saved as `refs/archive/work/bug-codegen-prelude-sort-is-not-resolved-5`, so dropping it loses nothing).
+**Age:** last commit 2026-11-23, first unlanded commit 2026-11-23; 1 commit(s) ahead of master, 5 behind it; task started 2026-11-23 17:17:45
+**Original work:** Fix the bug in bugs/CODEGEN_prelude_sort_is_not_resolved-part3.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, 
+**Original claims:** bug:CODEGEN_prelude_sort_is_not_resolved-part3
 
 This branch holds finished work that is not on master, and nothing is landing or continuing it. Sort it out:
 decide what it is worth now, then act on the decision. Use your judgment; landing is one outcome of three.
@@ -31,6 +31,6 @@ A commit exists that records the decision: the change (LAND/ADAPT) or the reason
 (DROP), and this doc is gone.
 
 ## Status
-- 2026-11-23 12:54:42: conflicts with master (last commit 2026-11-23, first unlanded commit 2026-11-21; 12 commit(s) ahead of master, 374 behind it; task started 2026-11-23 12:51:09)
-  Branch: work/bug-mid-gir-stage5c-none-representation
-  Conflicting files: doc/GIR_WORKERS.md, mojo/backend_gimple/emit_infra.py, mojo/backend_gimple/emit_stmts.py, mojo/backend_gimple/module_gen.py, mojo/middle/infra_infer.py
+- 2026-11-23 17:51:54: conflicts with master (last commit 2026-11-23, first unlanded commit 2026-11-23; 1 commit(s) ahead of master, 5 behind it; task started 2026-11-23 17:17:45)
+  Branch: work/bug-codegen-prelude-sort-is-not-resolved-5
+  Conflicting files: elaborate.py, test_gimple.py

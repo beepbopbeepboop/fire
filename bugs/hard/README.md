@@ -15,3 +15,5 @@ deleted in the same commit, as for any bug.
 | `GATE_red_recover-land_2026-11-02-part5.md` | see doc | workers |
 | `GATE_red_recover-land_2026-11-02-part5-part2.md` | see doc | workers |
 | `GPU_offload_validation_modular.md` | see doc | workers |
+| `CODEGEN_selfhost_stage2_attributeerror_comptimevar_node.md` | see doc | workers |
+| `FORMAL_eval_eq_mojo_bridge_red_on_head.md` | see doc | workers |

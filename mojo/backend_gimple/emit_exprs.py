@@ -62,7 +62,7 @@ from mojo.middle.calls_shared import _callable_value_symbol
 # "Does the module `<alias>` holds define `<member>` as a class?" — the
 # class-as-value stub in `_lower_MemberExpr` asks the module, not the TU-wide
 # `struct_field_types`.
-from mojo.middle.funcs_shared import module_member_is_struct
+from mojo.middle.funcs_shared import module_member_is_struct, module_receiver_ref
 from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
 from mojo.middle.calls_shared import _struct_operator_receiver, _STRUCT_OP_DUNDER
@@ -1023,41 +1023,64 @@ def _lie_global_window(gen, _global_owner_mod, _imp_field, _imp_fields, _imp_hom
     return ctype, t
 
 
-def _lie_imported_global_accessor(gen, name: str) -> tuple[str, str]:
-    """`name` of a module-level global read through an imported accessor: emits the accessor call and carries the global's generator/coroutine api onto the read-back temp.
+def _lie_imported_global_accessor_body(gen, name: str, ctype: str, accessor_csym: str,
+                                       home_mangled: str) -> tuple[str, str]:
+    """Emit the accessor call for a module-level global and carry the
+    global's generator/coroutine api onto the read-back temp.
 
-    One arm of `_lower_IdentExpr`, which tests the condition and calls this."""
-    _acc_ctype, _acc_csym = gen._imported_global_accessors[name]
+    `home_mangled` is the DEFINING module's mangled name (the one its
+    accessor symbol and its `global_generator_key` both use); the two
+    registration sites differ only in how they obtain it."""
     # A module-level generator/coroutine held in a global that is read
     # through an imported accessor (full-closure case where another
     # module registered the accessor) must still carry its API onto
     # the fresh read-back temp, else .close() / next() refuse.
-    _gen_key = ginf.global_generator_key(
-        gen._imported_global_home.get(name, ''), name)
-    _gen_api_known = (name in gen._imported_global_home
+    _gen_key = ginf.global_generator_key(home_mangled, name)
+    _gen_api_known = (len(home_mangled) > 0
                       and _gen_key in gen._global_generator_api
                       and _gen_key not in gen._global_generator_api_poisoned)
-    if _gen_api_known and _acc_ctype != 'MojoGenerator *':
+    if _gen_api_known and ctype != 'MojoGenerator *':
         # The export's declared type is the export scan's guess (a
         # `var NAME = call()` line is typed `void *`), not the handle's
         # real type, so the read must unbox to `MojoGenerator *` itself.
         # Same unboxing the own-global read arm below does for a boxed
         # generator global: the word goes through `void *`, never a
         # direct int64_t -> pointer assignment.
-        _raw = gen._call_expr(_acc_ctype, _acc_csym, [])
+        _raw = gen._call_expr(ctype, accessor_csym, [])
         _vp = gen._cast('void *', _raw)
         t = gen._new_temp('MojoGenerator *')
         gen._cast_into(t, 'MojoGenerator *', _vp)
-        _acc_ctype = 'MojoGenerator *'
+        ctype = 'MojoGenerator *'
     else:
-        t = gen._call_expr(_acc_ctype, _acc_csym, [])
+        t = gen._call_expr(ctype, accessor_csym, [])
     if _gen_api_known:
         gen._generator_var_api[t] = gen._global_generator_api[_gen_key]
         # A read-back of a module global: the global may be read again
         # (or rebound), so a drain of this temp must not destroy the
         # handle (see _generator_value_owned).
         gen._generator_value_owned[t] = False
-    return _acc_ctype, t
+    return ctype, t
+
+
+def _lie_imported_global_accessor(gen, name: str) -> tuple[str, str]:
+    """`name` of a module-level global read through an imported accessor: emits the accessor call and carries the global's generator/coroutine api onto the read-back temp.
+
+    One arm of `_lower_IdentExpr`, which tests the condition and calls this."""
+    _acc_ctype, _acc_csym = gen._imported_global_accessors[name]
+    _home = _as_str(gen._imported_global_home.get(name, ''))
+    return _lie_imported_global_accessor_body(gen, name, _acc_ctype, _acc_csym, _home)
+
+
+def _lie_imported_alias_global_accessor(gen, name: str, ctype: str, accessor_csym: str,
+                                        home_qual: str) -> tuple[str, str]:
+    """`<alias>.<name>` — the module-alias spelling of an imported global.
+
+    The registration (`gen._imported_alias_accessors`) stores the definer's
+    QUALIFIED name, which the generator key cannot use directly, so the
+    mangled form is re-derived here (the same `_c_field_name` the
+    registration's own symbol construction uses)."""
+    _mangled = gimple_ctypes._c_field_name(home_qual or 'root')
+    return _lie_imported_global_accessor_body(gen, name, ctype, accessor_csym, _mangled)
 
 
 def _lie_builtin_value_map_fastpath(gen, name: str) -> tuple[str, str]:
@@ -2048,6 +2071,23 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             obj=gimple_ctypes.IdentExpr(name=_as_str(node.obj.member),
                                         line=getattr(node, 'line', 0)),
             member=_as_str(node.member)))
+    # `h.sub.f` read as a VALUE where `h.sub` is itself a MODULE: `import
+    # helper as h` and `helper.py: import impl as sub` make `h.sub` a module
+    # object, and `h.sub.double_it` is `impl`'s function. The CALL spelling
+    # already resolves the receiver (`_lmc_two_hop_module_call`). Without this
+    # the receiver lowered to a dynamic getattr on the module marker and
+    # `double_it` was read off that — a fatal `AttributeError: sub` at run
+    # time, the same for `import pkg.impl; pkg.impl.double_it`. Re-lower the
+    # read against the resolved module, so it takes the one-level module
+    # alias path (`_callable_value_symbol`) that `i.double_it` already takes.
+    # A receiver that is not a module binding answers None and falls through
+    # to the existing lowering unchanged.
+    _mr_ref = module_receiver_ref(gen, node.obj)
+    if _mr_ref:
+        return gen.lower_expr(gimple_ctypes.MemberExpr(
+            obj=gimple_ctypes.IdentExpr(name=_mr_ref,
+                                        line=getattr(node, 'line', 0)),
+            member=_as_str(node.member)))
     # `dict.fromkeys` / `frozendict.fromkeys` read as a VALUE
     if (isinstance(node.obj, gimple_ctypes.IdentExpr)
             and node.obj.name in ('dict', 'OrderedDict', 'frozendict')
@@ -2301,6 +2341,25 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 _cvs = _callable_value_symbol(gen, node)
                 if _cvs is not None:
                     return _cvs
+            # A data global read through the alias (`h.CONST`): route
+            # through the defining module's accessor — the same lowering
+            # the `from helper import CONST` spelling uses, and the same
+            # extern decl — instead of falling to the generic dynamic
+            # dispatch on the module marker (a NULL receiver). Kept
+            # behind the function answer above and behind the class /
+            # submodule / owned-binding answers below: a global_var member
+            # is none of those, so a function, a class value or a
+            # submodule read never reaches this arm. The bare read is
+            # untouched by the alias registration (it is keyed by the
+            # alias, not by the member name), so a name this module binds
+            # itself stays this module's.
+            _members = gen._imported_alias_accessors.get(module_name)
+            if _members is not None:
+                _acc = _members.get(_mv)
+                if _acc is not None:
+                    _acc_ctype, _acc_csym, _acc_home_qual, _acc_name = _acc
+                    return _lie_imported_alias_global_accessor(
+                        gen, _acc_name, _acc_ctype, _acc_csym, _acc_home_qual)
         elif (module_name in gen.imported_symbols
                 and node.member not in gen.struct_field_types):
             if _mv in gen.func_return_types:

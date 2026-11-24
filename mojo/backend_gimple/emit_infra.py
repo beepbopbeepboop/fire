@@ -1858,7 +1858,8 @@ def seed_global_generator_apis(gen, stmts: list, mod_index) -> None:
 
 
 def _emit_imported_global_accessors(gen, stmts: list) -> None:
-    """Bare `from X import <module_scope_var>` — BUG-2026-009. See
+    """Bare `from X import <module_scope_var>` and the alias-qualified
+    `X.<module_scope_var>` read — BUG-2026-009. See
     `_imported_global_accessors`'s own docstring and module_loader.py's
     'kind': 'global_var' export entries (module_loader._VAR_GLOBAL_RE)
     for the full picture; this is the consuming half.
@@ -1879,23 +1880,39 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
     same accessor, and an unregistered name falls to the no-signature
     `extern int64_t NAME (...)` weak stub instead (cas.py's
     `from module_loader import STDLIB_PATH` in `_stdlib_fingerprint`).
+
+    Every `import X [as alias]` is consumed the same way, but the
+    registrations it makes live in `gen._imported_alias_accessors`, keyed
+    by the alias LOCAL name — the `from` path's map is keyed by the bare
+    name the import binds, which an `import` statement never binds, so
+    registering the member name there would route a bare read of it to
+    an accessor that is not this module's to read. The qualified read
+    `alias.<member>` is the one reader of the new map.
     """
     _from_imports: list = []
+    _import_stmts: list = []
     # The names this module binds at module scope itself: a `from X import N`
     # of one of them is shadowed, not an accessor read (see the skip below).
+    # The alias path deliberately does NOT skip them: a qualified read
+    # (`alias.N`) is never shadowed by this module's own binding, and the
+    # bare read is untouched either way (the alias map is not consulted by
+    # it).
     _own_bound = msh._gmi_module_bound_names(stmts)
 
     def _collect(s):
         if isinstance(s, gimple_ctypes.FromImportStmt):
             _from_imports.append(s)
+        elif isinstance(s, gimple_ctypes.ImportStmt):
+            _import_stmts.append(s)
 
     _walk_func_stmts(stmts, _collect, into_defs=True)
-    for stmt in _from_imports:
+
+    def _resolve_module(mod):
         # `_as_str`: a bare `.module` FIELD read used unguarded below in
         # string concatenation (`mod + '.py'`) and as a resolver
         # argument — the established self-hosted trap (working `==` but
         # corrupted downstream string ops) for AST struct-field reads.
-        mod = _as_str(stmt.module)
+        mod = _as_str(mod)
         # A bare `from <name> import ...` naming a compiler `.py` sibling
         # (build_config, ...): `load_module` raises "Only stdlib and test
         # imports supported" and the compiled backend's `except Exception`
@@ -1954,6 +1971,56 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
             if gimple_ctypes.os.path.isfile(_cand):
                 exports = _mlmod2._module_loader.load_module_from_path(_cand)
                 qual = _mlmod2.module_name_for_path(_cand)
+        return exports, qual
+
+    def _register_global(exports, qual, name, alias, own_bound_skip):
+        # The export entry, then the same facts both spellings need: the
+        # accessor symbol, the home module, and the extern decl. `alias`
+        # is the local binding of a `from` import (an `import` statement
+        # never binds a member); `own_bound_skip` is the `from` path's
+        # Python-shadowing rule.
+        #
+        # That rule: a name this module binds at module scope ITSELF is
+        # not the import's — `from fgl_b import N` followed by a module-level
+        # `N = 'a-side'` rebinds it in this module's namespace (Python
+        # semantics), so a bare read is this module's own field, and the
+        # accessor of `fgl_b`'s `N` must not be registered for it.
+        # `_lie_imported_global_accessor` would otherwise take the read
+        # ahead of the owned-global routing in `bare_global_read_plan`
+        # and print 'b-side' where CPython prints 'a-side'. The
+        # registration cannot tell a shadowed name apart by itself: the
+        # export scan of `fgl_b` now answers for any scalar global in any
+        # `.py` module (module_loader `_py_sibling_exports`), so the
+        # importer's own binding has to be excluded here. The alias path
+        # passes `own_bound_skip=False` on purpose: a qualified read
+        # (`alias.N`) is never shadowed by this module's own binding.
+        info = exports.get(name)
+        if not info or info.get('kind') != 'global_var':
+            return None
+        sym = alias if alias else name
+        if own_bound_skip and sym in _own_bound:
+            return None
+        ctype = info.get('c_return_type', 'int64_t')
+        # A re-exported global (`from gimple_codegen import _C_RESERVED_
+        # FUNCS`, itself `from gimple_ctypes import ...`) is accessed
+        # through the accessor its TRUE defining module emits — use the
+        # home path the scanner recorded, not the module named in this
+        # import statement.
+        _home_qual = qual
+        _hp = info.get('home_module_path')
+        if _hp:
+            import module_loader as _mlmod_g
+            _home_qual = _mlmod_g.module_name_for_path(_hp) or qual
+        accessor_csym = (f'{gimple_ctypes._c_field_name(_home_qual)}__mojo_global_get_'
+                         f'{gimple_ctypes._c_field_name(name)}')
+        guard = gimple_ctypes._stub_guard_name(accessor_csym)
+        decl = (f'#ifndef {guard}\n#define {guard}\n'
+                f'extern {ctype} {accessor_csym} (void);\n#endif')
+        return sym, (ctype, accessor_csym, _home_qual, name), decl
+
+    for stmt in _from_imports:
+        mod = _as_str(stmt.module)
+        exports, qual = _resolve_module(mod)
         if not exports or not qual:
             continue
         # `exports.get(name)` misses for a stable, reproducible SUBSET
@@ -1973,48 +2040,58 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
         for _fip10 in (getattr(stmt, 'name_alias_strs', None) or []):
             name = gimple_ctypes._fi_name(_fip10)
             alias = gimple_ctypes._fi_alias(_fip10)
-            info = exports.get(name)
-            if not info or info.get('kind') != 'global_var':
+            _reg = _register_global(exports, qual, name, alias, True)
+            if _reg is None:
                 continue
-            sym = alias if alias else name
-            # A name this module binds at module scope ITSELF is not the
-            # import's: `from fgl_b import N` followed by a module-level
-            # `N = 'a-side'` rebinds it in this module's namespace (Python
-            # semantics), so a bare read is this module's own field, and the
-            # accessor of `fgl_b`'s `N` must not be registered for it.
-            # `_lie_imported_global_accessor` would otherwise take the read
-            # ahead of the owned-global routing in `bare_global_read_plan`
-            # and print 'b-side' where CPython prints 'a-side'. The
-            # registration cannot tell a shadowed name apart by itself: the
-            # export scan of `fgl_b` now answers for any scalar global in any
-            # `.py` module (module_loader `_py_sibling_exports`), so the
-            # importer's own binding has to be excluded here.
-            if sym in _own_bound:
-                continue
+            sym, entry, decl = _reg
             if sym in gen._imported_global_accessors:
                 continue
-            ctype = info.get('c_return_type', 'int64_t')
-            # A re-exported global (`from gimple_codegen import _C_RESERVED_
-            # FUNCS`, itself `from gimple_ctypes import ...`) is accessed
-            # through the accessor its TRUE defining module emits — use the
-            # home path the scanner recorded, not the module named in this
-            # `from` statement.
-            _home_qual = qual
-            _hp = info.get('home_module_path')
-            if _hp:
-                import module_loader as _mlmod_g
-                _home_qual = _mlmod_g.module_name_for_path(_hp) or qual
-            accessor_csym = (f'{gimple_ctypes._c_field_name(_home_qual)}__mojo_global_get_'
-                              f'{gimple_ctypes._c_field_name(name)}')
+            ctype, accessor_csym, _home_qual, name = entry
             gen._imported_global_accessors[sym] = (ctype, accessor_csym)
+            if (exports.get(name) or {}).get('py_bool'):
+                gen._imported_global_bool.add(sym)
             # The defining module's mangled name, the same one its own
             # `global_generator_key` uses: `accessor_csym` is built from it.
             gen._imported_global_home[sym] = gimple_ctypes._c_field_name(_home_qual or 'root')
             gen._imported_global_module[sym] = (_home_qual or '', name)
-            guard = gimple_ctypes._stub_guard_name(accessor_csym)
-            decl = (f'#ifndef {guard}\n#define {guard}\n'
-                    f'extern {ctype} {accessor_csym} (void);\n#endif')
             gen._link_import_decl_list.append(decl)
+
+    for stmt in _import_stmts:
+        for _mod, _al in gimple_ctypes._import_targets(stmt):
+            # The LOCAL name the statement binds (Python semantics): the
+            # alias, or the top-level package of a dotted path, or the
+            # module name itself.
+            _mod = _as_str(_mod)
+            _al = _as_str(_al)
+            if _al:
+                _local = _al
+            elif '.' in _mod:
+                _local = _mod[:_mod.index('.')]
+            else:
+                _local = _mod
+            exports, qual = _resolve_module(_mod)
+            if not exports or not qual:
+                continue
+            _members = gen._imported_alias_accessors.setdefault(_local, {})
+            for _name, _info in exports.items():
+                name = _as_str(_name)
+                if not isinstance(_info, dict) or _info.get('kind') != 'global_var':
+                    continue
+                if name in _members:
+                    continue
+                _reg = _register_global(exports, qual, name, None, False)
+                if _reg is None:
+                    continue
+                sym, entry, decl = _reg
+                ctype, accessor_csym, _home_qual, name = entry
+                _members[name] = (ctype, accessor_csym, _home_qual, name)
+                # Beside the accessor, as the `from` spelling does: the
+                # accessor is a C `int`, so a `FLAG = True` definer's
+                # bool-ness rides in `_imported_alias_global_bool` for
+                # `print(h.FLAG)` to render True/False.
+                if _info.get('py_bool'):
+                    gen._imported_alias_global_bool.add((_local, name))
+                gen._link_import_decl_list.append(decl)
 
 
 def _reconcile_imported_global_accessors(gen) -> None:
@@ -2058,6 +2135,26 @@ def _reconcile_imported_global_accessors(gen) -> None:
         for decl in gen._link_import_decl_list:
             rewritten.append(decl.replace(old_decl, new_decl))
         gen._link_import_decl_list = rewritten
+    # The alias path registers the same accessor through the same export
+    # table; re-type it from the same source, keyed by (alias, member).
+    for _alias_name, _members in list(gen._imported_alias_accessors.items()):
+        for _member, _entry in list(_members.items()):
+            old_ctype, accessor_csym, _home_qual, _home_name = _entry
+            if not _home_qual:
+                continue
+            entry = gen._module_global_field_type(_home_qual, _home_name)
+            if entry is None:
+                continue
+            new_ctype = entry[0]
+            if new_ctype == old_ctype:
+                continue
+            _members[_member] = (new_ctype, accessor_csym, _home_qual, _home_name)
+            old_decl = f'extern {old_ctype} {accessor_csym} (void);'
+            new_decl = f'extern {new_ctype} {accessor_csym} (void);'
+            rewritten = []
+            for decl in gen._link_import_decl_list:
+                rewritten.append(decl.replace(old_decl, new_decl))
+            gen._link_import_decl_list = rewritten
 
 
 # Runtime functions that ALWAYS return a container they just allocated and

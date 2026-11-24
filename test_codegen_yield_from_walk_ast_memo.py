@@ -173,8 +173,9 @@ def main():
         if id(node) in ET._WALK_AST_MEMO:
             fails.append("walk memo still holds an entry for %s after the "
                          "rewrite site invalidated it" % type(node).__name__)
-    if not (isinstance(out, list) and out and all(isinstance(s, str)
-                                                  for s in out)):
+    out_text = cc._cpp_render_lines(out)
+    if not (isinstance(out_text, list) and out_text
+            and all(isinstance(s, str) for s in out_text)):
         fails.append("_cpp_yield_from did not return emitted C++ lines")
 
     # Scenario 2 — the classname path (`yield from S.plan(...)`): same write
@@ -190,8 +191,9 @@ def main():
     if not any(n is call2 for n in recorded2):
         fails.append("classname path: enclosing CallExpr was never "
                      "invalidated at the rewrite site")
-    if not (isinstance(out2, list) and out2
-            and all(isinstance(s, str) for s in out2)):
+    out2_text = cc._cpp_render_lines(out2)
+    if not (isinstance(out2_text, list) and out2_text
+            and all(isinstance(s, str) for s in out2_text)):
         fails.append("classname path: _cpp_yield_from did not return "
                      "emitted C++ lines")
 

@@ -5822,7 +5822,7 @@ def _step_facts(w: int, idx: int) -> tuple:
     image-read ones below took it to 247 and moved the file's memory wall
     hundreds of lines later.  `decide` reduces the same closed proposition
     without a compiler process.  (The remaining wall is the machine half's
-    2^6 path certificates -- see `bugs/mid/FORMAL_eval_eq_mojo_bridge_red_on_head.md`.)
+    2^6 path certificates -- see `bugs/hard/FORMAL_eval_eq_mojo_bridge_red_on_head.md`.)
     """
     facts = []
     for j, (mask, b) in enumerate(_STEP_CONDS):
@@ -6892,59 +6892,90 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         # not decide it, and `hpc{k-1}` is in context.
         return proof + " <;> omega" if any(pc_writes[:k]) else proof
 
-    pc_facts = []
-    pc_facts.append(f"  have hpc0 : ({S}_qS0 st).pc = {run_pcs[0]} := by")
-    pc_facts.append(f"    simp [{S}_qS0, hpc]")
-    for k in range(1, m):
-        pc_facts.append(f"  have hpc{k} : ({S}_qS{k} st).pc = {run_pcs[k]} := "
-                        + _pc_proof(k))
-    step_facts = []
-    hx_facts = []
+    # One named theorem per run step, not a prefix re-proved in every
+    # `…_self{k}`.  `{S}_hpc{k}` is the pc fact, and `{S}_hs{k}` is the step
+    # equation `arm64_step (qS{k} st) code = some (qT{k} st)`.  Each cites only
+    # its predecessor (`hpc{k-1}`, which a jump's pc side condition reads), so
+    # the family is linear in the run's length.  The previous emission put the
+    # whole prefix (`hpc0..hpc{k}`, `hx0..hx{k-1}`, `hs0..hs{k-1}`) inside every
+    # `self{k}`, which made the section quadratic in block length.
+    def _tac(proof):
+        return proof[3:] if proof.startswith("by ") else f"exact {proof}"
+
     # A dynamic write `svc` is admitted by the caller's named hypothesis, so
     # every theorem whose proof applies that site's step lemma carries the
     # hypothesis as a binder.  Its type is fixed HERE, at the run's own
     # pre-svc state (`{S}_qS{k} st`), so the same name can be passed to the
     # self/mid/runs theorems without re-stating the state.
+    def _own_hyp(k):
+        pc = run_pcs[k]
+        if _is_svc(words[pc]) and pc in svc_dynamic:
+            return svc_dynamic[pc]
+        return None
+
+    def _hs_call(k):
+        """The application that proves step `k`'s `hs` fact at this run's `st`."""
+        hyp = _own_hyp(k)
+        return " ".join([f"{S}_hs{k}", "st", "hpc"] + ([hyp[0]] if hyp else []))
+
+    fact_lemmas = []
+    fact_lemmas.append(f"theorem {S}_hpc0 (st : Arm64State) "
+                       f"(hpc : st.pc = {run_pcs[0]}) :\n"
+                       f"    ({S}_qS0 st).pc = {run_pcs[0]} := by\n"
+                       f"  simp [{S}_qS0, hpc]")
+    for k in range(1, m):
+        lines = []
+        if any(pc_writes[:k]):
+            lines.append(f"  have hpc{k - 1} := {S}_hpc{k - 1} st hpc")
+        lines.append("  " + _tac(_pc_proof(k)))
+        fact_lemmas.append(f"theorem {S}_hpc{k} (st : Arm64State) "
+                           f"(hpc : st.pc = {run_pcs[0]}) :\n"
+                           f"    ({S}_qS{k} st).pc = {run_pcs[k]} := by\n"
+                           + "\n".join(lines))
     for k, pc in enumerate(run_pcs):
         i = (pc - base) // 4
-        if _is_svc(words[pc]):
-            if pc in svc_dynamic:
-                name, _typ = svc_dynamic[pc]
-                hx_facts.append(
-                    f"  have hx{k} : ¬ arm64_reg 16 ({S}_qS{k} st) = 1 := "
-                    f"{name} ({S}_qS{k} st) (by simp [hpc{k}])")
-                step_facts.append(
-                    f"  have hs{k} : arm64_step ({S}_qS{k} st) {code_name} "
-                    f"= some ({S}_qT{k} st) :=\n"
-                    f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k}) (hx{k})")
-                continue
+        body = [f"  have hpc{k} := {S}_hpc{k} st hpc"]
+        hyp = _own_hyp(k)
+        if hyp is not None:
+            # The dynamic site: its `hx` is the caller's hypothesis, applied at
+            # the pc this run reaches.  (The name is bound to `hyp_name`, not
+            # `name`, which is the function's own name for the chain below.)
+            hyp_name, _typ = hyp
+            body.append(
+                f"  have hx{k} : ¬ arm64_reg 16 ({S}_qS{k} st) = 1 := "
+                f"{hyp_name} ({S}_qS{k} st) (by simp [hpc{k}])")
+        elif _is_svc(words[pc]):
             # The step lemma is `work_step_svc_write`, under its `hx`
             # hypothesis.  Discharge that from the run's OWN reg-16 chain:
             # the preceding `movz` is in this run (the admission above
             # checked it), so the chain ends in the literal x16, and the
             # literal is not 1.
-            x16 = svc_write[pc]
             chain, final = _emit_reg_chain(name, words, tag, run_pcs[:k], 16,
                                            st="st")
-            hx_facts.append(
+            body.append(
                 f"  have h16_{k} : arm64_reg 16 ({S}_qS{k} st) = {final} := by\n"
                 f"    have hq : arm64_reg 16 ({S}_qS{k} st) = "
                 f"arm64_reg 16 ({S}_qT{k - 1} st) := "
                 f"{_state_proof([f'{S}_qS{k}', 'arm64_reg'])}\n"
                 f"    rw [hq]\n"
                 + "\n".join("    " + line for line in chain))
-            hx_facts.append(
+            body.append(
                 f"  have hx{k} : ¬ arm64_reg 16 ({S}_qS{k} st) = 1 := by\n"
                 f"    rw [h16_{k}]\n"
                 f"    decide")
-            step_facts.append(
-                f"  have hs{k} : arm64_step ({S}_qS{k} st) {code_name} "
-                f"= some ({S}_qT{k} st) :=\n"
-                f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k}) (hx{k})")
+        if _is_svc(words[pc]):
+            body.append(f"  exact {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k}) (hx{k})")
         else:
-            step_facts.append(f"  have hs{k} : arm64_step ({S}_qS{k} st) "
-                              f"{code_name} = some ({S}_qT{k} st) :=\n"
-                              f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k})")
+            body.append(f"  exact {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k})")
+        binders = "".join(f"\n    ({hyp[0]} : {hyp[1]})" for hyp in [hyp] if hyp)
+        fact_lemmas.append(f"theorem {S}_hs{k} (st : Arm64State) "
+                           f"(hpc : st.pc = {run_pcs[0]}){binders} :\n"
+                           f"    arm64_step ({S}_qS{k} st) {code_name} "
+                           f"= some ({S}_qT{k} st) := by\n"
+                           + "\n".join(body))
+    for lemma in fact_lemmas:
+        A(lemma)
+        A("")
 
     # Binder group for a theorem whose proof uses the first `upto` steps'
     # `hx` facts.  There is ONE assumption per certificate, however many
@@ -6995,9 +7026,12 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             head += f"\n    {b}"
         A(head + " :")
         A(f"    arm64_runs {code_name} {k} st = some ({S}_qS{k} st) := by")
-        A("\n".join(pc_facts[:k + 1]))
-        A("\n".join(hx_facts[:k]))
-        A("\n".join(step_facts[:k]))
+        # Only the LAST step's facts: the prefix is `self{k-1}`, by name.
+        if k == 1:
+            A(f"  have hs0 := {_hs_call(0)}")
+        else:
+            A(f"  have hpc{k - 1} := {S}_hpc{k - 1} st hpc")
+            A(f"  have hs{k - 1} := {_hs_call(k - 1)}")
         if k == 1:
             if pc_writes[0]:
                 A(f"  rw [runs_cons_jump st ({S}_qT0 st) {code_name} 0 hs0 "
@@ -7049,9 +7083,11 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         head += f"\n    {b}"
     A(head + " :")
     A(f"    arm64_runs {code_name} {m} st = some {cert_exit} := by")
-    A("\n".join(pc_facts))
-    A("\n".join(hx_facts))
-    A("\n".join(step_facts))
+    # The certificate's tail reads only the last step's facts (the prefix is
+    # `self{m-1}`), so those are the only ones it cites.
+    if m >= 2:
+        A(f"  have hpc{m - 1} := {S}_hpc{m - 1} st hpc")
+    A(f"  have hs{m - 1} := {_hs_call(m - 1)}")
     if m == 1:
         if last_moves_pc:
             if last_is_ret:

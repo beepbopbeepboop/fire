@@ -50,6 +50,7 @@ import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_exprs as gex
 import mojo.backend_gimple.cpp_core as gcc_
+from mojo.ir.instr import Instr
 import mojo.middle.coro as gimple_gen_coro
 def _cpp_declared_type(gen, node) -> str | None:
     """C++ type of a node for `in`/`not in` dispatch, when it is a plain
@@ -185,11 +186,11 @@ def _cpp_fresh_name(gen, prefix: str = "_mg_t") -> str:
 
 
 def _cpp_stmt_with_break_flag(gen, s, declared: dict, indent: str,
-                               brk_var: str) -> list[str]:
+                               brk_var: str) -> list[Instr]:
     """Like _cpp_stmt but intercepts BreakStmt to set brk_var = true before
     breaking, so while/else can detect whether the loop exited via break."""
     if isinstance(s, gimple_ctypes.BreakStmt):
-        return [f"{indent}{brk_var} = true;", f"{indent}break;"]
+        return [gcc_._cpp_assign_line(brk_var, 'true', indent), gcc_._cpp_ir_line(indent, 'break')]
     return gen._cpp_stmt(s, declared, indent)
 
 
@@ -274,7 +275,7 @@ def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
     return False
 
 
-def _cpp_match_stmt(gen, s, declared: dict, indent: str) -> list[str]:
+def _cpp_match_stmt(gen, s, declared: dict, indent: str) -> list[Instr]:
     """`match subject: case p: ... case _: ...` inside a generator body.
     Lowers to a chain of if/else comparisons (switch-style equality),
     mirroring _gen_stmt_MatchStmt's dispatch: each case's patterns are
@@ -289,7 +290,7 @@ def _cpp_match_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         is_wildcard = not match_case.patterns or any(
             isinstance(p, gimple_ctypes.IdentExpr) and p.name == '_' for p in match_case.patterns)
         if is_wildcard:
-            lines.append(f"{indent}else {{")
+            lines.append(gcc_._cpp_ir_line(indent, 'else'))
         else:
             conds = []
             for p in match_case.patterns:
@@ -299,20 +300,20 @@ def _cpp_match_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     # class pattern `case str(x)`: bind the capture, match if truthy
                     if p.args and isinstance(p.args[0], gimple_ctypes.IdentExpr):
                         declared[p.args[0].name] = 'int64_t'
-                        lines.append(f"{indent}{p.args[0].name} = {subj};")
+                        lines.append(gcc_._cpp_assign_line(p.args[0].name, subj, indent))
                     conds.append(f"({subj} != 0)")
                 else:
                     conds.append(f"({subj} == {gen._cpp_expr(p)})")
             cond = ' || '.join(conds)
-            lines.append(f"{indent}if ({cond}) {{")
+            lines.append(gcc_._cpp_ir_line(indent, 'if', cond))
         for st in match_case.body:
             lines.extend(gen._cpp_stmt(st, declared, indent + '    '))
-        lines.append(f"{indent}}}")
+        lines.append(gcc_._cpp_ir_line(indent, 'end'))
     return lines
 
 
 def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
-                              indent: str) -> list[str]:
+                              indent: str) -> list[Instr]:
     """Emit one `except ...:` handler's binding + body as C++ lines,
     nested inside the dispatch `if`/`else if` this handler's caller
     (_cpp_try_stmt) already built OUTSIDE the actual `catch` clause (see
@@ -334,7 +335,7 @@ def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
         # _cpp_raise_stmt), so bind as char * — there is no struct-typed
         # exception payload in this scalar-only generator-body model.
         declared[handler.name] = 'char *'
-        lines.append(f"{indent}char *{handler.name} = {caught_var}.msg;")
+        lines.append(gcc_._cpp_ir_line(indent, 'decl', f"char *{handler.name} = {caught_var}.msg"))
     gen._cpp_reraise_stack.append(caught_var)
     try:
         for st in handler.body:
@@ -1229,7 +1230,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     try:
         body_lines: list[str] = []
         for s in fn.body:
-            body_lines.extend(gen._cpp_stmt(s, declared, '    '))
+            body_lines.extend(gcc_._cpp_render_lines(gen._cpp_stmt(s, declared, '    ')))
         # Struct-pointer-yield support: `known_structs` (every struct
         # this compile has a real layout for) validates a "T *" ctype
         # actually names one; `_dict_val_types` maps `self.<field>` (for
@@ -1749,7 +1750,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     _ret_cts = []
     for _rpn, _rct in param_ctypes:
         _ret_cts.append(_rct)
-    return '\n'.join(lines), value_ctype, base, _ret_cts
+    return '\n'.join(gcc_._cpp_render_lines(lines)), value_ctype, base, _ret_cts
 
 
 _SIG_WORD_CTYPES = frozenset({'int64_t', '_Bool', 'int', 'char *',
@@ -2371,7 +2372,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         try:
             lines = []
             for st in body:
-                lines.extend(gen._cpp_stmt(st, hdecl, '    '))
+                lines.extend(gcc_._cpp_render_lines(gen._cpp_stmt(st, hdecl, '    ')))
             hoist = list(gen._cpp_func_scope_decls)
         except gimple_exprtypes._UnsupportedGeneratorShape:
             # Covers _UnsupportedAsyncShape too (subclass).
@@ -2988,7 +2989,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
     try:
         body_lines: list[str] = []
         for s in fn.body:
-            body_lines.extend(gen._cpp_stmt(s, declared, '    '))
+            body_lines.extend(gcc_._cpp_render_lines(gen._cpp_stmt(s, declared, '    ')))
         # The single scalar type every `return <expr>` in fn's own body
         # must agree on -- reuses _generator_yield_ctype's exact same
         # walk-and-unify logic (it only ever looks at ReturnStmt/
@@ -3448,7 +3449,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         f"    }}",
         f"}};",
     ]
-    return '\n'.join(lines), value_ctype, base, [ct for _, ct in param_ctypes]
+    return '\n'.join(gcc_._cpp_render_lines(lines)), value_ctype, base, [ct for _, ct in param_ctypes]
 
 
 def _resolve_and_start_task(gen, inner) -> tuple[str, dict] | None:
@@ -4148,7 +4149,7 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
     try:
         body_lines: list[str] = []
         for s in fn.body:
-            body_lines.extend(gen._cpp_stmt(s, declared, '    '))
+            body_lines.extend(gcc_._cpp_render_lines(gen._cpp_stmt(s, declared, '    ')))
         # Struct-pointer-yield support — mirrors _gen_cpp_generator_
         # unit's/_gen_cpp_async_unit's identical widening (see their own
         # comments): async generator methods aren't struct-scoped here
@@ -4279,4 +4280,4 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         f"    }}",
         f"}};",
     ]
-    return '\n'.join(lines), value_ctype, base, param_ctypes
+    return '\n'.join(gcc_._cpp_render_lines(lines)), value_ctype, base, param_ctypes

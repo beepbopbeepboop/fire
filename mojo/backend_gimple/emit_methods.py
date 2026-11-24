@@ -114,7 +114,8 @@ def _dict_val_domain(ctype):
 # GimpleGen.__init__.
 from mojo.middle.funcs_shared import _ctor_cname_via_module, _resolve_struct_cname
 from mojo.middle.funcs_shared import (
-    module_member_is_struct, register_module_member_function, register_module_member_value)
+    module_member_is_struct, module_receiver_ref, register_module_member_function,
+    register_module_member_value, resolve_module_attr_ref)
 
 # Sentinel for "this api entry has no `receiver` key at all", so a
 # missing key is distinguishable from a recorded empty string (which is a
@@ -4096,104 +4097,29 @@ def _lmc_hub_module_ref(gen, alias: str) -> str:
     return alias
 
 
-def _lmc_resolve_module_attr(gen, base_ref: str, attr: str):
-    """The module ref that `base_ref` binds `attr` to, registered in this
-    generation unit as a module namespace, or None.
-
-    `base_ref` is a MODULE ref (not the local alias a source statement
-    used), so `base_ref.attr` is a read of that module's namespace. The
-    answer comes from the defining module's own import statements
-    (`gimple_codegen._module_attr_module`, which parses its source once and
-    caches it) — never from a name guess, because the same attribute name
-    can be an ordinary function or constant.
-
-    Registration is what makes the re-dispatched `<target>.<member>(...)`
-    call lower as a module-qualified call instead of an attribute read on
-    an opaque int64_t marker: both `_selfhost_sibling_member_kind` and the
-    generic module-qualified branch gate on `_module_alias_names`, and both
-    read the alias's `imported_symbols` entry for the target module. An
-    entry with `return_type: 'unknown'` is the exact module-marker shape
-    `_gen_stmt_ImportStmt` writes, and the imported-symbol stub pass skips
-    that shape.
-    """
-    try:
-        ref = gen._module_attr_module(base_ref, attr)
-    except Exception:
-        ref = None
-    if not ref:
-        return None
-    if ref not in gen._module_alias_names:
-        gen._module_alias_names.add(ref)
-    if ref not in gen.imported_symbols:
-        gen.imported_symbols[ref] = {
-            'module': ref, 'return_type': 'unknown',
-        }
-    return ref
-
-
 def _lmc_two_hop_module_call(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, str] | None:
-    """`pkg.mod.f(...)` after `import pkg.mod`.
+    """`pkg.mod.f(...)` after `import pkg.mod`, and `base.member.f(...)`
+    where `base.member` is a module `base`'s own namespace binds
+    (`gimple_codegen.gimple_gen_coro.lower(...)`: the compiler's own
+    `gimple_codegen.py` does `import mojo.middle.coro as gimple_gen_coro`).
 
-    One arm of `_lower_method_call`, which tests the condition and calls this."""
-    _th_base = func.obj.obj.name
-    _th_dotted = _th_base + '.' + func.obj.member
-    if (_th_base in getattr(gen, '_module_alias_names', ())
-            and _th_dotted != _th_base
-            and gen._submodule_source_path(_th_dotted)):
-        # Register the dotted target as a module marker too. The
-        # plain-`import` pre-pass only records the BOUND name (`p`),
-        # because that is all Python binds; the full dotted target is
-        # registered later still, by the module-globals pass, which runs
-        # AFTER the toplevel body is lowered — so at the moment this
-        # call site is emitted the submodule marker the single-hop
-        # dispatch below requires does not exist yet, and the call fell
-        # through to the scalar-receiver stub (`int64_t.tri() stubbed`,
-        # printing 0). Same dict, same shape the later pass writes, and
-        # first-writer-wins because it only fills a name that is absent.
-        if _th_dotted not in gen._module_alias_names:
-            if _th_dotted not in gen.imported_symbols:
-                gen.imported_symbols[_th_dotted] = {
-                    'module': _th_dotted, 'return_type': 'unknown',
-                }
-            gen._module_alias_names.add(_th_dotted)
-        _th_node = gimple_ctypes.CallExpr(
-            func=gimple_ctypes.MemberExpr(
-                obj=gimple_ctypes.IdentExpr(
-                    name=_th_dotted, line=getattr(func.obj, 'line', 0)),
-                member=func.member,
-                line=getattr(func, 'line', 0), col=getattr(func, 'col', 0)),
-            args=list(node.args),
-            kwargs=[],
-            line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
-        return _lower_method_call(gen, _th_node)
-    # `base.member.f(...)` where `base.member` is a MODULE the base module
-    # itself imported (`gimple_codegen.gimple_gen_coro.lower(...)`: the
-    # compiler's own `gimple_codegen.py` does `import mojo.middle.coro as
-    # gimple_gen_coro`, so the attribute is a module object, not a
-    # submodule file `gimple_codegen/gimple_gen_coro.py` and not a sibling
-    # of the caller). The submodule branch above cannot see it, and the
-    # generic receiver dispatch then reads `lower` as a string method
-    # (`string_lower`) and `register` as an `int64_t.register() stubbed`
-    # word — exit 0, wrong answer. Resolve the attribute through the base
-    # module's own namespace and re-dispatch on the real module ref.
-    if _th_base in getattr(gen, '_module_alias_names', ()):
-        _th_info = (getattr(gen, 'imported_symbols', None) or {}).get(_th_base)
-        _th_base_ref = ((_th_info.get('module')
-                         if isinstance(_th_info, dict) else None)
-                        or _th_base)
-        _th_ref = _lmc_resolve_module_attr(gen, _th_base_ref, func.obj.member)
-        if _th_ref:
-            _th_node = gimple_ctypes.CallExpr(
-                func=gimple_ctypes.MemberExpr(
-                    obj=gimple_ctypes.IdentExpr(
-                        name=_th_ref, line=getattr(func.obj, 'line', 0)),
-                    member=func.member,
-                    line=getattr(func, 'line', 0), col=getattr(func, 'col', 0)),
-                args=list(node.args),
-                kwargs=[],
-                line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
-            return _lower_method_call(gen, _th_node)
-    return None
+    The receiver is resolved by `funcs_shared.module_receiver_ref`, the same
+    answer the VALUE read gives, and the call is re-dispatched on the real
+    module ref. One arm of `_lower_method_call`, which tests the condition
+    and calls this."""
+    _th_ref = module_receiver_ref(gen, func.obj)
+    if not _th_ref:
+        return None
+    _th_node = gimple_ctypes.CallExpr(
+        func=gimple_ctypes.MemberExpr(
+            obj=gimple_ctypes.IdentExpr(
+                name=_th_ref, line=getattr(func.obj, 'line', 0)),
+            member=func.member,
+            line=getattr(func, 'line', 0), col=getattr(func, 'col', 0)),
+        args=list(node.args),
+        kwargs=list(getattr(node, 'kwargs', None) or []),
+        line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
+    return _lower_method_call(gen, _th_node)
 
 
 def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, str] | None:
@@ -4246,7 +4172,7 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
         # through the hub's imports yields `mojo.middle.coro`, whose
         # `def lower` / `def register` are real registrations.
         _hub_ref = _lmc_hub_module_ref(gen, inner_obj.obj.name)
-        _hub_attr = _lmc_resolve_module_attr(gen, _hub_ref, inner_obj.member)
+        _hub_attr = resolve_module_attr_ref(gen, _hub_ref, inner_obj.member)
         _rewritten = gimple_ctypes.CallExpr(
             func=gimple_ctypes.MemberExpr(
                 obj=gimple_ctypes.MemberExpr(
@@ -4268,7 +4194,7 @@ def _lmc_dotted_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, 
     if (isinstance(inner_obj, gimple_ctypes.IdentExpr)
             and _is_selfhost_sibling_alias(gen, inner_obj.name)):
         _hub_ref = _lmc_hub_module_ref(gen, inner_obj.name)
-        _hub_attr = _lmc_resolve_module_attr(gen, _hub_ref, inner_member)
+        _hub_attr = resolve_module_attr_ref(gen, _hub_ref, inner_member)
         _rewritten = gimple_ctypes.CallExpr(
             func=gimple_ctypes.MemberExpr(
                 obj=gimple_ctypes.IdentExpr(
@@ -5475,8 +5401,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `import a.b` binds `a`, so `a.b.f(...)` is a TWO-hop attribute call
     # ...
     if (isinstance(func.obj, gimple_ctypes.MemberExpr)
-            and isinstance(func.obj.obj, gimple_ctypes.IdentExpr)
-            and not getattr(node, 'kwargs', None)):
+            and isinstance(func.obj.obj, gimple_ctypes.IdentExpr)):
         _arm_r = _lmc_two_hop_module_call(gen, node, func)
         if _arm_r is not None:
             return _arm_r
