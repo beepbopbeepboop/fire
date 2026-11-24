@@ -598,7 +598,7 @@ functions returning `str`; the three statement helpers have 186 (`_cpp_ir_line`)
       `_cpp_call_line`, `_cpp_instr`, `_cpp_opaque`, `_cpp_if_break_line`. Consumers that test a line as text (for
       example `'co_yield' in ln` over `finally_lines`) must test the Instr's `show()`.
 - [x] T2. The statement printers return `list[Instr]` (merged `cec0b197f`; verified on master 2026-11-23).
-- [ ] T3. The 11 `-> str` functions become `Ex` (or stay as text only at a named boundary).
+- [x] T3. The `-> str` functions become `Ex` (or stay as text only at a named boundary). Done 2026-11-23, see the T3 status below.
 - [ ] T4. The 24 `.show()` boundaries are removed as their consumers take `Ex`/`Instr`.
 - [ ] T5. One rendering edge: the function-assembly site renders each `Instr` with `.line()` (the one `'\n'.join` site).
 - [ ] T6. Call-slot text lists (`_cpp_call_arg_expr` and its consumers) take `Ex`.
@@ -614,7 +614,54 @@ T2 (statement printers return `list[Instr]`) was merged before verification and 
 - `c_oracle check --base 3dec79e25` (the commit before T2): identical C on all 285 pydiff programs and identical C++ on all 35 coroutine programs.
 - `compile_stdlib.py` (default parallelism): `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no skips. The run was served almost entirely from the content-addressed cache (100% codegen and GCC hits), so it confirms the same code compiles, not a fresh build.
 
-T2 is T2-done. Still open: T3 through T8.
+T2 is T2-done. Still open: T4 through T8.
+
+### Status 2026-11-23: T3 (`-> str` functions return `Ex`)
+
+The AST pass (`FunctionDef` whose `returns` unparses to `str`) finds 7 functions in `cpp_core.py`; the other 4 of
+the "11" are annotated `str | None` and are listed below as not converted.
+
+Converted:
+- `_cpp_as(ctype, expr) -> Ex`: `_cpp_cast_ex(ctype, _paren_ex(_as_ex(expr)))`, 87 call sites. 44 are f-string fields
+  now `{...show()}`, the text sinks for statement lines. The Ex consumers (`_cpp_call_ex` args, `_cpp_comma_ex`,
+  `ex_text(...)` wrappers) take the Ex directly.
+- `_cpp_in_link(gen, a: Ex, a_node, b: Ex, b_node, negate) -> Ex`: built from `_cpp_call_ex`, `_cpp_cast_ex`,
+  `_paren_ex`, `_cpp_not_ex`. The `in` branch of the compare-chain arm computes its operands as Ex; the other
+  comparisons keep the text boundary, because `_cpp_str_compare` takes text.
+- `_cpp_apply_fstring_spec(part_val: Ex, spec) -> Ex` and `_cpp_fstring_list_piece(gen, expr_node, v) -> Ex`
+  (unannotated before, now Ex because it feeds the same pieces).
+- `_cpp_string_literal_expr(gen, val, is_interp) -> Ex`: the pieces are Ex, the `mojo_str_cat` chain is
+  `_cpp_call_ex`. 3 call sites.
+- `_cpp_tagged_operand_word(gen, node) -> Ex`: `_cpp_cast_ex` chain. 1 call site.
+- `_cpp_build_container_from_iterable`: the annotation was `-> str` but the body already returned an Ex
+  (the lambda). Annotation corrected to `-> Ex`.
+
+Kept as text, on purpose:
+- `_cpp_expr(gen, e) -> str` is THE named text boundary (`_cpp_expr_ex(gen, e).show()`), 232 callers. Its callers
+  that need text are the sinks T4/T6 remove.
+
+Not converted (annotated `str | None`, outside the literal `-> str` pass):
+- `_cpp_percent_format`, `_cpp_fn_container_shape`, `_cpp_str_compare` (takes text operands),
+  `_cpp_literal_slot_ctype` (a C type spelling, not an expression). The first three are the next candidates.
+
+Irreducible text leaves (`ex_text`), recorded here:
+- C string literal spellings (`"..."`, `""`, `"True"`, `"False"`, `"fill"`) and the constants `'0'`, `'NULL'`,
+  `'-1'`, which are `ex_text` leaves with no shape.
+- `_cpp_word_of_kind(ctype, text)` (in `mojo/middle/exprtypes.py`, returns str): its result is an `ex_text` leaf
+  inside `_cpp_tagged_operand_word`. Converting it is that module's own step.
+
+Show count in `cpp_core.py`: 15 on master, 60 now. The new `.show()` calls are each a text sink (`_cpp_assign_line`,
+`_cpp_ir_line`, f-string conditions, `_cpp_instr` text). T4 removes them as those sinks take Ex.
+
+Verification (worktree `work-t3`, base `master` HEAD 051634f49):
+- `test_gimple_cpp_core_arms.py`: `30 arm(s) pinned across 5 printer(s), 0 failure(s)`. One fixture line changed:
+  the `_EGen` stub's `_cpp_in_link` takes and returns Ex, because the interface changed.
+- `c_oracle check --base master`: `all 285 programs generate identical C` and `all 35 coroutine programs generate
+  identical C++ companion`. A first run caught a leftover placeholder (`_cpp_marker_void`), fixed before the run
+  reported here.
+- `compile_stdlib.py`: `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no `skip` lines, exit 0.
+
+T3 is T3-done. Still open: T4 through T8.
 
 Status: stage 7 T1 (statement helpers return `Instr`) and T2 (statement printers return `list[Instr]`) are on
 master and verified. Still open: T3 to T8 below. This file is the only GIR document; the dated history of
