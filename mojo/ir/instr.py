@@ -17,6 +17,7 @@ Ex.kind
   'call'   a (callee), args
   'bin'    op, a, b
   'cond'   a ? b : c
+  'brace'  a, args, tight             `a{args}` (tight) or `a{ args }` -- a braced construction
   'comma'  a, b                       `a, b` inside a parenthesized comma expression
   'lambda' text (return C type), body   `[&]() -> text { body }()`; body is Instr
   'closure' name (params), text, body  `[&](params) -> text { body }`, a lambda value
@@ -82,6 +83,12 @@ class Ex:
             return 'co_await ' + self.a.show()
         if k == 'comma':
             return self.a.show() + ', ' + self.b.show()
+        if k == 'brace':
+            # `T{a, b}` (tight) or `T{ a, b }`: a C++ braced construction; `a` is the type/callee text.
+            inner = ', '.join(x.show() for x in self.args)
+            if getattr(self, 'tight', False):
+                return self.a.show() + '{' + inner + '}'
+            return self.a.show() + '{ ' + inner + ' }'
         if k == 'paren':
             # A parenthesized operand: `(a)`.
             return '(' + self.a.show() + ')'

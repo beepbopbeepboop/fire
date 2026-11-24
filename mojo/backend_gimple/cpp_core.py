@@ -2080,7 +2080,7 @@ def _cpp_dyn_word_lambda(gen, fn_arg: str, parts: list) -> Ex:
         _cpp_instr('decl', "MojoList *_a = mojo_list_new()"),
         _cpp_instr('decl', "MojoDict *_k = mojo_dict_new()"),
         _cpp_opaque(''.join(parts).rstrip()),
-        _cpp_instr('return', ex_text(f"_W{{mojo_dyn_call({fn_arg}, _a, _k)}}")),
+        _cpp_instr('return', _cpp_brace_ex('_W', [f"mojo_dyn_call({fn_arg}, _a, _k)"], True)),
     ]
     return lam
 
@@ -2742,9 +2742,9 @@ def _cpp_next_lambda_ex(vct: str, base: str, handle: str, decl, stop_tag) -> Ex:
     body.append(_cpp_instr('throw', ex_text("_MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), "
                                             "mojo_exc_obj_get() }")))
     body.append(_cpp_instr('end'))
-    body.append(_cpp_instr('throw', ex_text(f"_MojoCppExc{{ (int64_t){stop_tag}, nullptr, (void *)nullptr }}")))
+    body.append(_cpp_instr('throw', _cpp_brace_ex('_MojoCppExc', [f"(int64_t){stop_tag}", 'nullptr', '(void *)nullptr'], False)))
     body.append(_cpp_instr('end'))
-    body.append(_cpp_instr('return', ex_text(f"{base}_value({handle})")))
+    body.append(_cpp_instr('return', _cpp_call_ex(f"{base}_value", [handle])))
     e = Ex('lambda')
     e.text = vct
     e.body = body
@@ -3254,7 +3254,7 @@ def _cpx_ident_expr(gen, e) -> Ex:
         if field in gimple_ctypes._CPP_KEYWORD_FIELDS:
             field = f"_kw_{field}"
         gen._cpp_module_global_refs.add((mod_key, e.name))
-        return _field_ex(ex_text(f"_{safe_mod}_globals"), field, False)
+        return _field_ex(ex_var(f"_{safe_mod}_globals"), field, False)
     # A bare module-level function name referenced as a value (e.g.
     # tokenize.py's `encode = detect_encoding`) — the generator body
     # holds it as an opaque int64_t; the call site resolves the real
@@ -3429,7 +3429,7 @@ def _cpx_member_expr(gen, e) -> Ex:
             # reads from, rather than inventing a second one.
             gen._cpp_param_struct_names.add(outer_ft[:-2])
             return _field_ex(_paren_ex(_cpp_cast_ex(outer_ft, _paren_ex(
-                ex_text(f"self->{gimple_ctypes._safe_field(e.obj.member)}")))),
+                _field_ex(ex_var('self'), gimple_ctypes._safe_field(e.obj.member), True)))),
                 gimple_ctypes._safe_field(e.member), True)
         if gimple_ctypes.TypeLattice.is_c_scalar(outer_ft):
             # An attribute read on an OPAQUE scalar-typed self-field
@@ -3898,7 +3898,7 @@ def _cpx_binary_op(gen, e) -> Ex:
             return _cpp_struct_word_lambda(
                 "operator char *() const { return (char *)mojo_box_word(w); }",
                 [_cpp_instr('decl', f"int64_t _mojo_ao_l = {_lw}"),
-                 _cpp_instr('return', ex_text(f"_W{{{_pick}}}"))])
+                 _cpp_instr('return', _cpp_brace_ex('_W', [_pick], True))])
         _rw = _cpp_tagged_operand_word(gen, e.right)
         _pick = (f"mojo_truthy_word(_mojo_ao_l) ? _mojo_ao_l : ({_rw})" if e.op == 'or'
                  else f"mojo_truthy_word(_mojo_ao_l) ? ({_rw}) : _mojo_ao_l")
@@ -3921,8 +3921,8 @@ def _cpx_binary_op(gen, e) -> Ex:
             return _cpp_struct_word_lambda(
                 "operator char *() const { return (char *)w; }",
                 [_cpp_instr('decl', f"int64_t _l = (int64_t)(intptr_t)({gen._cpp_expr(e.left)})"),
-                 _cpp_instr('return', ex_text(f"_W{{mojo_truthy_word(_l) ? _l : "
-                                              f"(int64_t)(intptr_t)(char *)({gen._cpp_expr(e.right)})}}"))])
+                 _cpp_instr('return', _cpp_brace_ex('_W', [f"mojo_truthy_word(_l) ? _l : "
+                                              f"(int64_t)(intptr_t)(char *)({gen._cpp_expr(e.right)})"], True))])
     if e.op == '%':
         _pf = _cpp_percent_format(gen, e)
         if _pf is not None:
@@ -3958,7 +3958,7 @@ def _cpx_binary_op(gen, e) -> Ex:
                 _neg = '!' if e.op == 'not in' else ''
                 _inl = Ex('lambda')
                 _inl.body = [_cpp_instr('decl', f"int64_t _v = (int64_t)(intptr_t)({gen._cpp_expr(e.left)})"),
-                             _cpp_instr('return', ex_text(f"{_neg}({_eq})"))]
+                             _cpp_instr('return', _cpp_not_ex(_paren_ex(ex_text(_eq))) if _neg else _paren_ex(ex_text(_eq)))]
                 return _inl
         a = gen._cpp_expr(e.left)
         b = gen._cpp_expr(e.right)
@@ -6405,6 +6405,23 @@ def _cpp_comma_ex(first, second) -> Ex:
     return e
 
 
+def _cpp_brace_ex(type_text: str, args: list, tight: bool) -> Ex:
+    """`T{args}` (tight) or `T{ args }` as a braced-construction Ex."""
+    e = Ex('brace')
+    e.a = ex_text(type_text)
+    e.args = [_as_ex(x) for x in args]
+    e.tight = tight
+    return e
+
+
+def _cpp_not_ex(inner) -> Ex:
+    """`!inner` as a unary-not Ex."""
+    e = Ex('un')
+    e.op = '!'
+    e.a = _as_ex(inner)
+    return e
+
+
 def _cpp_unary_ex(kind: str, inner) -> Ex:
     """A prefix operator Ex over `inner` (`deref` renders `*x`, `addr` renders `&x`)."""
     e = Ex(kind)
@@ -6463,7 +6480,7 @@ def _cpx_slice_expr(gen, e) -> Ex:
             return ex_text(gen._cpp_container_cast_prefix('MojoList', True) + _cpp_call_ex(
                 'mojo_word_slice_step', [f"(int64_t)({gen._cpp_expr(_sx)})", _hs,
                 f"(int64_t)({_st0})", _he, f"(int64_t)({_sp0})", f"(int64_t)({step})"]).show())
-        return ex_text(f"({start}, {stop}, {step})")
+        return _paren_ex(ex_text(f"{start}, {stop}, {step}"))
     # Python `s[i:j]` on a string (this emitter's `char *`) → the
     # substring, via the same mojo_cstr_slice helper the GIMPLE path's
     # _lower_slice uses for a char* slice (pprint.py's
@@ -6560,7 +6577,7 @@ def _cpx_subscript_expr(gen, e) -> Ex:
             # pointer the reader is typed as (see the prescan above).
             _vct = getattr(gen, '_cpp_local_dict_val_types', {}).get(e.obj.name)
             if _vct is not None:
-                return ex_text(f"({_vct})mojo_dict_get_int({_cpp_as('MojoDict *', obj)}, {key_expr})")
+                return _cpp_cast_ex(_vct, _cpp_call_ex('mojo_dict_get_int', [_cpp_as('MojoDict *', obj), key_expr]))
             return _cpp_call_ex('mojo_dict_get_int', [_cpp_as('MojoDict *', obj), key_expr])
         # A bare identifier that names a real module-level FUNCTION
         # is never a string/container: `Unpack[self]` (typing.py's
@@ -7786,7 +7803,7 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     "int64_t/double seconds expression")
             arg_expr = gen._cpp_expr(target.args[0])
             _slp = Ex('coawait')
-            _slp.a = ex_text(f"_mojoasync_SleepAwaiter{{(uint64_t)((double)({arg_expr}) * 1e9)}}")
+            _slp.a = _cpp_brace_ex('_mojoasync_SleepAwaiter', [f"(uint64_t)((double)({arg_expr}) * 1e9)"], True)
             _slp_stmt = Instr('expr')
             _slp_stmt.rhs = _slp
             return [indent + _slp_stmt.show()]
@@ -9178,7 +9195,7 @@ def _cps_return_stmt(gen, s, indent: str) -> list[str]:
             from mojo.ir.instr import Instr, ex_none, ex_text
             _st = Instr('assign')
             _st.lhs = ex_text(_slot)
-            _st.rhs = ex_text(f"({_rct_cpp})({gen._cpp_expr(s.value)})")
+            _st.rhs = _cpp_cast_ex(_rct_cpp, _paren_ex(ex_text(gen._cpp_expr(s.value))))
             _co = Instr('coreturn')
             _co.rhs = ex_none()
             return [indent + _st.show(), indent + _co.show()]

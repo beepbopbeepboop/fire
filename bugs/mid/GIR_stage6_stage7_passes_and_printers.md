@@ -1019,3 +1019,19 @@ program that takes its branch before it can be checked.
 
 Verified: `c_oracle check --base d9a32f982` identical on all 285 pydiff programs and all 35 coroutine programs;
 `test_gimple_cpp_core_arms.py` 30 arms, 0 failures.
+
+## Status 2026-11-23 (unverified branch): the remaining expression leaves are shapes; not landed
+
+Branch `work/gir-stage7-rest` (not merged) ports the remaining expression text leaves: the braced struct
+constructions (`_W{...}`, `_MojoCppExc{ ... }`, `_mojoasync_SleepAwaiter{...}`, `mojo_dyn_call` wrapped) become a new
+`brace` Ex kind (tight or spaced); the `!` of the negated `in` test becomes `un`; the dictionary-get cast, the
+`(start, stop, step)` tuple text, the `self->` field, the globals field, the `_value` call and the reverse-cast
+become cast/call/field/var shapes.
+
+NOT VERIFIED: this branch was written under a no-testing instruction. It has not been run through `c_oracle` or
+`compile_stdlib.py`, and it must not land until it has been. Verification is the first step before any merge.
+
+Still open for the done criterion: about 24 `.show()` boundaries (the statement printers return text lists that
+their consumers splice; they need to return IR statements), the `+[]` vararg function-pointer statement (a closure
+form with a `+` unary and no capture), and the multi-line tuple-get in `_cpx_call_member` (`mojo_dict_get_int` with a
+runtime cast). The doc is NOT deleted: the done criterion needs an oracle-identical verified run first.
