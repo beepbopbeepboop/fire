@@ -354,6 +354,7 @@ class _Summarizer:
         self.class_names: dict = {}  # the names of the unique classes (for annotations)
         self.class_list: list = []   # every ClassSummary, duplicates included
         self.pending: list = []      # (FnSummary, node, mod, ClassSummary or None)
+        self.cur_origin: str = ''    # the origin of the statement being summarized
 
     # ── phase 1: the closure ────────────────────────────────────────────
 
@@ -592,12 +593,12 @@ class _Summarizer:
             dterm = self._term(scope, dexpr)
             idx = _param_slot(fs, pname)
             if idx >= 0:
-                self.prog.add_flow(dterm, fs.params[idx])
+                self._flow(dterm, fs.params[idx])
         for st in node.body:
             self._stmt(scope, st)
         self._run_deferred(scope)
         if not _terminates(node.body):
-            self.prog.add_flow(const_term(sty.NONE), fs.ret)
+            self._flow(const_term(sty.NONE), fs.ret)
 
     def _run_deferred(self, scope: _Scope) -> None:
         i = 0
@@ -645,7 +646,18 @@ class _Summarizer:
         for st in stmts:
             self._stmt(scope, st)
 
+    def _flow(self, src: Term, dst: int) -> None:
+        self.prog.add_flow(src, dst, self.cur_origin)
+
     def _stmt(self, scope: _Scope, st) -> None:
+        # A statement's flows carry its line; a nested block's statements set their
+        # own line and this one restores ours when they are done.
+        prev = self.cur_origin
+        self.cur_origin = scope.mod.path + ':' + str(st.line)
+        self._stmt_body(scope, st)
+        self.cur_origin = prev
+
+    def _stmt_body(self, scope: _Scope, st) -> None:
         if isinstance(st, N.ExprStmt):
             self._term(scope, st.value)
         elif isinstance(st, N.AssignStmt):
@@ -671,14 +683,14 @@ class _Summarizer:
         elif isinstance(st, N.VarDecl):
             var = self._local_var(scope, st.name)
             if st.value is not None:
-                self.prog.add_flow(self._term(scope, st.value), var)
+                self._flow(self._term(scope, st.value), var)
         elif isinstance(st, N.ReturnStmt):
             if scope.fn is None or scope.fn.ret < 0:
                 return
             if st.value is None:
-                self.prog.add_flow(const_term(sty.NONE), scope.fn.ret)
+                self._flow(const_term(sty.NONE), scope.fn.ret)
             else:
-                self.prog.add_flow(self._term(scope, st.value), scope.fn.ret)
+                self._flow(self._term(scope, st.value), scope.fn.ret)
         elif isinstance(st, N.IfStmt):
             self._term(scope, st.condition)
             narrowed = self._isinstance_narrow(scope, st.condition)
@@ -716,7 +728,7 @@ class _Summarizer:
             self._block(scope, st.body)
             for h in st.handlers:
                 if h.name:
-                    self.prog.add_flow(const_term(sty.DYN), self._local_var(scope, h.name))
+                    self._flow(const_term(sty.DYN), self._local_var(scope, h.name))
                 self._block(scope, h.body)
             if st.else_body is not None:
                 self._block(scope, st.else_body)
@@ -728,7 +740,7 @@ class _Summarizer:
             for item in st.items:
                 self._term(scope, item.expr)
                 if item.alias:
-                    self.prog.add_flow(const_term(sty.DYN), self._local_var(scope, item.alias))
+                    self._flow(const_term(sty.DYN), self._local_var(scope, item.alias))
             self._block(scope, st.body)
         elif isinstance(st, N.RaiseStmt):
             if st.value is not None:
@@ -793,7 +805,7 @@ class _Summarizer:
 
     def _assign(self, scope: _Scope, target, value: Term) -> None:
         if isinstance(target, N.IdentExpr):
-            self.prog.add_flow(value, self._local_var(scope, target.name))
+            self._flow(value, self._local_var(scope, target.name))
         elif isinstance(target, N.MemberExpr):
             self._term(scope, target.obj)
             var = self._member_target_var(scope, target)
@@ -801,7 +813,7 @@ class _Summarizer:
             # declared field can see the store. It flows nowhere.
             if var is not None:
                 for v in var:
-                    self.prog.add_flow(value, v)
+                    self._flow(value, v)
         elif isinstance(target, N.SubscriptExpr):
             conts = self._lvalue_vars(scope, target.obj)
             key = self._term(scope, target.index)
@@ -809,7 +821,7 @@ class _Summarizer:
                 self._undecidable(scope)
                 return
             for v in conts:
-                self.prog.add_flow(op_term('grow', 'setitem', [var_term(v), key, value]), v)
+                self._flow(op_term('grow', 'setitem', [var_term(v), key, value]), v)
         elif isinstance(target, N.TupleExpr):
             for i in range(len(target.elements)):
                 self._assign(scope, target.elements[i], op_term('slot', str(i), [value]))
@@ -822,10 +834,10 @@ class _Summarizer:
             self._undecidable(scope)
             return
         if not _is_tuple_target(target):
-            self.prog.add_flow(el, self._local_var(scope, names[0]))
+            self._flow(el, self._local_var(scope, names[0]))
             return
         for i in range(len(names)):
-            self.prog.add_flow(op_term('slot', str(i), [el]), self._local_var(scope, names[i]))
+            self._flow(op_term('slot', str(i), [el]), self._local_var(scope, names[i]))
 
     # ── names ───────────────────────────────────────────────────────────
 
@@ -963,7 +975,7 @@ class _Summarizer:
             return op_term('cont', 'dict', flat)
         if isinstance(e, N.WalrusExpr):
             var = self._local_var(scope, e.name)
-            self.prog.add_flow(self._term(scope, e.value), var)
+            self._flow(self._term(scope, e.value), var)
             return var_term(var)
         if isinstance(e, N.Comprehension):
             return self._comprehension(scope, e)
@@ -1126,7 +1138,7 @@ class _Summarizer:
             if func.member in _GROW_METHODS:
                 for v in self._lvalue_vars(scope, func.obj):
                     grow_args = [var_term(v)] + args
-                    self.prog.add_flow(op_term('grow', func.member, grow_args), v)
+                    self._flow(op_term('grow', func.member, grow_args), v)
             all_args = [recv] + args + kwvals
             kwnames = [''] * len(args) + names
             return op_term('method', func.member, all_args, kwnames)
@@ -1153,7 +1165,7 @@ class _Summarizer:
         targets = self.prog.param_targets(fs, offset, names)
         for i in range(len(terms)):
             if targets[i] >= 0:
-                self.prog.add_flow(terms[i], targets[i])
+                self._flow(terms[i], targets[i])
 
     def _builtin(self, scope: _Scope, name: str, arg_nodes: list, args: list,
                  names: list, kwvals: list) -> Term:

@@ -178,6 +178,39 @@ class LowerRows(unittest.TestCase):
             self.assertEqual(lower.ret_ctype(g, t), c, t.key)
 
 
+class Origins(unittest.TestCase):
+    """bugs/GIR_type_solver_precision.md, step 1: every flow records its statement's line,
+    and why `ret_sty` has no answer."""
+
+    def test_a_return_flow_carries_its_line(self):
+        src = 'def f():\n    x = 1\n    return x\n'
+        sol = _solve({'main': src})
+        fs = sol.prog.fns['/t/main.py\x1ff']
+        origins = [fl.origin for fl in sol.prog.flows if fl.dst == fs.ret]
+        self.assertIn('/t/main.py:3', origins)
+
+    def test_a_flow_made_while_solving_inherits_its_creators_origin(self):
+        # The argument flow `1 -> put.v` exists only once the solver resolves `t.put`,
+        # so it is made while solving; it must carry the line of the `return` that
+        # made the call (line 6).
+        src = ('struct Tok:\n    var kind: String\n'
+               '    def put(self, v):\n        return v\n'
+               'def use(t: Tok):\n    return t.put(1)\n')
+        sol = _solve({'main': src})
+        put = sol.prog.fns['/t/main.py\x1fTok.put']
+        into_v = [fl for fl in sol.prog.flows if fl.dst == put.params[1]]
+        self.assertTrue(into_v)
+        self.assertIn('/t/main.py:6', [fl.origin for fl in into_v])
+
+    def test_why_none_names_the_reason(self):
+        self.assertEqual(_solve({'main': 'def f():\n    return 1\n'}).why_none('/t/main.py', 'f'), '')
+        self.assertEqual(_solve({'main': 'def f() -> Int:\n    return 1\n'}).why_none('/t/main.py', 'f'),
+                         'annotated')
+        self.assertEqual(_solve({'main': 'def f():\n    yield 1\n'}).why_none('/t/main.py', 'f'),
+                         'undecidable')
+        self.assertEqual(_solve({'main': 'x = 1\n'}).why_none('/t/main.py', 'nope'), 'not-defined')
+
+
 class Summaries(unittest.TestCase):
     """Small programs, summarized and solved; the answers are what the language means."""
 
@@ -309,7 +342,7 @@ class Summaries(unittest.TestCase):
 def main():
     suite = unittest.TestSuite()
     loader = unittest.TestLoader()
-    for case in (JoinTable, FromAnnotation, LowerRows, Summaries):
+    for case in (JoinTable, FromAnnotation, LowerRows, Origins, Summaries):
         suite.addTests(loader.loadTestsFromTestCase(case))
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     return 0 if result.wasSuccessful() else 1

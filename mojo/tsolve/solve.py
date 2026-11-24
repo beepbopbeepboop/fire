@@ -43,7 +43,10 @@ class _Solver:
             self.queue.append(fid)
 
     def add_flow(self, src: Term, dst: int) -> None:
-        self.prog.flows.append(Flow(src, dst))
+        # The flow being evaluated created this one (a method's arguments flow to
+        # the resolved method's parameters), so it inherits that flow's origin.
+        origin = self.prog.flows[self.cur].origin if self.cur >= 0 else ''
+        self.prog.flows.append(Flow(src, dst, origin))
         self.queued.append(False)
         self.enqueue(len(self.prog.flows) - 1)
 

@@ -24,6 +24,20 @@ class Solution:
         """True when `name` in module `path` is a definition the closure has."""
         return func_key(path, name) in self.prog.fns
 
+    def why_none(self, path: str, name: str) -> str:
+        """Why `ret_sty` answers None for `name` in module `path`: '' when it answers,
+        else `not-defined`, `undecidable`, `annotated` or `bot` (no value reaches a return)."""
+        fs = self.prog.fns.get(func_key(path, name))
+        if fs is None:
+            return 'not-defined'
+        if not fs.decidable:
+            return 'undecidable'
+        if fs.annotated_ret:
+            return 'annotated'
+        if self.prog.vars[fs.ret].kind == 'bot':
+            return 'bot'
+        return ''
+
     def ret_sty(self, path: str, name: str):
         """The solved return type of `name` in module `path`, as an STy.
 

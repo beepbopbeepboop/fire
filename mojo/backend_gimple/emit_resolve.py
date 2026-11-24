@@ -1033,6 +1033,7 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 temp_gen._analyzed_paths = gen._analyzed_paths
                 temp_gen._tsolve_frozen = gen._tsolve_frozen
                 temp_gen._tsolve_ledger = gen._tsolve_ledger
+                temp_gen._tsolve_logged = gen._tsolve_logged
                 # Once per TRANSLATION UNIT, not once per module: a
                 # single-TU closure carries ~160 modules and the GPU
                 # introspection definitions are program-wide. Shared by

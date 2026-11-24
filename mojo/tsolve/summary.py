@@ -55,9 +55,10 @@ def op_term(op: str, name: str, args: list, kwnames=None) -> Term:
 
 
 class Flow:
-    def __init__(self, src: Term, dst: int):
+    def __init__(self, src: Term, dst: int, origin: str):
         self.src: Term = src
         self.dst: int = dst
+        self.origin: str = origin   # '<abspath>:<line>' of the statement that made it, or ''
 
 
 class FnSummary:
@@ -113,8 +114,8 @@ class Program:
         self.vars[var] = ty
         self.pinned[var] = True
 
-    def add_flow(self, src: Term, dst: int) -> None:
-        self.flows.append(Flow(src, dst))
+    def add_flow(self, src: Term, dst: int, origin: str = '') -> None:
+        self.flows.append(Flow(src, dst, origin))
 
     def class_is_unique(self, name: str) -> bool:
         cs = self.classes.get(name)

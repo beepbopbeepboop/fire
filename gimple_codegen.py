@@ -3414,6 +3414,8 @@ class GimpleGen:
         self._analyzed_paths: set = set()
         self._tsolve_frozen: dict = {}
         self._tsolve_ledger: list = []
+        # Keys already written to the ledger (one line per decision, not per read).
+        self._tsolve_logged: dict = {}
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen
@@ -6794,13 +6796,20 @@ def _solve_import_closure(gen, filename: str, stmts: list):
 
 
 def _write_tsolve_ledger(gen) -> None:
-    """With FIRE_TSOLVE_LEDGER=<file> set, write the decisions of this compile to it."""
+    """With FIRE_TSOLVE_LEDGER=<file> set, write the decisions of this compile to it,
+    then one `summary` line counting each kind (bugs/GIR_type_solver_precision.md, 4.5)."""
     path = os.environ.get('FIRE_TSOLVE_LEDGER', '')
     if not path:
         return
+    counts = {'early': 0, 'conflict': 0, 'undecided': 0, 'shadow': 0}
     with open(path, 'w') as f:
         for line in gen._tsolve_ledger:
+            kind = line.split(' ', 1)[0]
+            if kind in counts:
+                counts[kind] += 1
             f.write(line + '\n')
+        f.write('summary early=%d conflict=%d undecided=%d shadow=%d\n'
+                % (counts['early'], counts['conflict'], counts['undecided'], counts['shadow']))
 
 
 def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = "",

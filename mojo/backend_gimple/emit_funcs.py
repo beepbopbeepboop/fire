@@ -2563,8 +2563,9 @@ def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> str:
     frozen = gen._tsolve_frozen.get(key)
     if frozen is not None:
         if frozen != ctype:
-            gen._tsolve_ledger.append('conflict ' + qualifier + '.' + bare_name
-                                      + ' early=' + frozen + ' measured=' + ctype)
+            _tsolve_log(gen, 'conflict:' + qualifier + '.' + bare_name,
+                        'conflict ' + qualifier + '.' + bare_name
+                        + ' early=' + frozen + ' measured=' + ctype)
         return frozen
     store[key] = ctype
     return ctype
@@ -2657,12 +2658,46 @@ def _early_return_decision(gen, qualifier: str, bare_name: str):
     ctype = sol.ret_ctype(gen, path, bare_name)
     key = _pair_key(qualifier, bare_name)
     if ctype is None:
-        gen._tsolve_ledger.append('undecided ' + qualifier + '.' + bare_name)
+        _tsolve_log(gen, 'undecided:' + qualifier + '.' + bare_name,
+                    'undecided ' + qualifier + '.' + bare_name
+                    + ' reason=' + sol.why_none(path, bare_name))
         return None
     gen._home_def_return_types[key] = ctype
     gen._tsolve_frozen[key] = ctype
-    gen._tsolve_ledger.append('early ' + qualifier + '.' + bare_name + ' ' + ctype)
+    _tsolve_log(gen, 'early:' + qualifier + '.' + bare_name,
+                'early ' + qualifier + '.' + bare_name + ' ' + ctype)
     return ctype
+
+
+def _tsolve_log(gen, dedupe_key: str, line: str) -> None:
+    """Append one ledger line per key: a decision is made once, a read of it is not
+    a new decision (bugs/GIR_type_solver_precision.md, 4.5)."""
+    if dedupe_key in gen._tsolve_logged:
+        return
+    gen._tsolve_logged[dedupe_key] = True
+    gen._tsolve_ledger.append(line)
+
+
+def _shadow_check(gen, bare_name: str, measured: str) -> None:
+    """Ledger only (no C change): for an unannotated definer the solver answers and that
+    was not frozen, record when the solver's lowered return differs from the backend's
+    measured one. This is the S2 shadow report, measured over the whole closure by the
+    same acceptance run (bugs/GIR_type_solver_precision.md, 4.5)."""
+    sol = getattr(gen, '_tsolve', None)
+    if sol is None or not measured or not gen._current_filename:
+        return
+    path = os.path.abspath(gen._current_filename)
+    if not sol.knows(path, bare_name):
+        return
+    qualifier = _func_qualifier(gen, bare_name)
+    if _pair_key(qualifier, bare_name) in gen._tsolve_frozen:
+        return
+    solver = sol.ret_ctype(gen, path, bare_name)
+    if solver is None or solver == measured:
+        return
+    _tsolve_log(gen, 'shadow:' + qualifier + '.' + bare_name,
+                'shadow ' + qualifier + '.' + bare_name + ' solver=' + solver
+                + ' measured=' + measured)
 
 
 def _imported_def_pts(gen, bare_name: str) -> list | None:
@@ -4279,6 +4314,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # The definer's answer, made effective first: a frozen early answer (the
     # solver decided this return type for an importer) wins over the measured one.
     ret_type = _record_home_def_return_type(gen, node, node.name, ret_type)
+    _shadow_check(gen, node.name, ret_type)
     gen.func_ret_type = ret_type
     gen.current_func_ret_ann = (
         node.return_type if isinstance(node.return_type, str) else '')
