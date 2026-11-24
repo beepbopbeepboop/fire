@@ -64,18 +64,18 @@ PARENTS = [
         '_cpx_walrus', '_cpx_call_expr', '_cpx_slice_expr',
         '_cpx_subscript_expr', '_cpx_await_expr',
     ]),
-    ('_cpp_stmt', 'list[str]', 73, [
+    ('_cpp_stmt', 'list[Instr]', 73, [
         '_cps_expr_stmt', '_cps_assign_stmt', '_cps_var_decl',
         '_cps_aug_assign', '_cps_while_stmt', '_cps_if_stmt',
         '_cps_return_stmt', '_cps_multi_assign_stmt', '_cps_import_stmt',
     ]),
-    ('_cpp_with_stmt', 'list[str]', 256, [
+    ('_cpp_with_stmt', 'list[Instr]', 256, [
         '_cpw_async_with',
     ]),
-    ('_cpp_yield_from', 'list[str]', 595, [
+    ('_cpp_yield_from', 'list[Instr]', 595, [
         '_cpy_handle_local', '_cpy_unsupported_shape',
     ]),
-    ('_cpp_for_stmt', 'list[str]', 456, [
+    ('_cpp_for_stmt', 'list[Instr]', 456, [
         '_cpf_word_iterable', '_cpf_param_call', '_cpf_generator_handle',
         '_cpf_simple_target_call_iterable', '_cpf_call_iterable',
         '_cpf_list_iter_cursor', '_cpf_named_target',
