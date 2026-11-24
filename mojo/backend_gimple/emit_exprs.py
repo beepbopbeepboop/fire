@@ -191,6 +191,9 @@ def lower_expr(gen, node) -> tuple[str, str]:
 # only (the sole member with no binary spelling), and `-` serves both
 # spellings.
 _INT_ARITH_OPS = frozenset(('+', '-', '*', '/', '&', '|', '^', '~', '<<', '>>', '%'))
+# The binary operators Python defines on integers as bit operations. Their
+# operands are never floats in a valid program (see `_lower_binary`).
+_BITWISE_INT_OPS = frozenset(('&', '|', '^', '<<', '>>'))
 
 
 def _mark_known_int(gen, operand_vals: list, res_type: str,
@@ -5183,6 +5186,16 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # double slot records no pointer kind and still unboxes. (Not a nested
     # helper on purpose: the self-hosted backend erases a closure's `gen`
     # capture to int64_t — see `_lb_as_set`'s docstring.)
+    # A bitwise or shift operator beside an INTEGER operand reads a may-box word
+    # as its integer, never as a double: Python defines `& | ^ << >>` on ints
+    # (and on sets, which the int-operand guard excludes), so a float box cannot
+    # reach them in a valid program. Promoting the word to double here made
+    # `(bits >> mbits) & ((1 << ebits) - 1)` in mojo/middle/float8_dtype.py
+    # a `double >> double` gcc error whenever `mbits` came from a kind-mixed
+    # tuple (`ebits, mbits, bias, kind = FLOAT8_FORMATS[...]`): the slot is a
+    # plain word of unknown kind, not a TAGGED box, so only the tagged arm read
+    # it as an integer.
+    _bitwise = op in _BITWISE_INT_OPS
     _lv_ptr_kind = _as_str(gen._get_actual_type(lt, lv)).endswith(' *') \
         if gen._word_may_be_box(lv) else False
     if gen._word_may_be_box(lv) and gimple_ctypes.TypeLattice.is_cstr(rt) and op == '+':
@@ -5193,7 +5206,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             lv = gen._rt_call('int64_t', 'mojo_box_word', [f"{lv}"])
             lt = 'int64_t'
             gen._word_mark_dyn(lv)
-        elif gen._word_is_tagged(lv) and rt not in ('double', 'float'):
+        elif (gen._word_is_tagged(lv) and rt not in ('double', 'float')) \
+                or (_bitwise and gimple_ctypes.TypeLattice.is_int_word(rt)):
             lv = gen._rt_call('int64_t', 'mojo_box_int', [f"{lv}"])
             lt = 'int64_t'
         elif not _lv_ptr_kind:
@@ -5209,7 +5223,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             rv = gen._rt_call('int64_t', 'mojo_box_word', [f"{rv}"])
             rt = 'int64_t'
             gen._word_mark_dyn(rv)
-        elif gen._word_is_tagged(rv) and lt not in ('double', 'float'):
+        elif (gen._word_is_tagged(rv) and lt not in ('double', 'float')) \
+                or (_bitwise and gimple_ctypes.TypeLattice.is_int_word(lt)):
             rv = gen._rt_call('int64_t', 'mojo_box_int', [f"{rv}"])
             rt = 'int64_t'
         elif not _rv_ptr_kind:
