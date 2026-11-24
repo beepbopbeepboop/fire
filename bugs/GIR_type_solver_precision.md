@@ -697,7 +697,7 @@ Closure acceptance: section 8.
 
 - Branch: master. Commits so far (newest last): c7878b789 (step 1 instruments), db2a1cdba
   (2a None receivers, bot-return), 8bc44e1ed (2b externs), b5a1cccdf (2c narrowing),
-  336eff194 (2d dotted annotations).
+  336eff194 (2d dotted annotations), c8bb6578a (2e static/class methods, 2f loose fields).
 - 4.2e (static/class methods) and 4.2f (loose fields) LANDED and verified: test_tsolve 64/0,
   c_oracle identical vs 336eff194 (286 + 35), compile_stdlib 610/0, cycle test PASS.
 - Still open, in order: 4.2g kind pins (`sty.is_bare_container`, `Program.kind_pinned`,
