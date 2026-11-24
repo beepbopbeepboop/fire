@@ -1771,10 +1771,7 @@ def _aug_assign_value_type(gen, node, target_ctype=None) -> str:
     # CPython answer for 34 / 2) — the plain-assignment arm is the one whose
     # int64 answer the box emitter shape contradicts, and only that one
     # gates on `_py_box_expr`.
-    _td = gimple_ctypes._true_div_cotype(base_op, lt, rt)
-    if _td is not None:
-        return _td
-    return gimple_ctypes.TypeLattice.join(lt, rt)
+    return gimple_ctypes.augmented_result_ctype(base_op, lt, rt)
 
 
 def _is_confident_scalar(gen, value) -> bool:
