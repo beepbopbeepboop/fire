@@ -1163,3 +1163,12 @@ functions returning `str`; the three statement helpers have 186 (`_cpp_ir_line`)
       programs; `compile_stdlib.py` `FAILED: 0`, no skips; the transcription-only sites (listed in the Status entries)
       probed until each is reached or its probe is recorded as impossible.
 - [ ] T8. Done criterion: delete this doc in the same commit, with `python3 tools/dangling_doc_refs.py --ratchet`.
+
+## Status 2026-11-23: T2 verified on master (merge `cec0b197f`)
+
+T2 (statement printers return `list[Instr]`) was merged before verification and is verified now:
+- `test_gimple_cpp_core_arms.py`: 30 arms, 0 failures.
+- `c_oracle check --base 3dec79e25` (the commit before T2): identical C on all 285 pydiff programs and identical C++ on all 35 coroutine programs.
+- `compile_stdlib.py` (default parallelism): `PASSED: 610`, `FAILED: 0 (0 expected, 0 unexpected)`, no skips. The run was served almost entirely from the content-addressed cache (100% codegen and GCC hits), so it confirms the same code compiles, not a fresh build.
+
+T2 is T2-done. Still open: T3 through T8.
