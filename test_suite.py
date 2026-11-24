@@ -2289,6 +2289,13 @@ STALE_PER_CHILD_BUDGETS = {
     'formal/x86_64_endtoend_test.py': 1,
     'formal/x86_64_model_test.py': 1,
     'scripts/bootstrap_full_test.py': 1,
+    # 2026-11-23: four `subprocess.run(..., timeout=N)` literals in regression
+    # pins added since the census was last synced. Each is a real child budget
+    # (a dump or a compile+run of one fixture); the count is the ast walk's.
+    'test_helper_dump_regression.py': 1,        # subprocess.run, timeout=60
+    'test_measure_proof_peaks.py': 1,           # subprocess.run, timeout=60
+    'test_t_func_dump_regression.py': 1,        # subprocess.run, timeout=60
+    'test_where_alias_diagnostic.py': 1,        # subprocess.run, timeout=120
     # `test_formal_admitted.py`'s row (5, 2026-10-26's c20bdf09e "5 remain as
     # data-table examples") is dropped 2026-10-27: the conversion landed, and
     # the walk now finds 0 real literals — the "data-table examples" are
@@ -2998,11 +3005,9 @@ def test_a_disabled_test_is_registered_but_never_runs():
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
-        'codegen-container-param-unknown-arg',
+        'doc-refs-stale-verdicts',
         'gimple',
         'gimplerunner',
-        'stdlib-dylib',
-        'stdlib-syntax',
         'suite-self-test',
     ]
     check('disabled: the real registry has no job that is not run',
@@ -3216,11 +3221,9 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
-        'codegen-container-param-unknown-arg',
+        'doc-refs-stale-verdicts',
         'gimple',
         'gimplerunner',
-        'stdlib-dylib',
-        'stdlib-syntax',
         'suite-self-test',
     ]
     check('disabled markers: the state the section is written for is stated, '
