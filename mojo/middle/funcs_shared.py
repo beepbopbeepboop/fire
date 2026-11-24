@@ -32,6 +32,7 @@ import mojo.middle.coro as _coro
 # in full, and why a function-local `import X` survives where `from X import
 # NAME` cannot, is in `mojo/middle/methods_shared.py`'s header comment.
 import mojo.middle.types as gimple_ctypes
+from mojo.middle.module_parse import parse_module_file, parse_module_source
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 # NOT `from mojo.middle.module_shared import module_qualifier` here:
@@ -126,8 +127,7 @@ def _resolve_reexported_closure_func(gen, module: str, name: str, _depth: int = 
             if _mp:
                 with open(_mp) as _mf:
                     _msrc = _mf.read()
-                _stmts = gimple_ctypes.ast_rewriter.rewrite(
-                    gimple_ctypes.Parser(gimple_ctypes.py_tokenize(_msrc)).parse_module())
+                _stmts = parse_module_source(_msrc, _mp)
                 gen._imported_src_cache[module] = (_mp, _msrc, _stmts)
         except Exception:
             _stmts = None
@@ -3068,8 +3068,7 @@ def _selfhost_parsed_source(_f: str) -> list:
         try:
             with open(_f) as _fh:
                 _src = _fh.read()
-            _entry = ast_rewriter.rewrite(
-                Parser(py_tokenize(_src)).with_filename(_f).parse_module())
+            _entry = parse_module_source(_src, _f)
         except Exception:
             _entry = _PARSE_FAILED
         _SELFHOST_PARSE_CACHE[_ck] = _entry
@@ -3091,3 +3090,24 @@ def _selfhost_files_key(_files: list) -> str:
 # Result cache for the passes above, keyed `<pass>#<files fingerprint>`.
 _SELFHOST_EXTRA_FIELD_CACHE: dict = {}
 
+
+class ModuleLoader:
+    """The `load(ref, importer_path)` the whole-closure type solver uses
+    (bugs/GIR_type_solver.md, 2.3).
+
+    It returns the file `_compile_imported_module` compiles for `ref`: the first
+    existing candidate of `_module_candidate_paths_from`, the same lookup the compile
+    uses, parsed by the same helper. A precompiled `.mojoc` artifact, or no candidate
+    at all, is an external module: None. The solver and the compile therefore see
+    one tree per module."""
+
+    def __init__(self, gen):
+        self.gen: object = gen
+
+    def load(self, ref: str, importer_path: str):
+        for path in self.gen._module_candidate_paths_from(ref, importer_path):
+            if os.path.exists(path):
+                if path.endswith('.mojoc'):
+                    return None
+                return (os.path.abspath(path), parse_module_file(path))
+        return None

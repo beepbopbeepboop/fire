@@ -6136,6 +6136,8 @@ class GimpleGen:
         return grsl._locally_bound_names(self, body, params)
     def _module_candidate_paths(self, module_name: str) -> list:
         return grsl._module_candidate_paths(self, module_name)
+    def _module_candidate_paths_from(self, module_name: str, importer) -> list:
+        return grsl._module_candidate_paths_from(self, module_name, importer)
     def _submodule_source_path(self, module_name: str) -> str | None:
         return grsl._submodule_source_path(self, module_name)
     def _compile_imported_module(self, module_name: str, loc: str = '0:0') -> tuple:

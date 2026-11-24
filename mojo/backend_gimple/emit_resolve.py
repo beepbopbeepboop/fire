@@ -42,6 +42,7 @@ from fire_compiler import (
 import regex_compile
 import mlir
 import mojo.middle.types as gimple_ctypes
+from mojo.middle.module_parse import parse_module_source
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.float8_dtype as _float8_dtype
@@ -106,6 +107,11 @@ def _locally_bound_names(gen, body: list, params: list = None) -> set:
 
 
 def _module_candidate_paths(gen, module_name: str) -> list:
+    """`_module_candidate_paths_from` for the module the backend is compiling now."""
+    return _module_candidate_paths_from(gen, module_name, getattr(gen, '_current_filename', None))
+
+
+def _module_candidate_paths_from(gen, module_name: str, _importer) -> list:
     """Ordered candidate source-file paths for `module_name` (dotted or
     bare) — exactly the search-path/extension/dotted-package resolution
     logic `_compile_imported_module` uses to locate a `.py`/`.mojo`
@@ -154,7 +160,6 @@ def _module_candidate_paths(gen, module_name: str) -> list:
     # stale and use syntax the parser can't handle).
     extensions = ['.py', '.mojo']
     importer_dir = None
-    _importer = getattr(gen, '_current_filename', None)
     if _importer:
         importer_dir = gimple_ctypes.os.path.dirname(gimple_ctypes.os.path.abspath(_importer))
     # RELATIVE imports (`from . import sibling` / `from ..pkg import mod`):
@@ -903,8 +908,7 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 gen._record_sys_path_inserts(source, gimple_ctypes.os.path.dirname(gimple_ctypes.os.path.abspath(path)))
 
                 # Compile the module to get both code and type info
-                tokens = gimple_ctypes.py_tokenize(source)
-                stmts = gimple_ctypes.ast_rewriter.rewrite(gimple_ctypes.Parser(tokens).parse_module())
+                stmts = parse_module_source(source, path)
 
                 # Create a temporary codegen to extract types
                 # Use do_imports=True for transitive closure; share dedup sets and type information
