@@ -34,6 +34,10 @@ Instr.kind
   'if'     rhs (condition)            `if (c) {` -- opens a block
   'else'                              `else {`
   'elseif' rhs (condition)            `else if (c) {`
+  'endelse'                           `} else {` -- closes a block and opens its `else` on one line
+  'try'                               `try {`
+  'catch' rhs (exception decl)        `catch (<decl>) {`
+  'catch_rethrow'                     `catch (...) { throw; }` -- a one-line catch-all that rethrows
   'end'                               `}` -- closes a block
   'scope_open' rhs (guard name)        `_MojoScopeExit <g>([&]() {` -- a finally guard opens
   'scope_close'                       `});` -- the finally guard closes
@@ -223,6 +227,15 @@ class Instr:
             return 'else {'
         if k == 'elseif':
             return 'else if (' + self.rhs.show() + ') {'
+        if k == 'endelse':
+            return '} else {'
+        if k == 'try':
+            return 'try {'
+        if k == 'catch':
+            # `catch (_MojoCppExc &e) {`: the handler of a `try` (the rhs is the exception declaration).
+            return 'catch (' + self.rhs.show() + ') {'
+        if k == 'catch_rethrow':
+            return 'catch (...) { throw; }'
         if k == 'scope_open':
             # `_MojoScopeExit <guard>([&]() {`: a scope guard whose body (a `finally`) is a capturing lambda.
             return '_MojoScopeExit ' + self.rhs.show() + '([&]() {'

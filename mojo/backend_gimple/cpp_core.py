@@ -288,7 +288,7 @@ def _cpp_in_link(gen, a: str, a_node, b: str, b_node, negate: bool) -> str:
     return f"({res})"
 
 
-def _cpp_container_literal_init(gen, name: str, value_node, indent: str) -> list[str]:
+def _cpp_container_literal_init(gen, name: str, value_node, indent: str) -> list[Instr]:
     """Emit a REAL runtime construction for a container-LITERAL assignment
     target (`lines = []`, `entry = {}`) into an already-container-typed
     local `name` — the statement-level counterpart of `_infer_simple_expr_
@@ -7002,7 +7002,7 @@ def _cpp_expr(gen, e) -> str:
     return gen._cpp_expr_ex(e).show()
 
 
-def _cpp_assign_received_yield(gen, s, declared: dict, indent: str) -> list[str]:
+def _cpp_assign_received_yield(gen, s, declared: dict, indent: str) -> list[Instr]:
     """`x = yield` / `x = yield v`: the yield as its own statement, then `x`
     bound to the value the yield received.
 
@@ -7037,15 +7037,19 @@ def _cpp_assign_received_yield(gen, s, declared: dict, indent: str) -> list[str]
             gen._cpp_func_scope_decls.append(f"int64_t {cpp_name};")
     _cpp_mark_tagged_word(gen, name)
     target = f"*{cpp_name}" if name in gen._cpp_mut_capture_names else cpp_name
-    if len(lines) == 1 and lines[0].lstrip().startswith('co_yield '):
+    if len(lines) == 1 and lines[0].kind == 'coyield':
         # The yield is one `co_yield` statement, so bind `x` to the value the
         # `co_yield` expression evaluates to: the awaiter's await_resume(),
         # which is the word `{base}_send` stored, or the None box a plain
         # `{base}_resume` stored. The yield-site tagger keeps this `x = `
         # prefix when it boxes the yielded value (cpp_async._cpp_tag_yield_sites).
+        # The statement keeps the co_yield's own indent: `x = co_yield <v>;`.
         ln = lines[0]
-        lead = ln[:len(ln) - len(ln.lstrip())]
-        return [f"{lead}{target} = {ln.lstrip()}"]
+        bound = Instr('assign')
+        bound.lhs = ex_text(target)
+        bound.rhs = ex_text('co_yield ' + ln.rhs.show())
+        bound.indent = ln.indent
+        return [bound]
     # Any other yield shape (a tuple or delegated yield) keeps the None box:
     # it has no single co_yield to read the sent word from.
     lines.append(_cpp_assign_line(target, 'mojo_box_none()', indent))
@@ -7206,11 +7210,11 @@ def _cpp_plan_yield_walk(gen, rewrite):
     return real.hoisted, new
 
 
-def _cpp_emit_hoisted(gen, hoisted, declared: dict, indent: str) -> list[str]:
+def _cpp_emit_hoisted(gen, hoisted, declared: dict, indent: str) -> list[Instr]:
     """Lower the `(kind, stmt)` pairs of `_cpp_plan_yield_walk` in order: a
     yield as its received-value statement, a spilled call as an ordinary
     assignment to its fresh temporary."""
-    lines: list[str] = []
+    lines: list[Instr] = []
     for kind, h in hoisted:
         if kind == 'yield':
             lines.extend(_cpp_assign_received_yield(gen, h, declared, indent))
@@ -7232,7 +7236,7 @@ def _cpp_hoist_yields_expr(gen, expr, declared: dict, indent: str):
     return _cpp_emit_hoisted(gen, hoisted, declared, indent), new_expr
 
 
-def _cpp_hoist_conditional_expression(gen, s, declared: dict, indent: str) -> list[str] | None:
+def _cpp_hoist_conditional_expression(gen, s, declared: dict, indent: str) -> list[Instr] | None:
     """Handle expressions where a yield appears in a conditionally-evaluated
     position (right operand of `and`/`or`, either branch of a ternary).
 
@@ -7305,7 +7309,10 @@ def _cpp_hoist_conditional_expression(gen, s, declared: dict, indent: str) -> li
         # The lines: _mg_t = lhs; if (cond _mg_t) { _mg_t = <hoisted_yield>; }
         indent2 = indent + '    '
         lines = [_cpp_assign_line(mg_t_name, lhs_cpp, indent)]
-        lines.append(f"{indent2}if ({cond} ({mg_t_name}))) {{")
+        # The condition's text is `cond (_mg_t)))` (three closing parens): the
+        # printed line is kept byte-identical, so the `if` shape takes the rhs
+        # with that exact tail.
+        lines.append(_cpp_ir_line(indent2, 'if', f"{cond} ({mg_t_name}))"))
         
         # Now hoist the yield into this block. Since we're inside _cpp_hoist_conditional_expression,
         # we need to create the yield hoisting within this function.
@@ -7319,8 +7326,8 @@ def _cpp_hoist_conditional_expression(gen, s, declared: dict, indent: str) -> li
         # Emit the actual value (with the yield replaced by the hoisted local)
         # We need to emit: _mg_t = (the new right expression)
         rhs_cpp = gen._cpp_expr(new_right_expr) if hasattr(gen, '_cpp_expr') else new_right_expr.name
-        lines.append(f"{indent2}{mg_t_name} = {rhs_cpp};")
-        lines.append(f"{indent2}}}")
+        lines.append(_cpp_assign_line(mg_t_name, rhs_cpp, indent2))
+        lines.append(_cpp_ir_line(indent2, 'end'))
         return lines
 
     if isinstance(value, gimple_ctypes.TernaryExpr):
@@ -7344,17 +7351,17 @@ def _cpp_hoist_conditional_expression(gen, s, declared: dict, indent: str) -> li
         then_cpp = gen._cpp_expr(value.then_val) if hasattr(gen, '_cpp_expr') else value.then_val.name
         else_cpp = gen._cpp_expr(value.else_val) if hasattr(gen, '_cpp_expr') else value.else_val.name
         
-        lines.append(f"{indent2}if ({cond_cpp}) {{")
-        lines.append(f"{indent2}    {mg_t_name} = {then_cpp};")
-        lines.append(f"{indent2}}} else {{")
+        lines.append(_cpp_ir_line(indent2, 'if', cond_cpp))
+        lines.append(_cpp_assign_line(mg_t_name, then_cpp, indent2 + '    '))
+        lines.append(_cpp_ir_line(indent2, 'endelse'))
         
         # For the else branch that may contain a yield, we need to hoist it
         hoisted_lines, new_else_expr = _cpp_hoist_yields_expr(gen, value.else_val, declared, indent2)
         lines.extend(hoisted_lines)
         # Emit the actual value (with the yield replaced by the hoisted local)
         else_cpp = gen._cpp_expr(new_else_expr) if hasattr(gen, '_cpp_expr') else new_else_expr.name
-        lines.append(f"{indent2}    {mg_t_name} = {else_cpp};")
-        lines.append(f"{indent2}}}")
+        lines.append(_cpp_assign_line(mg_t_name, else_cpp, indent2 + '    '))
+        lines.append(_cpp_ir_line(indent2, 'end'))
         return lines
 
     return None
@@ -7529,7 +7536,7 @@ def _cpp_str_word_polymorphic_locals(gen, fn, param_ctypes) -> set:
     return out
 
 
-def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list[str]:
+def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list[Instr]:
     """`yield a, b, ...` — boxes the tuple's elements into a real
     runtime `MojoList *` (mojo_mark_as_tuple'd, exactly the same
     representation `_lower_tuple_literal` builds for an ordinary,
@@ -7628,7 +7635,7 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
     return lines
 
 
-def _cpp_hoist_walrus_decls(gen, expr, declared: dict, indent: str) -> list[str]:
+def _cpp_hoist_walrus_decls(gen, expr, declared: dict, indent: str) -> list[Instr]:
     """Pre-declare every `name := value` (WalrusExpr) target appearing
     inside an `if`/`while` CONDITION expression, before the condition
     itself is lowered. `_cpp_expr`'s own WalrusExpr case only emits the
@@ -7694,7 +7701,7 @@ def _cpp_call_line(indent: str, fname: str, args: list) -> Instr:
     return i
 
 
-def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
+def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[Instr]:
     """`ExprStmt` in `_cpp_stmt`: a bare expression, including a discarded docstring.
 
     One arm of `_cpp_stmt`, which tests the condition and calls this."""
@@ -7808,7 +7815,8 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             _slp.a = _cpp_brace_ex('_mojoasync_SleepAwaiter', [f"(uint64_t)((double)({arg_expr}) * 1e9)"], True)
             _slp_stmt = Instr('expr')
             _slp_stmt.rhs = _slp
-            return [indent + _slp_stmt.show()]
+            _slp_stmt.indent = len(indent)
+            return [_slp_stmt]
         # Step D: a bare, value-DISCARDING `await <call to another
         # compiled async function>` statement — same real co_await/
         # composition machinery as the value-producing shape
@@ -8083,7 +8091,7 @@ def _cps_expr_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     return [_cpp_ir_line(indent, 'expr', f"(void)({gen._cpp_expr(s.value)})")]
 
 
-def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
+def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[Instr]:
     """`AssignStmt` in `_cpp_stmt`: every assignment shape the C++ emitter knows.
 
     One arm of `_cpp_stmt`, which tests the condition and calls this."""
@@ -8897,7 +8905,7 @@ def _cps_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     return [_cpp_assign_line(ex_text(cpp_name), ex_text(val), indent)]
 
 
-def _cps_var_decl(gen, s, declared: dict, indent: str) -> list[str]:
+def _cps_var_decl(gen, s, declared: dict, indent: str) -> list[Instr]:
     """`VarDecl` in `_cpp_stmt`.
 
     One arm of `_cpp_stmt`, which tests the condition and calls this."""
@@ -8957,7 +8965,7 @@ def _cpp_assign_line(lhs, rhs, indent: str) -> Instr:
     return i
 
 
-def _cps_aug_assign(gen, s, declared: dict, indent: str) -> list[str]:
+def _cps_aug_assign(gen, s, declared: dict, indent: str) -> list[Instr]:
     """`AugAssignStmt` in `_cpp_stmt`.
 
     One arm of `_cpp_stmt`, which tests the condition and calls this."""
@@ -9020,7 +9028,7 @@ def _cpp_ir_line(ind: str, kind: str, text: str = '') -> Instr:
     return ins
 
 
-def _cps_while_stmt(gen, s, declared: dict, indent: str) -> list[str]:
+def _cps_while_stmt(gen, s, declared: dict, indent: str) -> list[Instr]:
     """`WhileStmt` in `_cpp_stmt`.
 
     One arm of `_cpp_stmt`, which tests the condition and calls this."""
@@ -9081,7 +9089,7 @@ def _cps_while_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     return lines
 
 
-def _cps_if_stmt(gen, s, declared: dict, indent: str) -> list[str]:
+def _cps_if_stmt(gen, s, declared: dict, indent: str) -> list[Instr]:
     """`IfStmt` in `_cpp_stmt`.
 
     One arm of `_cpp_stmt`, which tests the condition and calls this."""
@@ -9171,7 +9179,7 @@ def _cps_if_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     return lines
 
 
-def _cps_return_stmt(gen, s, indent: str) -> list[str]:
+def _cps_return_stmt(gen, s, indent: str) -> list[Instr]:
     """`ReturnStmt` in `_cpp_stmt`.
 
     One arm of `_cpp_stmt`, which tests the condition and calls this."""
@@ -9184,7 +9192,8 @@ def _cps_return_stmt(gen, s, indent: str) -> list[str]:
         from mojo.ir.instr import Instr, ex_none, ex_text
         i = Instr('return')
         i.rhs = ex_none() if s.value is None else ex_text(gen._cpp_expr(s.value))
-        return [indent + i.show()]
+        i.indent = len(indent)
+        return [i]
     if gen._cpp_emit_kind == 'async':
         # Step B's whole target shape: `return <scalar-expr>` is how
         # this narrow async function's one result gets produced —
@@ -9201,7 +9210,8 @@ def _cps_return_stmt(gen, s, indent: str) -> list[str]:
         from mojo.ir.instr import Instr, ex_text
         i = Instr('coreturn')
         i.rhs = ex_text(gen._cpp_expr(s.value))
-        return [indent + i.show()]
+        i.indent = len(indent)
+        return [i]
     if s.value is not None:
         # Value-carrying `return` in an ELIGIBLE generator (see
         # _gen_cpp_generator_unit's eligibility computation): store
@@ -9220,7 +9230,8 @@ def _cps_return_stmt(gen, s, indent: str) -> list[str]:
             _st.rhs = _cpp_cast_ex(_rct_cpp, _paren_ex(ex_text(gen._cpp_expr(s.value))))
             _co = Instr('coreturn')
             _co.rhs = ex_none()
-            return [indent + _st.show(), indent + _co.show()]
+            _st.indent = _co.indent = len(indent)
+            return [_st, _co]
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             "`return <value>` inside a generator is not supported "
             "(a generator's `return` ends iteration with no value, "
@@ -9228,10 +9239,11 @@ def _cps_return_stmt(gen, s, indent: str) -> list[str]:
     from mojo.ir.instr import Instr, ex_none
     _co = Instr('coreturn')
     _co.rhs = ex_none()
-    return [indent + _co.show()]
+    _co.indent = len(indent)
+    return [_co]
 
 
-def _cps_multi_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
+def _cps_multi_assign_stmt(gen, s, declared: dict, indent: str) -> list[Instr]:
     """`MultiAssignStmt` in `_cpp_stmt`.
 
     One arm of `_cpp_stmt`, which tests the condition and calls this."""
@@ -9290,7 +9302,7 @@ def _cps_multi_assign_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     return []
 
 
-def _cps_import_stmt(gen, s) -> list[str]:
+def _cps_import_stmt(gen, s) -> list[Instr]:
     """`ImportStmt` / `FromImportStmt` in `_cpp_stmt`.
 
     One arm of `_cpp_stmt`, which tests the condition and calls this."""
@@ -9333,7 +9345,7 @@ def _cps_import_stmt(gen, s) -> list[str]:
     return []  # imports are resolved at module scope; no-op in generators
 
 
-def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
+def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[Instr]:
     if isinstance(s, gimple_ctypes.PassStmt):
         return []
     _hoisted = _cpp_hoist_yield_operands(gen, s, declared, indent)
@@ -9800,7 +9812,7 @@ def _cpp_lower_scandir_withs(gen, node):
         for f in _cpp_field_names(node)})
 
 
-def _cpw_async_with(gen, s, declared: dict, indent: str) -> list[str]:
+def _cpw_async_with(gen, s, declared: dict, indent: str) -> list[Instr]:
     """`async with` in `_cpp_with_stmt`.
 
     One arm of `_cpp_with_stmt`, which tests the condition and calls this."""
@@ -9895,7 +9907,7 @@ def _cpw_async_with(gen, s, declared: dict, indent: str) -> list[str]:
     return lines
 
 
-def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
+def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[Instr]:
     """`with` / `async with` inside a compiled coroutine body.
 
     `async with` in an async function lowers to the async context manager
@@ -9913,7 +9925,7 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         return _cpw_async_with(gen, s, declared, indent)
 
     # --- synchronous with handling (existing behavior) ---
-    _alias_decl_lines: list[str] = []
+    _alias_decl_lines: list[Instr] = []
     _intrinsic = False
     _open_manager = False
     _open_path_expr = None
@@ -10098,7 +10110,7 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             "single-threaded cooperative scheduler) would be UNSAFE "
             "across a real suspension point, where another coroutine "
             "genuinely could run")
-    lines: list[str] = list(_alias_decl_lines)
+    lines: list[Instr] = list(_alias_decl_lines)
     guard_var = ''
     body_indent = indent
     open_scope = False
@@ -10153,7 +10165,7 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
 def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                                  declared: dict, indent: str,
                                  index_var: str = None,
-                                 index_start_expr: str = '0') -> list[str]:
+                                 index_start_expr: str = '0') -> list[Instr]:
     """`for <target> in <call to another already-compiled generator>():`
     inside a coroutine body — an ordinary (non-`yield from`) consuming
     loop over a sibling generator (e.g. dis.py's
@@ -10469,21 +10481,21 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                 gen._cpp_word_locals.add(nm)
             if nm not in declared:
                 declared[nm] = slot_ct
-                lines.append(f"{body_indent}{gimple_exprtypes._c_to_cpp_scalar_type(slot_ct)} {nm};")
+                lines.append(_cpp_ir_line(body_indent, 'decl', f"{gimple_exprtypes._c_to_cpp_scalar_type(slot_ct)} {nm}"))
             suf = gimple_ctypes.TypeLattice.list_suffix(slot_ct)
             if gimple_ctypes.TypeLattice.is_double(suf):
-                lines.append(f"{body_indent}{nm} = mojo_list_get_double({val_var}, {i});")
+                lines.append(_cpp_assign_line(nm, f"mojo_list_get_double({val_var}, {i})", body_indent))
             elif suf == 'str':
-                lines.append(f"{body_indent}{nm} = mojo_list_get_str({val_var}, {i});")
+                lines.append(_cpp_assign_line(nm, f"mojo_list_get_str({val_var}, {i})", body_indent))
             elif gimple_ctypes.TypeLattice.is_bool(slot_ct):
-                lines.append(f"{body_indent}{nm} = (bool)mojo_list_get_int({val_var}, {i});")
+                lines.append(_cpp_assign_line(nm, f"(bool)mojo_list_get_int({val_var}, {i})", body_indent))
             elif api.get('mixed_slots') and gimple_ctypes.TypeLattice.is_word(slot_ct):
                 # A slot the producer filled from a kind-mixed list holds a
                 # BOX; bound to a name it becomes the box's own word (a
                 # string's pointer, an int), as every possibly-boxed read is.
-                lines.append(f"{body_indent}{nm} = mojo_box_word(mojo_list_get_int({val_var}, {i}));")
+                lines.append(_cpp_assign_line(nm, f"mojo_box_word(mojo_list_get_int({val_var}, {i}))", body_indent))
             else:
-                lines.append(f"{body_indent}{nm} = mojo_list_get_int({val_var}, {i});")
+                lines.append(_cpp_assign_line(nm, f"mojo_list_get_int({val_var}, {i})", body_indent))
     elif is_self_recursive:
         # `vct` is None here (this generator's own value_ctype is only
         # known AFTER its whole body finishes generating — see
@@ -10514,14 +10526,14 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
         # either is a string" rule already gives the right answer
         # regardless).
         if target not in declared:
-            lines.append(f"{body_indent}auto {target} = {base}_value({guard}.g);")
+            lines.append(_cpp_assign_line(f"auto {target}", f"{base}_value({guard}.g)", body_indent))
         else:
-            lines.append(f"{body_indent}{target} = {base}_value({guard}.g);")
+            lines.append(_cpp_assign_line(target, f"{base}_value({guard}.g)", body_indent))
     else:
         if target not in declared:
             declared[target] = vct
-            lines.append(f"{body_indent}{gimple_exprtypes._c_to_cpp_scalar_type(vct)} {target};")
-        lines.append(f"{body_indent}{target} = {base}_value({guard}.g);")
+            lines.append(_cpp_ir_line(body_indent, 'decl', f"{gimple_exprtypes._c_to_cpp_scalar_type(vct)} {target}"))
+        lines.append(_cpp_assign_line(target, f"{base}_value({guard}.g)", body_indent))
         if api.get('tagged'):
             # Each value the loop binds is a box of the yield's own kind.
             _cpp_mark_tagged_word(gen, target)
@@ -10580,7 +10592,7 @@ def _cpp_refuse_unpacking_target(target) -> None:
             "dict .items(), or a container global unpacks per slot")
 
 
-def _cpp_counted_list_loop(gen, s, declared: dict, indent: str, wi: str, elem_ctype) -> list[str]:
+def _cpp_counted_list_loop(gen, s, declared: dict, indent: str, wi: str, elem_ctype) -> list[Instr]:
     """`for <target> in <wi>:` over a MojoList of word values, as a counted C loop.
 
     The shared body of the three iteration arms (`_cpf_word_iterable`,
@@ -10613,7 +10625,7 @@ def _cpp_counted_list_loop(gen, s, declared: dict, indent: str, wi: str, elem_ct
     return lines
 
 
-def _cpf_word_iterable(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
+def _cpf_word_iterable(gen, s: 'ForStmt', declared: dict, indent: str) -> list[Instr]:
     """`for` over a callable-as-word parameter or a word local in `_cpp_for_stmt`.
 
     One arm of `_cpp_for_stmt`, which tests the condition and calls this."""
@@ -10714,7 +10726,7 @@ def _cpf_word_iterable(gen, s: 'ForStmt', declared: dict, indent: str) -> list[s
     return _pre + gen._cpp_for_stmt(_inner_for, declared, indent)
 
 
-def _cpf_param_call(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str] | None:
+def _cpf_param_call(gen, s: 'ForStmt', declared: dict, indent: str) -> list[Instr] | None:
     """`for` over a call through a parameter that holds a callable in `_cpp_for_stmt`.
 
     One arm of `_cpp_for_stmt`, which tests the condition and calls this."""
@@ -10793,7 +10805,7 @@ def _cpf_param_call(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]
     return None
 
 
-def _cpf_generator_handle(gen, s: 'ForStmt', declared: dict, indent: str, target) -> list[str]:
+def _cpf_generator_handle(gen, s: 'ForStmt', declared: dict, indent: str, target) -> list[Instr]:
     """`for` with a tuple target inside `_cpp_for_stmt`.
 
     One arm of `_cpp_for_stmt`, which tests the condition and calls this."""
@@ -10830,7 +10842,7 @@ def _cpf_generator_handle(gen, s: 'ForStmt', declared: dict, indent: str, target
     return lines
 
 
-def _cpf_simple_target_call_iterable(gen, s: 'ForStmt', declared: dict, indent: str, target) -> list[str] | None:
+def _cpf_simple_target_call_iterable(gen, s: 'ForStmt', declared: dict, indent: str, target) -> list[Instr] | None:
     """`for <name> in <call>(...)` with no else-branch in `_cpp_for_stmt`.
 
     One arm of `_cpp_for_stmt`, which tests the condition and calls this."""
@@ -10906,7 +10918,7 @@ def _cpf_simple_target_call_iterable(gen, s: 'ForStmt', declared: dict, indent: 
     return None
 
 
-def _cpf_call_iterable(gen, s: 'ForStmt', declared: dict, indent: str, target) -> list[str] | None:
+def _cpf_call_iterable(gen, s: 'ForStmt', declared: dict, indent: str, target) -> list[Instr] | None:
     """`for` over a call result in `_cpp_for_stmt`, the shapes not claimed above.
 
     One arm of `_cpp_for_stmt`, which tests the condition and calls this."""
@@ -11062,7 +11074,7 @@ def _cpf_call_iterable(gen, s: 'ForStmt', declared: dict, indent: str, target) -
     return None
 
 
-def _cpf_list_iter_cursor(gen, s: 'ForStmt', declared: dict, indent: str, target) -> list[str]:
+def _cpf_list_iter_cursor(gen, s: 'ForStmt', declared: dict, indent: str, target) -> list[Instr]:
     """`for` over a first-class list-iterator local in `_cpp_for_stmt`.
 
     One arm of `_cpp_for_stmt`, which tests the condition and calls this."""
@@ -11105,7 +11117,7 @@ def _cpf_list_iter_cursor(gen, s: 'ForStmt', declared: dict, indent: str, target
     return lines
 
 
-def _cpf_named_target_iter_expr(gen, s: 'ForStmt', declared: dict, indent: str, target, iter_expr: str, target_was_declared: bool) -> list[str]:
+def _cpf_named_target_iter_expr(gen, s: 'ForStmt', declared: dict, indent: str, target, iter_expr: str, target_was_declared: bool) -> list[Instr]:
     """The named-target arm of _cpf_named_target when the iterable is an expression (extracted, unchanged body).
 
     One arm of `_cpf_named_target`, which tests the condition and calls this."""
@@ -11204,7 +11216,7 @@ def _cpf_named_target_iter_expr(gen, s: 'ForStmt', declared: dict, indent: str, 
             s.iterable.func.obj.member)
         if gimple_ctypes.TypeLattice.is_py_scalar(_stub_ft):
             _self_scalar_iter_stub = True
-    _pre_lines: list[str] = []
+    _pre_lines: list[Instr] = []
     # `for x in sorted(<self.field-or-declared-list>, key=...):`
     # -- `_cpp_expr` above already lowered the WHOLE `sorted(...)`
     # call into `iter_expr` (a self-invoking C++ lambda building
@@ -11680,7 +11692,7 @@ def _cpf_named_target_iter_expr(gen, s: 'ForStmt', declared: dict, indent: str, 
     return lines
 
 
-def _cpf_named_target_call_iter(gen, s: 'ForStmt', declared: dict, indent: str, target, target_was_declared: bool) -> list[str]:
+def _cpf_named_target_call_iter(gen, s: 'ForStmt', declared: dict, indent: str, target, target_was_declared: bool) -> list[Instr]:
     """The named-target arm of _cpf_named_target when the iterable is a call (extracted, unchanged body).
 
     One arm of `_cpf_named_target`, which tests the condition and calls this."""
@@ -11711,7 +11723,7 @@ def _cpf_named_target_call_iter(gen, s: 'ForStmt', declared: dict, indent: str, 
     return lines
 
 
-def _cpf_named_target_call_iter2(gen, s: 'ForStmt', declared: dict, indent: str, target, target_was_declared: bool) -> list[str]:
+def _cpf_named_target_call_iter2(gen, s: 'ForStmt', declared: dict, indent: str, target, target_was_declared: bool) -> list[Instr]:
     """The second call-iterable arm of _cpf_named_target (extracted, unchanged body).
 
     One arm of `_cpf_named_target`, which tests the condition and calls this."""
@@ -11736,7 +11748,7 @@ def _cpf_named_target_call_iter2(gen, s: 'ForStmt', declared: dict, indent: str,
     return lines
 
 
-def _cpf_named_target(gen, s: 'ForStmt', declared: dict, indent: str, target) -> list[str]:
+def _cpf_named_target(gen, s: 'ForStmt', declared: dict, indent: str, target) -> list[Instr]:
     """`for <name> in <iterable>` in `_cpp_for_stmt`, the shapes not claimed above.
 
     One arm of `_cpp_for_stmt`, which tests the condition and calls this."""
@@ -11983,7 +11995,7 @@ def _cpf_named_target(gen, s: 'ForStmt', declared: dict, indent: str, target) ->
         f"unsupported for-loop iterable type: {type(s.iterable).__name__}")
 
 
-def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
+def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[Instr]:
     """Plain `for <var> in <iterable>:` inside a generator body.
     Lowers to a C++ range-for or indexed loop over the iterable.
     Only supports iterable as a simple identifier or call expression."""
@@ -12436,7 +12448,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         f"unsupported for-loop target type: {type(target).__name__}")
 
 
-def _cpp_async_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
+def _cpp_async_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[Instr]:
     """`async for <var> in <call>():` -- the final step of the async/
     await codegen project's own consumption protocol for a compiled
     async generator (see `_gen_cpp_async_generator_unit`'s docstring).
@@ -12631,7 +12643,7 @@ def _cpp_async_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[
     return lines
 
 
-def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
+def _cpp_raise_stmt(gen, s, indent: str) -> list[Instr]:
     """`raise`/`raise ExcName(...)` inside a generator body — Milestone D.
     Translates to a real C++ `throw` of `_MojoCppExc` (type tag + string
     message + object slot — see the shared preamble's struct def and
@@ -12834,7 +12846,7 @@ def _cpp_raise_tuple_msg_expr(gen, lit) -> Ex:
     return _paren_ex(lam)
 
 
-def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
+def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[Instr]:
     """`try`/`except`/`finally` inside a generator body — Milestone D.
     Real C++ `try`/`catch (_MojoCppExc &...)`, with the SAME per-
     exception-type-tag dispatch semantics (inheritance-aware descendant
@@ -12891,7 +12903,7 @@ def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
 
     body_indent = indent
     closing = []
-    lines: list[str] = []
+    lines: list[Instr] = []
     if node.finally_body:
         gen._cpp_finally_seq = getattr(gen, '_cpp_finally_seq', 0) + 1
         fin_var = f"__mojofin{gen._cpp_finally_seq}"
@@ -12934,13 +12946,13 @@ def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
 
     handlers = node.handlers
     if handlers:
-        lines.append(f"{body_indent}bool {caught_flag} = false;")
-        lines.append(f"{body_indent}_MojoCppExc {caught_var}{{}};")
+        lines.append(_cpp_ir_line(body_indent, 'decl', f"bool {caught_flag} = false"))
+        lines.append(_cpp_ir_line(body_indent, 'decl', f"_MojoCppExc {caught_var}{{}}"))
 
-    lines.append(f"{body_indent}try {{")
+    lines.append(_cpp_ir_line(body_indent, 'try'))
     for st in node.body:
         lines.extend(gen._cpp_stmt(st, declared, inner_indent))
-    lines.append(f"{body_indent}}}")
+    lines.append(_cpp_ir_line(body_indent, 'end'))
 
     if not handlers:
         # A pure try/finally with no except clauses at all: a bare C++
@@ -12953,16 +12965,16 @@ def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
         # (RAII, above) as the exception unwinds through this rethrow,
         # exactly like an ordinary uncaught throw anywhere else in this
         # translation unit.
-        lines.append(f"{body_indent}catch (...) {{ throw; }}")
+        lines.append(_cpp_ir_line(body_indent, 'catch_rethrow'))
         lines.extend(closing)
         return lines
 
-    lines.append(f"{body_indent}catch (_MojoCppExc &{exc_var}) {{")
-    lines.append(f"{inner_indent}{caught_flag} = true;")
-    lines.append(f"{inner_indent}{caught_var} = {exc_var};")
-    lines.append(f"{body_indent}}}")
+    lines.append(_cpp_ir_line(body_indent, 'catch', f"_MojoCppExc &{exc_var}"))
+    lines.append(_cpp_assign_line(caught_flag, 'true', inner_indent))
+    lines.append(_cpp_assign_line(caught_var, exc_var, inner_indent))
+    lines.append(_cpp_ir_line(body_indent, 'end'))
 
-    lines.append(f"{body_indent}if ({caught_flag}) {{")
+    lines.append(_cpp_ir_line(body_indent, 'if', caught_flag))
     _UNIVERSAL_CATCH_NAMES = ('Exception', 'BaseException')
     typed = [h for h in handlers
              if gen._handler_exc_name(h) is not None
@@ -12977,7 +12989,7 @@ def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
             lines.extend(gen._cpp_except_handler_body(
                 bare[0], caught_var, declared, handler_indent))
         else:
-            lines.append(f"{handler_indent}throw {caught_var};")
+            lines.append(_cpp_ir_line(handler_indent, 'throw', caught_var))
     else:
         first = True
         for h in typed:
@@ -12994,13 +13006,13 @@ def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
                 # first typed handler — mirrors _gen_stmt_TryStmt's own
                 # rationale for this exactly.
                 cond = f"{caught_var}.type_id == (int64_t)0 || {cond}"
-            kw = 'if' if first else 'else if'
-            lines.append(f"{handler_indent}{kw} ({cond}) {{")
+            kind = 'if' if first else 'elseif'
+            lines.append(_cpp_ir_line(handler_indent, kind, cond))
             lines.extend(gen._cpp_except_handler_body(
                 h, caught_var, declared, handler_indent + '    '))
-            lines.append(f"{handler_indent}}}")
+            lines.append(_cpp_ir_line(handler_indent, 'end'))
             first = False
-        lines.append(f"{handler_indent}else {{")
+        lines.append(_cpp_ir_line(handler_indent, 'else'))
         if bare:
             lines.extend(gen._cpp_except_handler_body(
                 bare[0], caught_var, declared, handler_indent + '    '))
@@ -13013,22 +13025,22 @@ def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
             # the captured COPY (not the original catch-clause
             # reference, long out of scope by now) — same value either
             # way, just needs to still be alive here.
-            lines.append(f"{handler_indent}    throw {caught_var};")
-        lines.append(f"{handler_indent}}}")
-    lines.append(f"{body_indent}}}")  # closes `if ({caught_flag})`
+            lines.append(_cpp_ir_line(handler_indent + '    ', 'throw', caught_var))
+        lines.append(_cpp_ir_line(handler_indent, 'end'))
+    lines.append(_cpp_ir_line(body_indent, 'end'))  # closes `if ({caught_flag})`
 
     # try/else: runs when no exception occurred (caught_flag is false)
     if node.else_body:
-        lines.append(f"{body_indent}if (!{caught_flag}) {{")
+        lines.append(_cpp_ir_line(body_indent, 'if', f"!{caught_flag}"))
         for es in node.else_body:
             lines.extend(gen._cpp_stmt(es, declared, body_indent + '    '))
-        lines.append(f"{body_indent}}}")
+        lines.append(_cpp_ir_line(body_indent, 'end'))
 
     lines.extend(closing)
     return lines
 
 
-def _cpy_handle_local(gen, indent: str, call) -> list[str]:
+def _cpy_handle_local(gen, indent: str, call) -> list[Instr]:
     """`yield from <compiled-generator handle local>` in `_cpp_yield_from`.
 
     One arm of `_cpp_yield_from`, which tests the condition and calls this."""
@@ -13080,7 +13092,7 @@ def _cpy_handle_local(gen, indent: str, call) -> list[str]:
     ]
 
 
-def _cpy_unsupported_shape(gen, indent: str, call) -> list[str]:
+def _cpy_unsupported_shape(gen, indent: str, call) -> list[Instr]:
     """`yield from` over anything that is not a known compiled generator in `_cpp_yield_from`: refuse the unit.
 
     One arm of `_cpp_yield_from`, which tests the condition and calls this."""
@@ -13163,7 +13175,7 @@ def _cpy_unsupported_shape(gen, indent: str, call) -> list[str]:
             _cpp_ir_line(indent, 'end')]
 
 
-def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
+def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[Instr]:
     """`yield from <call>` — delegates to ANOTHER generator this same
     compile has already itself translated via the C++20-coroutine path
     (self._supported_generators/self._generator_api; populated by

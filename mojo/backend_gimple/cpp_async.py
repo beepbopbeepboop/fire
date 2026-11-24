@@ -50,6 +50,7 @@ import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_exprs as gex
 import mojo.backend_gimple.cpp_core as gcc_
+from mojo.ir.instr import Instr
 import mojo.middle.coro as gimple_gen_coro
 def _cpp_declared_type(gen, node) -> str | None:
     """C++ type of a node for `in`/`not in` dispatch, when it is a plain
@@ -185,11 +186,11 @@ def _cpp_fresh_name(gen, prefix: str = "_mg_t") -> str:
 
 
 def _cpp_stmt_with_break_flag(gen, s, declared: dict, indent: str,
-                               brk_var: str) -> list[str]:
+                               brk_var: str) -> list[Instr]:
     """Like _cpp_stmt but intercepts BreakStmt to set brk_var = true before
     breaking, so while/else can detect whether the loop exited via break."""
     if isinstance(s, gimple_ctypes.BreakStmt):
-        return [f"{indent}{brk_var} = true;", f"{indent}break;"]
+        return [gcc_._cpp_assign_line(brk_var, 'true', indent), gcc_._cpp_ir_line(indent, 'break')]
     return gen._cpp_stmt(s, declared, indent)
 
 
@@ -274,7 +275,7 @@ def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
     return False
 
 
-def _cpp_match_stmt(gen, s, declared: dict, indent: str) -> list[str]:
+def _cpp_match_stmt(gen, s, declared: dict, indent: str) -> list[Instr]:
     """`match subject: case p: ... case _: ...` inside a generator body.
     Lowers to a chain of if/else comparisons (switch-style equality),
     mirroring _gen_stmt_MatchStmt's dispatch: each case's patterns are
@@ -289,7 +290,7 @@ def _cpp_match_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         is_wildcard = not match_case.patterns or any(
             isinstance(p, gimple_ctypes.IdentExpr) and p.name == '_' for p in match_case.patterns)
         if is_wildcard:
-            lines.append(f"{indent}else {{")
+            lines.append(gcc_._cpp_ir_line(indent, 'else'))
         else:
             conds = []
             for p in match_case.patterns:
@@ -299,20 +300,20 @@ def _cpp_match_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     # class pattern `case str(x)`: bind the capture, match if truthy
                     if p.args and isinstance(p.args[0], gimple_ctypes.IdentExpr):
                         declared[p.args[0].name] = 'int64_t'
-                        lines.append(f"{indent}{p.args[0].name} = {subj};")
+                        lines.append(gcc_._cpp_assign_line(p.args[0].name, subj, indent))
                     conds.append(f"({subj} != 0)")
                 else:
                     conds.append(f"({subj} == {gen._cpp_expr(p)})")
             cond = ' || '.join(conds)
-            lines.append(f"{indent}if ({cond}) {{")
+            lines.append(gcc_._cpp_ir_line(indent, 'if', cond))
         for st in match_case.body:
-            lines.extend(gcc_._cpp_render_lines(gen._cpp_stmt(st, declared, indent + '    ')))
-        lines.append(f"{indent}}}")
+            lines.extend(gen._cpp_stmt(st, declared, indent + '    '))
+        lines.append(gcc_._cpp_ir_line(indent, 'end'))
     return lines
 
 
 def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
-                              indent: str) -> list[str]:
+                              indent: str) -> list[Instr]:
     """Emit one `except ...:` handler's binding + body as C++ lines,
     nested inside the dispatch `if`/`else if` this handler's caller
     (_cpp_try_stmt) already built OUTSIDE the actual `catch` clause (see
@@ -334,11 +335,11 @@ def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
         # _cpp_raise_stmt), so bind as char * — there is no struct-typed
         # exception payload in this scalar-only generator-body model.
         declared[handler.name] = 'char *'
-        lines.append(f"{indent}char *{handler.name} = {caught_var}.msg;")
+        lines.append(gcc_._cpp_ir_line(indent, 'decl', f"char *{handler.name} = {caught_var}.msg"))
     gen._cpp_reraise_stack.append(caught_var)
     try:
         for st in handler.body:
-            lines.extend(gcc_._cpp_render_lines(gen._cpp_stmt(st, declared, indent)))
+            lines.extend(gen._cpp_stmt(st, declared, indent))
     finally:
         gen._cpp_reraise_stack.pop()
     return lines
