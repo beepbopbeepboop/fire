@@ -3090,7 +3090,7 @@ def _selfhost_files_key(_files: list) -> str:
 _SELFHOST_EXTRA_FIELD_CACHE: dict = {}
 
 
-class ModuleLoader:
+class ClosureLoader:
     """The `load(ref, importer_path)` the whole-closure type solver uses
     (bugs/GIR_type_solver.md, 2.3).
 

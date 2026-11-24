@@ -6788,9 +6788,9 @@ def _solve_import_closure(gen, filename: str, stmts: list):
     S1). It runs once, before any code generation, over the same import closure
     the compile walks, and reads each module through the compile's own lookup."""
     from mojo.tsolve import solve_closure
-    from mojo.middle.funcs_shared import ModuleLoader
+    from mojo.middle.funcs_shared import ClosureLoader
     root = os.path.abspath(filename) if filename else ''
-    return solve_closure(root, stmts, ModuleLoader(gen).load)
+    return solve_closure(root, stmts, ClosureLoader(gen).load)
 
 
 def _write_tsolve_ledger(gen) -> None:

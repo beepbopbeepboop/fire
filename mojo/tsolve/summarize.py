@@ -179,6 +179,67 @@ def _is_tuple_target(target) -> bool:
     return isinstance(target, N.TupleExpr)
 
 
+def _fstring_body(value: str) -> str:
+    """The text between the quotes of an f-string literal's value (`f"x{a}"` -> `x{a}`)."""
+    i = 0
+    while i < len(value) and value[i] in 'fFtT':
+        i += 1
+    body = value[i:]
+    for q in ('\'\'\'', '"""', "'", '"'):
+        if body.startswith(q) and body.endswith(q) and len(body) >= 2 * len(q):
+            return body[len(q):len(body) - len(q)]
+    return body
+
+
+def _fstring_exprs(body: str):
+    """The source text of each replacement field `{...}` of an f-string body, or None
+    when a field is not closed. `{{` and `}}` are literal braces. A conversion (`!r`)
+    or a format spec (`:>3`) at the field's top level is not part of the expression,
+    and a trailing `=` (the `{x=}` form) is not either."""
+    out = []
+    i = 0
+    n = len(body)
+    while i < n:
+        if body[i] != '{':
+            i += 1
+            continue
+        if i + 1 < n and body[i + 1] == '{':
+            i += 2
+            continue
+        j = i + 1
+        depth = 0
+        cut = -1
+        while j < n:
+            c = body[j]
+            if c == '}' and depth == 0:
+                break
+            if c == '(' or c == '[' or c == '{':
+                depth += 1
+            elif c == ')' or c == ']' or c == '}':
+                depth -= 1
+            elif depth == 0 and cut < 0:
+                if c == ':' or (c == '!' and j + 1 < n and body[j + 1] != '='):
+                    cut = j
+            j += 1
+        if j >= n:
+            return None
+        end = cut if cut >= 0 else j
+        expr = body[i + 1:end].strip()
+        if expr.endswith('='):
+            expr = expr[:len(expr) - 1].strip()
+        out.append(expr)
+        i = j + 1
+    return out
+
+
+def _parse_expression(text: str):
+    """The expression node of `text`, or None when it does not parse."""
+    try:
+        return N.Parser(N.py_tokenize(text))._parse_expr(0)
+    except Exception:
+        return None
+
+
 def _find_imports(obj, out: list) -> None:
     if isinstance(obj, (list, tuple)):
         for x in obj:
@@ -736,9 +797,9 @@ class _Summarizer:
         elif isinstance(target, N.MemberExpr):
             self._term(scope, target.obj)
             var = self._member_target_var(scope, target)
-            if var is None:
-                self._undecidable(scope)
-            else:
+            # None: no class in the closure declares this field, so no read of any
+            # declared field can see the store. It flows nowhere.
+            if var is not None:
                 for v in var:
                     self.prog.add_flow(value, v)
         elif isinstance(target, N.SubscriptExpr):
@@ -853,10 +914,8 @@ class _Summarizer:
         if isinstance(e, N.StringLiteral):
             if e.is_bytes or e.is_tstring:
                 return const_term(sty.DYN)
-            if e.is_interpolated and '(' in e.value:
-                # The parser keeps an f-string as text: a call inside it is not
-                # a node, so its flows are not known.
-                self._undecidable(scope)
+            if e.is_interpolated:
+                self._fstring_fields(scope, e.value)
             return const_term(sty.STR)
         if isinstance(e, N.IdentExpr):
             return self._ident(scope, e.name)
@@ -913,8 +972,38 @@ class _Summarizer:
             if e.value is not None:
                 self._term(scope, e.value)
             return const_term(sty.DYN)
+        if isinstance(e, N.CastExpr):
+            self._term(scope, e.value)
+            return const_term(sty.DYN)
+        if isinstance(e, N.SliceExpr):
+            self._term(scope, e.obj)
+            self._slice_parts(scope, e)
+            return const_term(sty.DYN)
+        if isinstance(e, (N.EllipsisLiteral, N.ImagLiteral, N.DottedLiteral)):
+            return const_term(sty.DYN)
+        if isinstance(e, N.TstringLiteral):
+            # A template string's fields are not modelled: undecidable if it has any.
+            if '{' in e.value:
+                self._undecidable(scope)
+            return const_term(sty.DYN)
         self._undecidable(scope)
         return const_term(sty.DYN)
+
+    def _fstring_fields(self, scope: _Scope, value: str) -> None:
+        """Walk the replacement fields of an f-string: each `{expr}` is parsed with
+        the compiler's expression parser and its flows added. A field that does not
+        parse makes the function undecidable."""
+        body = _fstring_body(value)
+        fields = _fstring_exprs(body)
+        if fields is None:
+            self._undecidable(scope)
+            return
+        for text in fields:
+            node = _parse_expression(text)
+            if node is None:
+                self._undecidable(scope)
+            else:
+                self._term(scope, node)
 
     def _terms(self, scope: _Scope, exprs: list) -> list:
         out = []

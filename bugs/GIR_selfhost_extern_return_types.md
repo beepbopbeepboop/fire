@@ -253,3 +253,31 @@ and no `conflict` or `undecided` line. Commit with step 4 if you prefer.
   - A lookup by an imported alias uses the definer's `original_name` (`_func_csym`).
   NOT done: the self-host translation unit acceptance (item 2 of Acceptance above), and the
   `--ratchet` / doc deletion, which depend on it.
+
+- 2026-11-24 (session 2, later): acceptance measured on the working tree (copy, `tools/selfhost_ci.py`
+  under memcap 24 GB, peak 11.3 GB; gcc-mp-15 census). Progression: 40 gcc errors -> 12; the ledger:
+  39 `early` and 35 `conflict`, 2848 `undecided`. NOT yet met (criterion: 0 conflicting types, 0
+  makes-integer-from-pointer, 0 conflict, 0 undecided).
+  Landed this round (verified: unit tests, c_oracle 286+35 identical, compile_stdlib 610/0, cycle test):
+  - the stub lookup and the early decision recover a mangled symbol's definer name (`_definer_name`);
+  - `_qualifier_paths` is keyed by `module_qualifier(module_name)` too: the store's qualifier is the
+    sanitized form (`mojo_middle_funcs_shared`), which the raw dotted key never matched;
+  - the summarizer parses f-string fields with the compiler's expression parser (undecidable 1626 -> 325);
+    value-only nodes (cast, slice, ellipsis, imag, dotted) are dyn with their children walked;
+    a store to a field no class declares flows nowhere;
+  - `ModuleLoader` renamed `ClosureLoader` (collided with `module_loader.ModuleLoader`); `sty.py`
+    helpers given unique names (`_sty_intern`, ...) after a C-name collision.
+  Remaining, in order of what the census shows:
+  1. `dyn` answers that the definer measures as `char *` / a container (35 conflicts, e.g.
+     `_sanitize_cname_qualifier`: `return q.lstrip(..) if q else q`, where the parameter `q` is `dyn`
+     from its mixed call sites, so the join is `dyn`). The solver must narrow a parameter by what its
+     uses prove, or the dyn join must be refined; a `str`-only method on a dyn receiver is not enough
+     on its own because the `else q` arm still joins dyn.
+  2. `elaborate.infer_struct_type_args`: the solver says `MojoList *` (correct: `resolved[0]` is a list
+     of type-argument lists), the backend measures `int64_t` (its element read is boxed). A measurement
+     disagreement to settle by making the backend's read typed, not by the solver.
+  3. `undecided`: `elaborate.type_param_names` (866 lines), `module_loader.module_name_for_path`,
+     `build_config.find_gcc` / `find_gxx`, `module_loader.load_module`. These are decidable; their
+     answer is `bot`, so no value reaches their returns. Diagnose which parameter is never fed.
+  4. the 12 remaining gcc errors (a `register_module_member_value` conflicting type and the
+     `dyn`-decided family members above).

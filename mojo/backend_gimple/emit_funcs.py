@@ -2594,11 +2594,44 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     store = getattr(gen, '_home_def_return_types', None)
     if store is None:
         return None
+    # An imported symbol's key is the MANGLED symbol (`<qualifier>_<name>_<hash>`).
+    # The store and the solver are keyed by the definer's bare name, which the
+    # symbol carries; `_definer_name` recovers it, and only a name the closure
+    # defines counts.
+    name = _definer_name(gen, qualifier, bare_name)
+    if name is not None:
+        bare_name = name
     key = _pair_key(qualifier, bare_name)
     got = store.get(key)
     if got is None:
         return _early_return_decision(gen, qualifier, bare_name)
     return got
+
+
+def _definer_name(gen, qualifier: str, sym: str):
+    """The bare name of the definition a mangled symbol `sym` names, or None.
+
+    A mangled symbol is `<qualifier>_<name>_<6 hex digits>`, and the solver's
+    table tells us which `name` is a real definition in the qualifier's module,
+    so a symbol that is not a mangled name of a closure definition gives None."""
+    sol = getattr(gen, '_tsolve', None)
+    if sol is None:
+        return None
+    path = gen._qualifier_paths.get(qualifier)
+    if not path:
+        return None
+    pre = qualifier + '_'
+    if not sym.startswith(pre) or len(sym) < len(pre) + 8:
+        return None
+    if sym[len(sym) - 7] != '_':
+        return None
+    for ch in sym[len(sym) - 6:]:
+        if ch not in '0123456789abcdef':
+            return None
+    cand = sym[len(pre):len(sym) - 7]
+    if sol.knows(path, cand):
+        return cand
+    return None
 
 
 def _early_return_decision(gen, qualifier: str, bare_name: str):

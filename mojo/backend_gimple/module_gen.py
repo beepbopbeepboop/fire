@@ -15086,7 +15086,10 @@ def gen_module_impl(self, stmts: list):
         self._inline_module_qualifiers[os.path.abspath(self._current_filename)] = self.module_name
         # The solver's early decision needs the qualifier -> file map before this
         # module's imports compile (see emit_funcs._early_return_decision).
+        # Keyed by the sanitized qualifier the symbols and the store use
+        # (`module_qualifier`), and by the raw module name.
         self._qualifier_paths[self.module_name] = os.path.abspath(self._current_filename)
+        self._qualifier_paths[gimple_exprtypes.module_qualifier(self.module_name)] = os.path.abspath(self._current_filename)
     self._toplevel_dep_init_modules: list[str] = []
     self._import_module_comptime_vals = {}  # module qualifier → {name: comptime value} for import X
     _gmi_prefold_toplevel_comptime(self, stmts)

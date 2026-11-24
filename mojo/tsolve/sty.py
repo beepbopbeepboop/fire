@@ -35,7 +35,7 @@ class STy:
         self.kind: str = kind      # one of KINDS
         self.name: str = name      # class name when kind == 'struct', else ''
         self.args: list = args     # list/set: [elem]; dict: [key, val]; tuple: slots
-        self.key: str = _spell(kind, name, args)
+        self.key: str = _sty_spell(kind, name, args)
 
     def __repr__(self) -> str:
         return self.key
@@ -44,7 +44,7 @@ class STy:
 _INTERN: dict = {}
 
 
-def _spell(kind: str, name: str, args: list) -> str:
+def _sty_spell(kind: str, name: str, args: list) -> str:
     if kind == 'struct':
         return 'struct:' + name
     if kind == 'list':
@@ -61,7 +61,7 @@ def _spell(kind: str, name: str, args: list) -> str:
     return kind
 
 
-def _make(kind: str, name: str, args: list) -> STy:
+def _sty_intern(kind: str, name: str, args: list) -> STy:
     t = STy(kind, name, args)
     got = _INTERN.get(t.key)
     if got is not None:
@@ -70,37 +70,37 @@ def _make(kind: str, name: str, args: list) -> STy:
     return t
 
 
-BOT: STy = _make('bot', '', [])
-NONE: STy = _make('none', '', [])
-BOOL: STy = _make('bool', '', [])
-INT: STy = _make('int', '', [])
-FLOAT: STy = _make('float', '', [])
-STR: STy = _make('str', '', [])
-FUNC: STy = _make('func', '', [])
-DYN: STy = _make('dyn', '', [])
+BOT: STy = _sty_intern('bot', '', [])
+NONE: STy = _sty_intern('none', '', [])
+BOOL: STy = _sty_intern('bool', '', [])
+INT: STy = _sty_intern('int', '', [])
+FLOAT: STy = _sty_intern('float', '', [])
+STR: STy = _sty_intern('str', '', [])
+FUNC: STy = _sty_intern('func', '', [])
+DYN: STy = _sty_intern('dyn', '', [])
 
 
 def list_of(elem: STy) -> STy:
-    return _make('list', '', [elem])
+    return _sty_intern('list', '', [elem])
 
 
 def set_of(elem: STy) -> STy:
-    return _make('set', '', [elem])
+    return _sty_intern('set', '', [elem])
 
 
 def dict_of(key: STy, val: STy) -> STy:
-    return _make('dict', '', [key, val])
+    return _sty_intern('dict', '', [key, val])
 
 
 def tuple_of(slots: list) -> STy:
-    return _make('tuple', '', list(slots))
+    return _sty_intern('tuple', '', list(slots))
 
 
 def struct_of(name: str) -> STy:
-    return _make('struct', name, [])
+    return _sty_intern('struct', name, [])
 
 
-def _rebuild(t: STy, args: list) -> STy:
+def _sty_rebuild(t: STy, args: list) -> STy:
     if t.kind == 'list':
         return list_of(args[0])
     if t.kind == 'set':
@@ -110,7 +110,7 @@ def _rebuild(t: STy, args: list) -> STy:
     return tuple_of(args)
 
 
-def _cap_at(t: STy, level: int) -> STy:
+def _sty_cap_at(t: STy, level: int) -> STy:
     # `level` is the nesting level of `t` itself: the outermost type is 1.
     if not t.args:
         return t
@@ -118,13 +118,13 @@ def _cap_at(t: STy, level: int) -> STy:
         return DYN
     new_args = []
     for a in t.args:
-        new_args.append(_cap_at(a, level + 1))
-    return _rebuild(t, new_args)
+        new_args.append(_sty_cap_at(a, level + 1))
+    return _sty_rebuild(t, new_args)
 
 
 def cap(t: STy) -> STy:
     """Limit container nesting to `MAX_DEPTH`; a deeper container becomes `dyn`."""
-    return _cap_at(t, 1)
+    return _sty_cap_at(t, 1)
 
 
 def join(a: STy, b: STy) -> STy:

@@ -257,6 +257,12 @@ class Summaries(unittest.TestCase):
                '    return x.kind\n')
         self.assertEqual(_ret({'main': src}, 'h'), 'str')
 
+    def test_an_fstring_field_with_a_call_is_decidable(self):
+        # The call inside the f-string is parsed, so the function is decidable.
+        src = ('def p(a: Int):\n    return a\n'
+               'def f(x):\n    return f"{p(len(x))}!{x!r:>3}"\n')
+        self.assertEqual(_ret({'main': src}, 'f'), 'str')
+
     def test_a_loop_read_before_its_assignment_still_sees_the_variable(self):
         src = ('def f(xs: list[Int]):\n'
                '    last = 0\n'
