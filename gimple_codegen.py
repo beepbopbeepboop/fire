@@ -3154,6 +3154,24 @@ class GimpleGen:
         # `_imported_global_accessors` by `_emit_imported_global_accessors`;
         # read by `gimple_exprtypes.is_python_bool_expr`.
         self._imported_global_bool: set = set()
+        # Module-alias-qualified data global name -> (c_return_type,
+        # accessor_c_symbol, DEFINING module's qualified name, the global's
+        # name in that module), keyed by the alias LOCAL name first
+        # (`alias -> {member -> entry}`). Populated by
+        # `_emit_imported_global_accessors` for a `import X as alias`
+        # statement (or a bare `import X`), the same export table and the
+        # same accessor symbol the `from X import <global>` spelling uses —
+        # but kept OUT of `_imported_global_accessors`, which is keyed by
+        # the bare name a `from` import binds and is consulted by the bare
+        # read in `_lower_IdentExpr`. A bare name in an `import` statement
+        # is never bound by that import, so registering it there would
+        # route a bare read to an accessor that is not this module's to
+        # read. Consulted by `_lower_MemberExpr`'s module-alias branch.
+        self._imported_alias_accessors: dict = {}
+        # `(alias local name, member)` pairs whose DEFINING value is a Python
+        # bool — the alias spelling's counterpart of `_imported_global_bool`.
+        # Read by `is_python_bool_expr`'s alias-qualified read arm.
+        self._imported_alias_global_bool: set = set()
         # Concrete imported structs used as parameter types here: their StructDefs
         # (so the layout typedef is emitted in dylib mode) and their names (so only
         # these — not local structs — get the authoritative struct-pointer param
