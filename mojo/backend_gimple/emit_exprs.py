@@ -769,13 +769,17 @@ def _lie_global_window(gen, _global_owner_mod, _imp_field, _imp_fields, _imp_hom
         # so its triple does not exist yet. Phase 1.7's own conclusion for
         # the name IS the owner's conclusion — `_global_to_module` named
         # this owner for it one gate ago — and `_imp_pending` has already
-        # established that the type is a container, whose field is
-        # declared `int64_t` (the rule two lines below, which is where the
-        # `c_decl_from_owner` of 'int64_t' comes from). So the load and
-        # the type still agree BY CONSTRUCTION rather than by a second
-        # inference: this module's struct has no such member (it never
-        # declared it), so the owner's is the only field there is.
-        _read_types = ('int64_t', gen._global_var_types[name])
+        # established that the type is a container. A container field is
+        # declared `int64_t` (the boxing rule two lines below) UNLESS the
+        # name is a dispatch-table global, which the owner declares with its
+        # forced C type (`_gmi_declare_table_global`, e.g. `MojoDict *` for
+        # `_SELFHOST_EXTRA_FIELD_CACHE`). Answering `int64_t` for those made
+        # an importer read the pointer field into an integer temp: "assignment
+        # to 'int64_t' from 'MojoDict *' makes integer from pointer without a
+        # cast" in emit_funcs' selfhost scan. The table is the one source for
+        # that type, so the load and the type still agree by construction.
+        _read_types = (gimple_ctypes.dispatch_table_global_ctype(name) or 'int64_t',
+                       gen._global_var_types[name])
         _read_mod = _imp_home
     elif _read_types is None:
         _owner_s = _as_str(_global_owner_mod) if _global_owner_mod is not None else ''
