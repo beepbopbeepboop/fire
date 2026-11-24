@@ -1759,6 +1759,11 @@ def _lme_struct_field(gen, node, field_map, op: str, ov, struct_name: str) -> tu
         gen, gen._struct_name_owner.get(struct_name), node.member, ov, op, struct_name)
     t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
     _mark_boxed_field_read(gen, struct_name, node.member, field_type, t)
+    # Stage 5c: a MIXED field (a scalar beside `None`) stores `None` as the
+    # shared box, so its read is a box and answers by the box's kind.
+    if (gimple_ctypes.TypeLattice.is_word(field_type)
+            and ginf.mixed_field_read(gen, struct_name, node.member)):
+        gen._word_mark_mixed_field(t)
     # PART 6 (2026-10-22, family C): record a READ of a tagged-Optional
     # field so the boolean-context conversions (_ensure_bool_cond /
     # `not`) consult the is_some side-band instead of the raw word.
@@ -4507,6 +4512,11 @@ def _kind_arith_operand(gen, ctype: str, val: str, op: str) -> bool:
         return False
     if not gen._word_may_be_box(val):
         return False
+    # A read of a MIXED struct field (stage 5c) holds an int or the None box,
+    # never a float box, so there is no kind to select on: the tail unwraps it
+    # to its word like any other boxed operand.
+    if gen._word_is_mixed_field(val):
+        return False
     return not gimple_ctypes.TypeLattice.ends_in_star(
         _as_str(gen._get_actual_type(ctype, val)))
 
@@ -4934,6 +4944,11 @@ def _lbt_boxed_none_compare(gen, op: str, left_node, lt: str, lv: str, right_nod
     # read can tell apart.
     _mixed_none = (isinstance(_other_node, gimple_ctypes.IdentExpr)
                    and ginf.mixed_box_name(gen, _other_node.name))
+    # A read of a MIXED struct field is a box-holding word as well (stage 5c):
+    # its `None` is the shared box and its scalar is a bare word, so the
+    # identity test asks the box's kind, never the word.
+    if gen._word_is_mixed_field(_other):
+        _mixed_none = True
     # Only an int word: a `char *` name keeps its NULL-pointer test below.
     # A float box answers 0 here, which is the right answer for a float.
     if (gimple_ctypes.TypeLattice.is_int_word(_other_t)

@@ -19509,7 +19509,9 @@ def gen_module_impl(self, stmts: list):
     _pv_ein.collect_param_value_obs(self, all_functions,
                                     [_as_structdef_node(_pv_s) for _pv_s in all_structs_for_methods
                                      if isinstance(_pv_s, StructDef)],
-                                    _method_caller_bodies)
+                                    _method_caller_bodies,
+                                    [_as_str(_pv_o.name) for _pv_o in stmts
+                                     if isinstance(_pv_o, StructDef)])
 
     for _gm_stmt in stmts:
         if isinstance(_gm_stmt, AssignStmt) and isinstance(_gm_stmt.target, IdentExpr):

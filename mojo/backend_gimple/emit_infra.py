@@ -5007,6 +5007,12 @@ def param_value_class(gen, func_name, param_name) -> str:
     return 'unknown'
 
 
+def is_none_literal_node(value) -> bool:
+    """True for a literal `None` (the parser spells it as a `NoneLiteral` or as
+    the bare name)."""
+    return _pv_is_none_node(value)
+
+
 def _pv_is_none_node(value) -> bool:
     return isinstance(value, gimple_ctypes.NoneLiteral) \
         or (isinstance(value, gimple_ctypes.IdentExpr)
@@ -5291,7 +5297,7 @@ def _pv_collect_round(gen, bodies: list, structs: dict, defs: dict, pnames: dict
 
 
 def collect_param_value_obs(gen, all_functions: list, all_structs: list,
-                            caller_bodies: list) -> None:
+                            caller_bodies: list, own_struct_names: list = None) -> None:
     """Fill `gen._param_value_obs` (and the tables `value_class_of` reads):
     for every unannotated parameter of a function, method or constructor of
     this module, the kinds of value its call sites pass (doc/GIR.md stage 5c).
@@ -5329,6 +5335,8 @@ def collect_param_value_obs(gen, all_functions: list, all_structs: list,
         allnames[k] = set(pnames[k])
     gen._pv_structs = structs
     gen._pv_param_names = allnames
+    gen._pv_own_structs = set(_as_str(n) for n in (own_struct_names or []))
+    gen._pv_mixed_cache = None
     locs: dict = {}
     for entry in caller_bodies:
         one: dict = {}
@@ -5348,6 +5356,30 @@ def collect_param_value_obs(gen, all_functions: list, all_structs: list,
         gen._param_value_obs = table
         if same:
             break
+
+
+def mixed_field_read(gen, struct_name, member) -> bool:
+    """True iff `<struct_name>.<member>` is a MIXED field of a struct defined
+    in THIS module (`mixed_field_names`): its slot holds a scalar beside
+    `None`, `None` is stored as the shared box, and every read of the field
+    answers from the box.
+
+    Only a struct the module itself defines is asked: the decision rests on
+    the call sites of the struct's methods, which only the defining module's
+    own compile sees, so an imported struct (whose defining module made its
+    own decision from its own call sites) is left as it was rather than read
+    with a representation its stores may not use."""
+    own = getattr(gen, '_pv_own_structs', None)
+    if not own or _as_str(struct_name) not in own:
+        return False
+    cache = getattr(gen, '_pv_mixed_cache', None)
+    if cache is None:
+        cache = {}
+        gen._pv_mixed_cache = cache
+    sn = _as_str(struct_name)
+    if sn not in cache:
+        cache[sn] = mixed_field_names((getattr(gen, '_pv_structs', None) or {})[sn], gen)
+    return _as_str(member) in cache[sn]
 
 
 def mixed_field_names(struct, gen=None) -> frozenset:
