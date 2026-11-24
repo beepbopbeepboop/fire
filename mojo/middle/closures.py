@@ -27,7 +27,7 @@ from fire_compiler import (
     WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list, _as_dict,
     for_target_names,
 )
-from mojo.middle.types import _declared_vars_body, _mojo_type, _used_idents_node
+from mojo.middle.types import TypeLattice, _declared_vars_body, _mojo_type, _used_idents_node
 from mojo.middle.exprtypes import _walk_ast, is_bound_method_value
 from mojo.middle.solvers import ClosureInfo
 
@@ -290,14 +290,14 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                                 ctx, bstmt.value,
                                 ctx.var_types.get(bstmt.value.obj.name, ''))):
                         t = 'MojoBoundMethod *'
-                    if t == 'void':
+                    if TypeLattice.is_void(t):
                         t = 'int64_t'
                     enriched_scope[name] = t
                     ctx.var_types[name] = t
             elif isinstance(bstmt, VarDecl):
                 if bstmt.name not in enriched_scope:
                     t = ctx._quick_type(bstmt.value) if bstmt.value else 'int64_t'
-                    if t == 'void':
+                    if TypeLattice.is_void(t):
                         t = 'int64_t'
                     enriched_scope[bstmt.name] = t
                     ctx.var_types[bstmt.name] = t
@@ -362,7 +362,7 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                 _wname = _as_str(_wn.name)
                 if _wname not in enriched_scope:
                     _wt = ctx._quick_type(_wn.value)
-                    if _wt == 'void':
+                    if TypeLattice.is_void(_wt):
                         _wt = 'int64_t'
                     enriched_scope[_wname] = _wt
                     ctx.var_types[_wname] = _wt

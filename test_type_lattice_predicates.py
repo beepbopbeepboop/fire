@@ -10,10 +10,11 @@ vocabulary three ways:
   1. Each predicate's EXACT membership — the answer key below is independent of
      the implementation (it is the tuple the predicate replaced).
   2. Every entry of `tools/type_string_codemod.py`'s tuple table: the
-     predicates it emits, taken together, must accept exactly the tuple's
-     members. The only advertised exceptions are the classes that are wider on
-     purpose (`is_int` knows `unsigned int`; `is_float` knows `__fp16`), and
-     each is listed with the member it adds.
+     predicates it emits, taken together, must accept EXACTLY the tuple's
+     members. No extra member is excused: a predicate that answers a wider
+     class (`is_int` knows `unsigned int`, `is_float` knows `__fp16`,
+     `is_unsolved` knows `'unknown'`) is not what a tuple test may emit, so
+     the table spells the tuple as an `or` of single-spelling predicates.
   3. Every predicate the codemod emits exists on `TypeLattice`.
 
 Run: `python3 test_type_lattice_predicates.py` (no build, no compiler run).
@@ -50,6 +51,16 @@ ANSWER_KEY = {
     'is_word': {'int64_t'},
     'is_uword': {'uint64_t'},
     'is_int_word': {'int', 'int64_t'},
+    # The single-spelling integer and float predicates the exact rewrites use
+    # (mojo/middle/types.py); each answers only its own spelling.
+    'is_c_int': {'int'},
+    'is_i8': {'int8_t'},
+    'is_i16': {'int16_t'},
+    'is_i32': {'int32_t'},
+    'is_u16': {'uint16_t'},
+    'is_u32': {'uint32_t'},
+    'is_c_float': {'float'},
+    'is_no_type': {''},
     'is_int': {'int', 'int8_t', 'int16_t', 'int32_t', 'int64_t',
                'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t', 'unsigned int'},
     'is_char': {'char'},
@@ -87,46 +98,6 @@ ANSWER_KEY = {
     'is_c_scalar': {'int', 'int64_t', 'double', '_Bool', 'char *'},
     'is_number_scalar': {'int', 'int64_t', 'double', '_Bool'},
 }
-
-# Codemod table entries whose emitted disjunction is deliberately WIDER than
-# the tuple it replaces: the class it composed is the C-correct answer and the
-# hand-written tuple had simply forgotten the member. Keyed by the tuple, so a
-# second tuple that happens to emit the same predicates is not excused by it;
-# the value is the extra member(s) tolerated — no other extra is ever accepted.
-ALLOWED_EXTRA = {
-    # is_int is the lattice's integer table: the tuples listing every width
-    # forgot 'unsigned int'.
-    frozenset(["'int'", "'int16_t'", "'int32_t'", "'int64_t'", "'int8_t'",
-               "'uint16_t'", "'uint32_t'", "'uint64_t'", "'uint8_t'"]):
-        {'unsigned int'},
-    frozenset(["'_Bool'", "'int'", "'int16_t'", "'int32_t'", "'int64_t'",
-               "'int8_t'", "'uint16_t'", "'uint32_t'", "'uint64_t'",
-               "'uint8_t'"]): {'unsigned int'},
-    # The dict-value boxing sites asked "is this an int?" and listed three of
-    # the ten spellings; every other integer width boxes the same way.
-    frozenset(["'int'", "'int32_t'", "'int64_t'"]):
-        {'int8_t', 'int16_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
-         'unsigned int'},
-    # is_float knows __fp16 as well as the double/float the tuples listed.
-    frozenset(["'double'", "'float'", "'int'", "'int64_t'"]): {'__fp16'},
-    frozenset(["'_Bool'", "'double'", "'float'", "'int'", "'int64_t'"]): {'__fp16'},
-    frozenset(["'_Bool'", "'char *'", "'double'", "'float'", "'int'",
-               "'int64_t'"]): {'__fp16'},
-    # The unsolved marker has two spellings (`''` and `'unknown'`, see
-    # is_unsolved) and the hand-written tuples named one of them — one tuple
-    # even named both side by side. A predicate that asks the question
-    # therefore answers for both, so every tuple below is accepted with
-    # 'unknown' as the one extra member. The tuple that already named both
-    # spellings needs no exception and is not listed.
-    frozenset(["''", "'int64_t'"]): {'unknown'},
-    frozenset(["''", "'int'", "'int64_t'"]): {'unknown'},
-    frozenset(["''", "'int64_t'", "'void *'"]): {'unknown'},
-    frozenset(["''", "'int64_t'", "'void'"]): {'unknown'},
-    frozenset(["''", "'_Bool'", "'double'", "'int'", "'int64_t'"]): {'unknown'},
-    frozenset(["''", "'int'", "'int64_t'", "None"]): {'unknown'},
-    frozenset(["''", "'int'", "'int64_t'", "'long'"]): {'unknown'},
-}
-
 
 def _members(items):
     out = set()
@@ -167,10 +138,9 @@ def check_codemod_table():
         want = _members(items)
         got = set(t for t in PROBES
                   if any(getattr(TL, n)(t) for n in names if hasattr(TL, n)))
-        allowed = want | ALLOWED_EXTRA.get(items, set())
-        if got - allowed:
+        if got - want:
             bad.append('%s -> %s accepts extra %s'
-                       % (sorted(items), names, sorted(map(str, got - allowed))))
+                       % (sorted(items), names, sorted(map(str, got - want))))
         if want - got:
             bad.append('%s -> %s misses %s'
                        % (sorted(items), names, sorted(map(str, want - got))))

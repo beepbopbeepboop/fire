@@ -1100,18 +1100,18 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     try:
         if gimple_ctypes.TypeLattice.is_list(it_type):
             gen._gen_for_list(var, it_val, node.body, shadow_name=shadow_name)
-        elif it_type == 'MojoStr *':
+        elif gimple_ctypes.TypeLattice.is_str(it_type):
             gen._gen_for_str(var, it_val, node.body, shadow_name=shadow_name)
         elif gimple_ctypes.TypeLattice.is_cstr(it_type):
             gen._gen_for_cstr(var, it_val, node.body)
-        elif it_type == 'MojoBytes *':
+        elif gimple_ctypes.TypeLattice.is_bytes(it_type):
             gen._gen_for_bytes(var, it_val, node.body)
         elif it_type == 'MojoMemoryView *':
             gen._gen_for_memoryview(var, it_val, node.body)
-        elif it_type == 'MojoDict *':
+        elif gimple_ctypes.TypeLattice.is_dict(it_type):
             gen._gen_for_dict(var, it_val, node.body, shadow_name=shadow_name,
                               int_keys=bool(_int_mode))
-        elif it_type == 'MojoSet *':
+        elif gimple_ctypes.TypeLattice.is_set(it_type):
             gen._gen_for_set(var, it_val, node.body, shadow_name=shadow_name)
         elif it_type == 'MojoGenerator *':
             # Milestone B: `for x in <supported generator call>():` —
@@ -1195,7 +1195,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     'the handle at run time', it_val)
                 _gen_for_unknown_generator(gen, var, it_val, node.body,
                                            node=node, shadow_name=shadow_name)
-        elif ((gimple_ctypes.TypeLattice.ends_in_star(it_type) and it_type != 'void *')
+        elif ((gimple_ctypes.TypeLattice.ends_in_star(it_type) and not gimple_ctypes.TypeLattice.is_voidp(it_type))
               or it_type.endswith('*')):
             # User-defined struct: try __iter__ / __has_next__ / __next__ protocol
             #
@@ -3445,7 +3445,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 vn0 = var_names[0]
                 cvn0 = _slot_cnames[0]
                 vt0 = _slot_ctypes[0]
-                if gimple_ctypes.TypeLattice.is_int(vt0):
+                if (gimple_ctypes.TypeLattice.is_word(vt0) or gimple_ctypes.TypeLattice.is_c_int(vt0) or gimple_ctypes.TypeLattice.is_i32(vt0)):
                     vp = gen._cast('void *', f"{key_tmp}")
                     box = gen._cast('int64_t', vp)
                     gen._copy(f"{cvn0}", f"{box}")
@@ -3455,7 +3455,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     vn = var_names[_vi]
                     cvn = _slot_cnames[_vi]
                     vt = _slot_ctypes[_vi]
-                    if gimple_ctypes.TypeLattice.is_int(vt):
+                    if (gimple_ctypes.TypeLattice.is_word(vt) or gimple_ctypes.TypeLattice.is_c_int(vt) or gimple_ctypes.TypeLattice.is_i32(vt)):
                         gen._cast_into(cvn, 'int64_t', '0')
                     elif gimple_ctypes.TypeLattice.ends_in_star(vt):
                         build.assign(gen, f'{cvn}', f'({vt})0')
@@ -3464,7 +3464,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     else:
         cvar = gen._cname(var)
         vt = gen.var_types.get(var, 'char *')
-        if gimple_ctypes.TypeLattice.is_int(vt):
+        if (gimple_ctypes.TypeLattice.is_word(vt) or gimple_ctypes.TypeLattice.is_c_int(vt) or gimple_ctypes.TypeLattice.is_i32(vt)):
             vp = gen._cast('void *', f"{key_tmp}")
             box = gen._cast('int64_t', vp)
             gen._copy(f"{cvar}", f"{box}")
@@ -3492,7 +3492,7 @@ def _gen_for_set(gen, var: str, it_val: str, body: list, shadow_name: str | None
     `mojo_set_iter_val_int` gives pointer bits for the two pointer
     domains, which is what a set of strings/bytes used to iterate as."""
     _se = gen._elem_of(it_val) or 'int64_t'
-    if _se == 'MojoBytes *':
+    if gimple_ctypes.TypeLattice.is_bytes(_se):
         _loop_ctype, _read = 'MojoBytes *', 'mojo_set_val_bytes'
     elif gimple_ctypes.TypeLattice.is_cstr(_se):
         _loop_ctype, _read = 'char *', 'mojo_set_iter_val_str'

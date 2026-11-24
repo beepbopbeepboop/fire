@@ -157,7 +157,7 @@ def _operand_is_dict(gen, node, t: str, v=None) -> bool:
     Deliberately a predicate about ONE operand. Deciding whether `a | b` is a
     `dict.__or__` needs BOTH answers, and that conjunction is the caller's, so
     this cannot be misread as "this expression is a union"."""
-    if t == 'MojoDict *':
+    if gimple_ctypes.TypeLattice.is_dict(t):
         return True
     if isinstance(node, gimple_ctypes.DictExpr):
         return True

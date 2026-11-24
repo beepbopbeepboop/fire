@@ -29,6 +29,7 @@ import mlir
 import regex_compile
 from generated_dispatch import _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT, _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS, _STMT_DISPATCH, _EXPR_DISPATCH
 import mojo.ir.types as gir_types
+import mojo.ir.build as _ir_build
 import mojo.middle.simd_width as _simd_width
 import mojo.middle.float8_dtype as _float8_dtype
 from mojo.middle.global_ctypes import dispatch_table_global_ctype  # the table lives in a leaf module, see global_ctypes.py
@@ -323,6 +324,15 @@ class TypeLattice:
         return t == '' or t == 'unknown'
 
     @classmethod
+    def is_no_type(cls, t: str) -> bool:
+        """`t` is the empty "no type" marker `''`, and only that. `is_unsolved`
+        also takes `'unknown'`; a tuple that names only `''` asks this, so the
+        `'unknown'` it would add is not accepted by accident."""
+        if t is None:
+            return False
+        return t == ''
+
+    @classmethod
     def is_word_or_unsolved(cls, t: str) -> bool:
         """frozen: no new callers; compose class predicates instead.
         The word, or no type at all: `t in ('int64_t', '', 'unknown')`."""
@@ -417,6 +427,53 @@ class TypeLattice:
             return False
         return gir_types.spelled(t).is_u8()
 
+    # The remaining single C integer spellings (doc/GIR.md stage 4, the exact
+    # rewrites). Each one is a plain equality, so it answers exactly its own
+    # spelling: a tuple test that named several integer widths is an `or` of
+    # these, and `is_int` (the whole integer table, `unsigned int` included)
+    # is not a substitute for it.
+    @classmethod
+    def is_c_int(cls, t: str) -> bool:
+        """`t` is exactly `int` (the 4-byte C int). `is_int_word` also takes `int64_t`."""
+        if not t:
+            return False
+        return t == 'int'
+
+    @classmethod
+    def is_i8(cls, t: str) -> bool:
+        """`t` is exactly `int8_t`."""
+        if not t:
+            return False
+        return t == 'int8_t'
+
+    @classmethod
+    def is_i16(cls, t: str) -> bool:
+        """`t` is exactly `int16_t`."""
+        if not t:
+            return False
+        return t == 'int16_t'
+
+    @classmethod
+    def is_i32(cls, t: str) -> bool:
+        """`t` is exactly `int32_t`."""
+        if not t:
+            return False
+        return t == 'int32_t'
+
+    @classmethod
+    def is_u16(cls, t: str) -> bool:
+        """`t` is exactly `uint16_t`."""
+        if not t:
+            return False
+        return t == 'uint16_t'
+
+    @classmethod
+    def is_u32(cls, t: str) -> bool:
+        """`t` is exactly `uint32_t`."""
+        if not t:
+            return False
+        return t == 'uint32_t'
+
     @classmethod
     def is_c_long(cls, t: str) -> bool:
         """`t` is the bare C `long` spelling — the declared return type of a
@@ -450,6 +507,13 @@ class TypeLattice:
         if not t:
             return False
         return gir_types.spelled(t).is_double()
+
+    @classmethod
+    def is_c_float(cls, t: str) -> bool:
+        """`t` is exactly `float` (not `double`, and not `__fp16`: `is_float` takes all three)."""
+        if not t:
+            return False
+        return t == 'float'
 
     @classmethod
     def is_bool(cls, t: str) -> bool:
@@ -2192,10 +2256,10 @@ def presence_set_emit(gen, sdef, member, obj_c, op) -> None:
     if bit is None:
         return
     cur = gen._new_temp('uint64_t')
-    gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
+    _ir_build.assign(gen, cur, f"{obj_c}{op}{PRESENCE_WORD}[{bit[0]}]")
     nxt = gen._new_temp('uint64_t')
     gen._binop_into(nxt, f"{cur}", '|', f"{1 << bit[1]}ULL")
-    gen._emit(f"  {obj_c}{op}{PRESENCE_WORD}[{bit[0]}] = {nxt};")
+    _ir_build.assign(gen, f"{obj_c}{op}{PRESENCE_WORD}[{bit[0]}]", nxt)
 
 
 def presence_check_emit(gen, sdef, member, obj_c, op, class_name) -> None:
@@ -2209,7 +2273,7 @@ def presence_check_emit(gen, sdef, member, obj_c, op, class_name) -> None:
     if bit is None:
         return
     cur = gen._new_temp('uint64_t')
-    gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
+    _ir_build.assign(gen, cur, f"{obj_c}{op}{PRESENCE_WORD}[{bit[0]}]")
     got = gen._new_temp('uint64_t')
     gen._binop_into(got, f"{cur}", '&', f"{1 << bit[1]}ULL")
     msg = f"'{class_name}' object has no attribute '{member}'"
@@ -2232,7 +2296,7 @@ def presence_copy_emit(gen, sdef, dst_c, src_c, op) -> None:
     assignment is not a legal GIMPLE store."""
     _n = presence_word_count(sdef)
     if _n:
-        gen._emit(f"  memcpy({dst_c}{op}{PRESENCE_WORD}, {src_c}{op}{PRESENCE_WORD}, {8 * _n});")
+        _ir_build.call_void(gen, 'memcpy', [f"{dst_c}{op}{PRESENCE_WORD}", f"{src_c}{op}{PRESENCE_WORD}", str(8 * _n)], tight=True)
 _C_RESERVED_FUNCS = frozenset({'exit', 'abort', 'write', 'read', 'close', 'malloc', 'calloc', 'realloc', 'free', 'printf', 'fprintf', 'snprintf', 'sprintf', 'dprintf', 'puts', 'putchar', 'memcpy', 'memmove', 'memset', 'memcmp', 'memchr', 'strlen', 'strcmp', 'strncmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strchr', 'strrchr', 'strstr', 'strtok', 'strerror', 'atoi', 'atol', 'atoll', 'atof', 'strtol', 'strtoll', 'strtod', 'strtof', 'setvbuf', 'setbuf', 'remainderf', 'remainderl', 'posix_spawn', 'posix_spawnp', 'index', 'rindex', 'cos', 'cosf', 'sin', 'sinf', 'tan', 'tanf', 'acos', 'acosf', 'asin', 'asinf', 'atan', 'atanf', 'atan2', 'atan2f', 'ceil', 'ceilf', 'floor', 'floorf', 'round', 'roundf', 'trunc', 'truncf', 'sqrt', 'sqrtf', 'cbrt', 'cbrtf', 'pow', 'powf', 'exp', 'expf', 'exp2', 'exp2f', 'log', 'logf', 'log2', 'log2f', 'log10', 'log10f', 'fabs', 'fabsf', 'fmod', 'fmodf', 'erf', 'erff', 'erfc', 'erfcf', 'tgamma', 'lgamma', 'ldexp', 'ldexpf', 'frexp', 'frexpf', 'modf', 'modff', 'sinh', 'sinhf', 'cosh', 'coshf', 'tanh', 'tanhf', 'asinh', 'acosh', 'atanh', 'asinhf', 'acoshf', 'atanhf', 'nextafter', 'nextafterf', 'copysign', 'copysignf', 'nan', 'nanf', 'hypot', 'hypotf', 'fma', 'fmaf', 'remainder', 'expm1', 'expm1f', 'log1p', 'log1pf', 'scalb', 'scalbf', 'scalbn', 'scalbnf', 'logb', 'logbf', 'j0', 'j1', 'y0', 'y1', 'getenv', 'setenv', 'unsetenv', 'putenv', 'realpath', 'open', 'fopen', 'fclose', 'fread', 'fwrite', 'fseek', 'ftell', 'rewind', 'fflush', 'getline', 'getdelim', 'fgets', 'fputs', 'feof', 'ferror', 'clearerr', 'vprintf', 'vfprintf', 'vsnprintf', 'vsprintf', 'fdopen', 'popen', 'pclose', 'remove', 'rename', 'rand', 'srand', 'random', 'srandom', 'getuid', 'getgid', 'getpid', 'getppid', 'waitpid', 'fork', 'execv', 'symlink', 'readlink', 'link', 'mkdir', 'chmod', 'chown', 'unlink', 'rmdir', 'ioctl', 'fcntl', 'dup', 'dup2', 'pipe', 'dlopen', 'dlsym', 'dlclose', 'dlerror', 'access', 'stat', 'lstat', 'fstat', 'qsort', 'bsearch', 'abs', 'labs', 'llabs', 'fabsf', 'fmodf', 'sqrtf', 'powf', 'ceilf', 'floorf', 'roundf', 'truncf', 'isfinite', 'isinf', 'isnan', 'isnormal', 'signbit', 'fpclassify', 'isalpha', 'isdigit', 'isalnum', 'isspace', 'isupper', 'islower', 'toupper', 'tolower', 'strdup', 'strndup', 'strtok_r', # `clock_gettime` is deliberately NOT here: it takes a `struct timespec*`,
 # and a struct is a frame blob that cannot cross the Mojo/C boundary --
 # the same reason formal/hostmods/time.mojo omits localtime/gmtime/mktime.

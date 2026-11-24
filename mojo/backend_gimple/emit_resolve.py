@@ -1827,7 +1827,7 @@ def _register_link_imports(gen, stmts: list) -> list:
         params = rest.rstrip(') ').strip()
         toks = head.strip().rsplit(None, 1)        # split off the function name
         ret = toks[0] if len(toks) == 2 else 'int'
-        if not params or params == 'void':
+        if not params or gimple_ctypes.TypeLattice.is_void(params):
             ptypes = []
         else:
             ptypes = [p.strip() for p in params.split(',')]
@@ -2487,7 +2487,7 @@ def _bool_not(gen, ctype: str, val: str) -> str:
     `x.__class__ is not T`), so the shape could not drift from what raw
     GIMPLE accepts.
     """
-    if gimple_ctypes.TypeLattice.ends_in_star(ctype) or ctype == 'void *':
+    if gimple_ctypes.TypeLattice.ends_in_star(ctype) or gimple_ctypes.TypeLattice.is_voidp(ctype):
         iv = gen._cast('int64_t', val)
         zt = 'int64_t'
     elif gimple_ctypes.TypeLattice.is_bool(ctype):
@@ -3059,7 +3059,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             # Load global into local before casting (GIMPLE restriction)
             v = gen._ensure_local(s, v)
             # GIMPLE: non-void pointer → int64_t requires void * intermediate
-            if s != 'void *':
+            if not gimple_ctypes.TypeLattice.is_voidp(s):
                 vp = gen._cast('void *', f"{v}")
                 v = vp
             ip = gen._cast('int64_t', f"{v}")
@@ -3067,7 +3067,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
                 gen._copy(dest, f"{ip}")
             else:
                 gen._cast_into(dest, 'int', ip)
-        elif gimple_ctypes.TypeLattice.is_cstr(d) and s == 'char':
+        elif gimple_ctypes.TypeLattice.is_cstr(d) and gimple_ctypes.TypeLattice.is_char(s):
             # A Python str of length 1 (a bare `char` in this codegen)
             # coerced into a `char *` STRING slot — e.g. the `char`
             # branch of a mixed-type ternary like `s[k-1] if k>0 else ''`
@@ -3129,7 +3129,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             # and b0910af72 made that arm actually fire for a comptime width,
             # exposing this cast as gcc errors on every appended element.
             v = gen._ensure_local(s, v)
-            if s != 'void *':
+            if not gimple_ctypes.TypeLattice.is_voidp(s):
                 v = gen._cast('void *', f"{v}")
             ip = gen._cast('int64_t', f"{v}")
             gen._cast_into(dest, d, ip)
@@ -3328,15 +3328,15 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         # self-hosted (the whole `(fn, args)` pair printed as the callee).
         _lfn, _largs = gen._list_repr_call(rav)
         return gen._call_expr('char *', _lfn, _largs)
-    if rat == 'MojoSet *':
+    if gimple_ctypes.TypeLattice.is_set(rat):
         return gen._call_expr('char *', '_mojo_repr_set', [('MojoSet *', rav)])
-    if rat == 'MojoDict *':
+    if gimple_ctypes.TypeLattice.is_dict(rat):
         return gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', rav)])
-    if rat == 'MojoBytes *':
+    if gimple_ctypes.TypeLattice.is_bytes(rat):
         return gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', rav)])
     if rat == 'MojoMemoryView *':
         return gen._call_expr('char *', 'mojo_memoryview_repr', [('MojoMemoryView *', rav)])
-    if gimple_ctypes.TypeLattice.ends_in_star(rat) or rat == 'void *':
+    if gimple_ctypes.TypeLattice.ends_in_star(rat) or gimple_ctypes.TypeLattice.is_voidp(rat):
         rav_local = gen._ensure_local(rat, rav)
         # A user-defined `__repr__` WINS over the generated field dump.
         # CPython calls it, and this compiler already emits the real method
@@ -3516,8 +3516,8 @@ def _cast_for_list(gen, elem_type: str, val: str, suf: str) -> str:
     # storage convention) — the old "no pointer record → char byte" check
     # truncated it, appending the low byte of the pointer as a 1-char
     # string instead of the boxed string it points to.
-    if suf == 'str' and (elem_type == 'char' or actual == 'char'):
-        cval = val if elem_type == 'char' else gen._cast('char', val)
+    if suf == 'str' and (gimple_ctypes.TypeLattice.is_char(elem_type) or gimple_ctypes.TypeLattice.is_char(actual)):
+        cval = val if gimple_ctypes.TypeLattice.is_char(elem_type) else gen._cast('char', val)
         return gen._call_expr('char *', 'mojo_char_to_str', [('char', cval)])
     # str: cast int-cast strings (boxed pointers stored as int64_t) to char*
     if suf == 'str' and gimple_ctypes.TypeLattice.is_int_word(elem_type):
@@ -4904,7 +4904,7 @@ def _emit_generic_instantiation(gen, info, arg_pairs, span_proofs=None):
     _decl = f"extern {info['ret']} {sym} ({', '.join(info['params']) or 'void'});"
     if _decl not in gen._elaborated_externs:
         gen._elaborated_externs.append(_decl)
-    if info['ret'] == 'void':
+    if gimple_ctypes.TypeLattice.is_void(info['ret']):
         gen._emit_call('', '', sym, arg_pairs)
         t = gen._new_temp('int')
         build.assign(gen, t, "0", "  /* void generic call */")
@@ -5233,7 +5233,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         _ir = gen.lower_expr(_inner)
         _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
         _iv = _iv_raw
-        if gimple_ctypes.TypeLattice.ends_in_star(_it) and _it != 'MojoSet *':
+        if gimple_ctypes.TypeLattice.ends_in_star(_it) and not gimple_ctypes.TypeLattice.is_set(_it):
             _iv = gen._cast('MojoSet *', _iv_raw)
         gen._emit_call('void', '', 'mojo_set_update',
                        [('MojoSet *', res), ('MojoSet *', _iv)])
@@ -5263,7 +5263,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         _ir = gen.lower_expr(_inner)
         _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
         _iv = _iv_raw
-        if gimple_ctypes.TypeLattice.ends_in_star(_it) and _it != 'MojoDict *':
+        if gimple_ctypes.TypeLattice.ends_in_star(_it) and not gimple_ctypes.TypeLattice.is_dict(_it):
             _iv = gen._cast('MojoDict *', _iv_raw)
         gen._emit_call('void', '', 'mojo_dict_update',
                        [('MojoDict *', res), ('MojoDict *', _iv)])

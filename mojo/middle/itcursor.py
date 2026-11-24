@@ -115,7 +115,7 @@ def read_at(gen, rec, idx):
         _src = _as_str(rec['src'])
         _idx = _as_str(idx)
         elem = rec.get('elem') or gimple_ctypes._elem_type(_data[1])
-        if elem == 'void':
+        if gimple_ctypes.TypeLattice.is_void(elem):
             elem = 'char'
         gen._ptr_helpers_needed.add(elem)
         et_ptr = elem + ' *'

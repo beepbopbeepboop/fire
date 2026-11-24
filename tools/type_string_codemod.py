@@ -19,6 +19,7 @@ membership.
 `test_type_string_ratchet.py` fails when a new string test is added; this tool
 is the fix it points at.
 """
+import ast
 import glob
 import os
 import re
@@ -37,7 +38,14 @@ LHS_TUPLE = (r"(?P<lhs>_as_str\([^()]*\)|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\([^()]*
              r"|(?!(?:not|and|or|in|is|if|else|return|lambda)\b)"
              r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\[[^\[\]]*\])*)")
 EQ = {"char *": "is_cstr", "MojoList *": "is_list", "_Bool": "is_bool",
-      "double": "is_double", "int64_t": "is_word"}
+      "double": "is_double", "int64_t": "is_word",
+      # The single-type equalities whose predicates are exact (each is `t == <spelling>`,
+      # pinned by test_type_lattice_predicates.py's LEGACY table). 'int' and 'float' are
+      # NOT mapped here, though is_c_int / is_c_float now exist: mapping a plain
+      # `== 'int'` test is a separate change.
+      "MojoDict *": "is_dict", "MojoBytes *": "is_bytes", "void": "is_void",
+      "MojoSet *": "is_set", "void *": "is_voidp", "char": "is_char",
+      "MojoStr *": "is_str"}
 # What may precede the left side. `=`/`,`/`:` are included so a test in a
 # keyword argument or a container literal is reached
 # (`force=gen.var_types.get(x) not in (None, 'int64_t')`).
@@ -51,12 +59,12 @@ EQ_PATS = [(re.compile(r"(?P<pre>" + PRE + r"(?:not\s+)?)" + LHS
 # representation classes maps to a DISJUNCTION of their predicates rather than
 # to a predicate of its own, so the classes keep their one definition each:
 # `x in ('int', 'int64_t', 'uint64_t')` -> is_int_word(x) or is_uword(x).
-# Every predicate answers exactly its own membership (`None` included where
-# listed), so a rewrite cannot change which values match, with ONE deliberate
-# widening: `''` and `'unknown'` are the same "not inferred" marker
-# (`is_unsolved`), so a tuple that named only one spelling gains the other.
-# `test_type_lattice_predicates.py` lists each such tuple with `'unknown'` as
-# its one allowed extra.
+# Every entry emits EXACTLY its tuple's members (`None` included where listed),
+# so a rewrite cannot change which values match. A predicate that answers a
+# wider class (`is_int`, `is_float`, `is_unsolved`) is never emitted for a
+# tuple that names less: the entry is spelled as an `or` of the single-spelling
+# predicates instead, and `test_type_lattice_predicates.py` checks each entry
+# against its tuple with no exception.
 TUPLES = {
     frozenset(["'int'", "'int64_t'"]): ('is_int_word',),
     frozenset(["'_Bool'", "'int'", "'int64_t'"]): ('is_int_word_or_bool',),
@@ -99,43 +107,43 @@ TUPLES = {
     frozenset(["'MojoDict *'", "'MojoList *'", "'MojoSet *'", "'char *'",
                "'double'", "'int64_t'"]): ('is_word_value', 'is_double'),
     frozenset(["'double'", "'float'", "'int'", "'int64_t'"]):
-        ('is_int_word', 'is_float'),
-    frozenset(["'_Bool'", "'char *'", "'double'", "'float'", "'int'", "'int64_t'"]):
-        ('is_c_scalar', 'is_float'),
-    # `is_int` is the lattice's own integer table, so the tuples that listed
-    # every signed/unsigned width ask it rather than a second near-copy of the
-    # same table. It also knows `unsigned int`, which those hand-written tuples
-    # forgot: a value of that type takes the integer path instead of falling
-    # through, which is the correct answer (see test_type_lattice_predicates.py).
+        ('is_int_word', 'is_double', 'is_c_float'),
+    # Every signed and unsigned width, spelled one predicate per width: `is_int`
+    # is the lattice's whole integer table and also takes `unsigned int`, which
+    # none of these tuples names, so it is not what they emit.
     frozenset(["'int'", "'int16_t'", "'int32_t'", "'int64_t'", "'int8_t'",
-               "'uint16_t'", "'uint32_t'", "'uint64_t'", "'uint8_t'"]): ('is_int',),
+               "'uint16_t'", "'uint32_t'", "'uint64_t'", "'uint8_t'"]):
+        ('is_word', 'is_c_int', 'is_i8', 'is_i16', 'is_i32',
+         'is_u8', 'is_u16', 'is_u32', 'is_uword'),
     frozenset(["'_Bool'", "'int'", "'int16_t'", "'int32_t'", "'int64_t'", "'int8_t'",
                "'uint16_t'", "'uint32_t'", "'uint64_t'", "'uint8_t'"]):
-        ('is_int', 'is_bool'),
-    frozenset(["'int'", "'int32_t'", "'int64_t'"]): ('is_int',),
+        ('is_word', 'is_c_int', 'is_i8', 'is_i16', 'is_i32',
+         'is_u8', 'is_u16', 'is_u32', 'is_uword', 'is_bool'),
+    frozenset(["'int'", "'int32_t'", "'int64_t'"]): ('is_word', 'is_c_int', 'is_i32'),
     frozenset(["'int'", "'int64_t'", "'void *'", "'char *'"]):
         ('is_int_word_or_voidp', 'is_cstr'),
     frozenset(["'_Bool'", "'int'", "'int64_t'", "'void *'"]):
         ('is_int_word_or_voidp', 'is_bool'),
     frozenset(["'_Bool'", "'double'", "'float'", "'int'", "'int64_t'"]):
-        ('is_number_scalar', 'is_float'),
+        ('is_number_scalar', 'is_c_float'),
     frozenset(["'MojoList *'", "'int'", "'int64_t'"]): ('is_list', 'is_int_word'),
-    # The "not inferred yet" marker (`''`/`'unknown'`, see is_unsolved): the
-    # tuples below spell it with one or both of its spellings. A tuple that
+    # The "not inferred yet" marker. A tuple that names only `''` asks
+    # `is_no_type`, which does not take `'unknown'`; a tuple that names BOTH
+    # spellings asks `is_unsolved`, which is exactly that pair. A tuple that
     # also lists `None` keeps its own `*_or_none` predicate for the absent
     # entry, because `not in` tests must still reject an absent entry.
-    frozenset(["'int64_t'", "''"]): ('is_word_or_unsolved',),
-    frozenset(["'int'", "'int64_t'", "''"]): ('is_int_word_or_unsolved',),
+    frozenset(["'int64_t'", "''"]): ('is_word', 'is_no_type'),
+    frozenset(["'int'", "'int64_t'", "''"]): ('is_int_word', 'is_no_type'),
     frozenset(["'int64_t'", "'void *'", "''"]):
-        ('is_word', 'is_voidp', 'is_unsolved'),
+        ('is_word', 'is_voidp', 'is_no_type'),
     frozenset(["''", "'int64_t'", "'void'"]):
-        ('is_word_or_unsolved', 'is_void'),
+        ('is_word', 'is_no_type', 'is_void'),
     frozenset(["'_Bool'", "'double'", "'int'", "'int64_t'", "''"]):
-        ('is_number_scalar', 'is_unsolved'),
+        ('is_number_scalar', 'is_no_type'),
     frozenset(["''", "'int'", "'int64_t'", "None"]):
-        ('is_int_word_or_none', 'is_unsolved'),
+        ('is_int_word_or_none', 'is_no_type'),
     frozenset(["''", "'int'", "'int64_t'", "'long'"]):
-        ('is_int_word', 'is_c_long', 'is_unsolved'),
+        ('is_int_word', 'is_c_long', 'is_no_type'),
     frozenset(["''", "'_Bool'", "'char'", "'double'", "'int'", "'int64_t'",
                "'unknown'"]): ('is_number_scalar', 'is_char', 'is_unsolved'),
     # The single-type spellings the C++/Span/bytes paths needed (is_str is the
@@ -203,17 +211,35 @@ def _commented(text: str, pos: int) -> bool:
 
 
 def predicate_prefix(src: str):
-    """The `TypeLattice` spelling this file already uses, or None.
+    """The `TypeLattice` spelling this file can use at MODULE level, or None.
 
-    A module that imports the class directly (`from mojo.middle.types import
-    TypeLattice`) gets `TypeLattice.x(..)`; one that reaches it through the
-    backend alias gets `gimple_ctypes.TypeLattice.x(..)`. A file with neither
-    is not rewritten: adding an import is not this tool's job."""
-    if 'gimple_ctypes' in src:
-        return 'gimple_ctypes.TypeLattice.'
-    if re.search(r'(?m)^\s*(?:from mojo\.middle\.types import .*\bTypeLattice\b'
-                 r'|import mojo\.middle\.types as \w+\s*$)', src):
-        return 'TypeLattice.'
+    Only a module-level binding counts. A substring test on the text does not
+    tell a binding from a mention: `mojo/middle/closures.py` names
+    `gimple_ctypes` only in a function-local import, and the text test rewrote
+    its module-level comparisons to `gimple_ctypes.TypeLattice.is_void(...)`,
+    a name that file never binds (a NameError at run time).
+      `import mojo.middle.types as A`        -> `A.TypeLattice.x(..)`
+      `from mojo.middle import types as A`   -> `A.TypeLattice.x(..)`
+      `from mojo.middle.types import TypeLattice` -> `TypeLattice.x(..)`
+    A file with none of these is not rewritten: adding an import is not this
+    tool's job."""
+    try:
+        body = ast.parse(src).body
+    except SyntaxError:
+        return None
+    for node in body:
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name == 'mojo.middle.types' and a.asname:
+                    return a.asname + '.TypeLattice.'
+        if isinstance(node, ast.ImportFrom) and node.module == 'mojo.middle':
+            for a in node.names:
+                if a.name == 'types' and a.asname:
+                    return a.asname + '.TypeLattice.'
+    for node in body:
+        if (isinstance(node, ast.ImportFrom) and node.module == 'mojo.middle.types'
+                and any((a.asname or a.name) == 'TypeLattice' for a in node.names)):
+            return 'TypeLattice.'
     return None
 
 
