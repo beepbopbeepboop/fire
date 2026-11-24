@@ -4657,7 +4657,7 @@ UNREGISTERED = {
         'self-host sibling branch. Run directly inside a checkout; not registered.',
     'test_stdlib_syntax_owned_pointer_asyncrt.py':
         'Standalone pin: owned_pointer.mojo and _asyncrt.mojo must keep '
-        'transpiling. Run directly; not registered.',
+        'compiling. Run directly; not registered.',
     'test_unknown_decl_check.py':
         'Unit tests for the unknown-decl check/compiler-provided builtins '
         'helper module. Run directly; not registered.',

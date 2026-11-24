@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin for the stdlib-syntax red fixed by commit 478a03b82: std/utils/variant.mojo must transpile.
+"""Pin for the stdlib-syntax red fixed by commit 478a03b82: std/utils/variant.mojo must compile.
 
 The original `gate-stdlib-syntax` doc for this red was removed in that commit
 ("stdlib-syntax: pin variant.mojo and remove fixed gate doc") once the job was
@@ -16,14 +16,14 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from compile_stdlib import get_stdlib_path, transpile_file
+from compile_stdlib import get_stdlib_path, compile_file
 
 
 class TestStdlibSyntaxVariant(unittest.TestCase):
-    def test_variant_transpiles(self):
+    def test_variant_compiles(self):
         path = get_stdlib_path() / "std" / "utils" / "variant.mojo"
-        ok, msg, _cg, _gcc, _ref = transpile_file(str(path))
-        self.assertTrue(ok, f"std/utils/variant.mojo failed to transpile: {msg}")
+        ok, msg, _cg, _gcc, _ref = compile_file(str(path))
+        self.assertTrue(ok, f"std/utils/variant.mojo failed to compile: {msg}")
 
 
 if __name__ == "__main__":

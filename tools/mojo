@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Wrapper to run the REAL Mojo compiler (Modular's, via pixi) for ground-truthing
-# this project's from-scratch transpiler against actual Mojo semantics.
+# this project's from-scratch compiler against actual Mojo semantics.
 #
 # Usage:
 #   tools/mojo run some_file.mojo        # compile + run

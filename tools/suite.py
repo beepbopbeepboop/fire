@@ -4583,7 +4583,7 @@ test('reg-comptime-member-monomorphized-instance',
      timeout=1800,
      desc='a comptime member/static-method read through a parameterized '
           'struct folds inside a monomorphized function instance (the '
-          '_ldexp_impl family), and the four stdlib files transpile')
+          '_ldexp_impl family), and the four stdlib files compile')
 test('reg-system-struct-helpers-compile',
      [PY, 'test_system_struct_helpers_compile.py'], mem='tiny',
      desc='a struct named like a C system struct compiles; its helpers '
@@ -4891,7 +4891,7 @@ test('mojoc-precompile-signature', [PY, 'test_mojoc_precompile_signature.py'],
      desc='precompile a package to a .mojoc signature artifact and read it back')
 test('stdlib-syntax-variant', [PY, 'test_stdlib_syntax_variant.py'],
      cache=True, mem='tiny', extra=['test_stdlib_syntax_variant.py'],
-     desc='std/utils/variant.mojo must transpile')
+     desc='std/utils/variant.mojo must compile')
 
 # The same hole, one merge later: master landed four more runnable test files
 # with no `test(...)` entry while this branch was open, which put

@@ -511,7 +511,7 @@ def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) ->
 
     Mirrors real Mojo's observed overload resolution closely enough for
     already-valid, already-typechecked source (which is all this compiler
-    ever transpiles — genuine ambiguity is a hard error in real Mojo, so a
+    ever compiles — genuine ambiguity is a hard error in real Mojo, so a
     real call site should never present one): filter by arity range
     (accounting for default parameters), then by keyword-argument names,
     then score remaining candidates by per-position exact C-type match.

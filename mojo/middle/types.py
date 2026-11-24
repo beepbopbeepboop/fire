@@ -75,7 +75,7 @@ def _params_have_vararg(params: list) -> bool:
     GCC then rejects outright as undeclared C identifiers (`'pn'
     undeclared`) — a hard compile failure, not just a silently-wrong
     value, first exposed when an unrelated edit forced this file's
-    CAS-cached object to be retranspiled from scratch. This single
+    CAS-cached object to be recompiled from scratch. This single
     helper replaces ~8 duplicated copies of the same broken idiom across
     gimple_module_gen.py.
     """

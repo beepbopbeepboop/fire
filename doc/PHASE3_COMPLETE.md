@@ -46,7 +46,7 @@ Input: Mojo source code
 
 ### Key Design Decisions
 
-1. **No Mojo-to-Python Conversion for Phase 3**: Instead of trying to convert Mojo syntax for complex files like codegen.mojo, we use the existing Python gimple_codegen.py directly. This is cleaner and avoids transpilation complexity.
+1. **No Mojo-to-Python Conversion for Phase 3**: Instead of trying to convert Mojo syntax for complex files like codegen.mojo, we use the existing Python gimple_codegen.py directly. This is cleaner and avoids compilation complexity.
 
 2. **Minimal Stubs for Module Loader**: The module_loader.py provides stub implementations that allow imports to succeed without requiring actual stdlib files. This is sufficient for bootstrap proof-of-concept.
 
@@ -56,7 +56,7 @@ Input: Mojo source code
 
 ### Immediate (Short Term)
 
-1. **Transpile Interpreter to Mojo**
+1. **Compile Interpreter to Mojo**
    - myinterpreter.py → myinterpreter.mojo
    - Test that it executes in actual Mojo environment
    - Should produce identical output to Python version
@@ -96,4 +96,4 @@ Phase 2 Parser:     5/5 PASS ✓
 Phase 3 Codegen:    PASS ✓ (generates 359-char C code)
 ```
 
-**Conclusion**: The interpreter-based bootstrap infrastructure is fully operational. The three-stage pipeline successfully transforms Mojo source code → tokens → AST → C code, all executed via a Python interpreter that can be transpiled to Mojo for self-hosting.
+**Conclusion**: The interpreter-based bootstrap infrastructure is fully operational. The three-stage pipeline successfully transforms Mojo source code → tokens → AST → C code, all executed via a Python interpreter that can be compiled to Mojo for self-hosting.

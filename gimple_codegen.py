@@ -741,7 +741,7 @@ _SYS_PATH_INSERT_RE = re.compile(
 # file's own path, so `os.path.dirname(__file__)` is resolvable statically
 # too — see _record_sys_path_inserts, which treats a bare "." result (empty
 # capture) as `base_dir` itself. Found via mojolib BUG-2026-032:
-# transpiler.mojo's `import os; sys.path.insert(0,
+# compiler.mojo's `import os; sys.path.insert(0,
 # os.path.join(os.path.dirname(__file__), ".."))` inside a function body,
 # to reach its sibling parser_core.mojo/lexer.mojo/arena.mojo one directory
 # up — invisible to the plain-literal regex above.

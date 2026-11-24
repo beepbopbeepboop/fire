@@ -180,7 +180,7 @@ def test_struct_true_division_builds():
     p = '.tmp/_struct_true_div.mojo'
     with open(p, 'w') as f:
         f.write(src)
-    ok, msg, _, _, _ref = compile_stdlib.transpile_file(Path(p))
+    ok, msg, _, _, _ref = compile_stdlib.compile_file(Path(p))
     assert ok, msg
 
 def test_variadic_string_element_and_struct_itruediv_run():
