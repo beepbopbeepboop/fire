@@ -177,8 +177,116 @@ def check_codemod_table():
     return bad
 
 
+# Spellings beyond PROBES that a delegating predicate could get wrong: aliases
+# `type_named` canonicalises (the reason `Type` keeps the spelling), spellings
+# it would NORMALISE (`char*`), and text that is not a type at all.
+WIDE_PROBES = PROBES + [
+    'signed', 'signed char', 'unsigned char', 'unsigned', 'short', 'long int',
+    'long long', 'unsigned long', 'ssize_t', 'size_t', 'intptr_t', 'pid_t',
+    'long double', '_Float16', 'char*', ' int', 'int ', 'int64_t ', 'void*',
+    'MojoList*', 'char **', 'long *', 'int64_t *', 'bool *', 'MojoStr',
+    'int (*)(int)', 'struct Foo *', 'Foo', '*', ' *', 'int8_t *',
+]
+
+_I = {'int8_t': 1, 'int16_t': 1, 'int32_t': 1, 'int': 1, 'int64_t': 1,
+      'uint8_t': 1, 'uint16_t': 1, 'uint32_t': 1, 'unsigned int': 1, 'uint64_t': 1}
+_S = {'int8_t', 'int16_t', 'int32_t', 'int', 'int64_t'}
+
+
+def _lit(*spellings):
+    """The pre-delegation literal behaviour: `t` (truthy) equals a spelling."""
+    return lambda t: bool(t) and t in spellings
+
+
+def _lit_none(*spellings):
+    return lambda t: t is None or t in spellings
+
+
+# The predicates as they were BEFORE they delegated to mojo/ir/types.py, one
+# literal per predicate (each is the tuple the answer key names, applied to
+# every probe, so a spelling `type_named` canonicalises cannot slip through).
+LEGACY = {
+    'is_float': _lit('__fp16', 'float', 'double'),
+    'is_signed': _lit(*_S),
+    'is_unsigned': _lit('uint8_t', 'uint16_t', 'uint32_t', 'unsigned int', 'uint64_t'),
+    'is_int': _lit(*_I),
+    'is_cstr': _lit('char *'), 'is_str': _lit('MojoStr *'),
+    'is_span': _lit('Span *'), 'is_list': _lit('MojoList *'),
+    'is_dict': _lit('MojoDict *'), 'is_set': _lit('MojoSet *'),
+    'is_bytes': _lit('MojoBytes *'),
+    'is_word': _lit('int64_t'), 'is_uword': _lit('uint64_t'),
+    'is_int_word': _lit('int', 'int64_t'), 'is_char': _lit('char'),
+    'is_u8': _lit('uint8_t'), 'is_c_long': _lit('long'),
+    'is_void': _lit('void'), 'is_voidp': _lit('void *'),
+    'is_double': _lit('double'), 'is_bool': _lit('_Bool'),
+    'is_cpp_bool': _lit('bool'),
+    'is_int_word_or_bool': _lit('int', 'int64_t', '_Bool'),
+    'is_py_scalar': _lit('int64_t', 'double', '_Bool', 'char *'),
+    'is_word_or_cstr': _lit('int64_t', 'char *'),
+    'is_word_or_bytes': _lit('int64_t', 'MojoBytes *'),
+    'is_word_or_list': _lit('int64_t', 'MojoList *'),
+    'is_int_word_or_none': _lit_none('int', 'int64_t'),
+    'is_word_or_none': _lit_none('int64_t'),
+    'is_int_word_or_voidp': _lit('int', 'int64_t', 'void *'),
+    'is_unsolved': lambda t: t is not None and (t == '' or t == 'unknown'),
+    'is_word_or_unsolved': lambda t: (t is not None and t in ('int64_t', '', 'unknown')),
+    'is_int_word_or_unsolved': lambda t: (t is not None and t in ('int', 'int64_t', '', 'unknown')),
+    'is_pointer': lambda t: bool(t) and '*' in t,
+    'ends_in_star': lambda t: bool(t) and t.endswith(' *'),
+    'is_cpp_int_scalar': _lit('int', 'int64_t', '_Bool', 'bool'),
+}
+
+FROZEN = ['is_int_word_or_bool', 'is_int_word_or_voidp', 'is_word_or_cstr',
+          'is_int_word_or_none', 'is_word_or_none', 'is_word_or_bytes',
+          'is_word_or_list', 'is_word_or_unsolved', 'is_int_word_or_unsolved']
+
+
+def check_legacy_equivalence():
+    """Each predicate, now an adapter over mojo/ir/types.py, answers every
+    probe spelling exactly as its pre-delegation literal did."""
+    bad = []
+    for name in sorted(LEGACY):
+        fn = getattr(TL, name, None)
+        if fn is None:
+            bad.append('%s: missing from TypeLattice' % name)
+            continue
+        for t in WIDE_PROBES:
+            got, want = bool(fn(t)), LEGACY[name](t)
+            if got != want:
+                bad.append('%s(%r) = %s, the literal says %s' % (name, t, got, want))
+    for name in FROZEN:
+        doc = getattr(TL, name).__doc__ or ''
+        if 'frozen: no new callers' not in doc:
+            bad.append('%s: docstring must say it is frozen' % name)
+    return bad
+
+
+def check_type_vocabulary():
+    """mojo/ir/types.py keeps spellings distinct and shares the class."""
+    from mojo.ir import types as T
+    bad = []
+    for a, b in [('char', 'int8_t'), ('long', 'int64_t'), ('bool', '_Bool'),
+                 ('unsigned int', 'uint32_t'), ('int32_t', 'int')]:
+        ta, tb = T.type_named(a), T.type_named(b)
+        if ta is tb:
+            bad.append('%s and %s must be distinct objects' % (a, b))
+        if ta.cls is not tb.cls:
+            bad.append('%s and %s must share a class' % (a, b))
+        if not T.trivially_convertible(ta, tb) or T.mismatch_class(ta, tb):
+            bad.append('%s and %s must be one GIMPLE class' % (a, b))
+    if T.type_named('long *').cls is not T.type_named('int64_t *'):
+        bad.append('long * and int64_t * must share a class')
+    ranked = set(k for k in T.RANKED_SPELLINGS)
+    tables = set(gimple_ctypes._GD_SIGNED) | set(gimple_ctypes._GD_UNSIGNED) | set(gimple_ctypes._GD_FLOAT)
+    if ranked != tables:
+        bad.append('RANKED_SPELLINGS differs from generated_dispatch: %s'
+                   % sorted(ranked ^ tables))
+    return bad
+
+
 def main() -> int:
-    bad = check_answer_key() + check_codemod_table()
+    bad = (check_answer_key() + check_codemod_table()
+           + check_legacy_equivalence() + check_type_vocabulary())
     for b in bad:
         print('  FAIL  ' + b)
     print('passed: %d failure(s)' % len(bad))

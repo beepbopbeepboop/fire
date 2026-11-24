@@ -69,3 +69,36 @@ D. **Unsolved.** Pick `Optional[Type]` (None = unsolved) or an `UNSOLVED` sentin
   exact before it is moved.
 - `bugs/GIR_stage4_ratchet_counts_every_type_string.md`: the honest census (about 930 string tests).
 - `bugs/GIR_stage4_single_type_equalities_codemod.md`: the cheap mechanical part.
+
+## Status
+
+### 2026-11-23: decisions A-D and migration step 1 LANDED
+
+- **A.** `mojo/ir/types.py` is the source. Every `TypeLattice.is_*` that is a spelling test (all but
+  `is_pointer`, `ends_in_star`, `is_unsolved`, which are structural or about the unsolved marker)
+  calls `gir_types.spelled(t)` and one `Type` method (`is_word`, `is_cstr`, `is_ranked_int`, ...).
+  Each answers EXACTLY the spellings it did: `test_type_lattice_predicates.py` keeps ANSWER_KEY
+  unchanged and adds `check_legacy_equivalence` (every predicate against its old literal over 70
+  probes, including `char*`, `long long`, `ssize_t`, padded text) and `check_type_vocabulary`.
+- **B. Design: intern by spelling, share a class.** `type_named(name)` returns one object per C
+  spelling. A spelling that is a class's own name is the canonical object (`I64`, `I8`, `BOOL`); any
+  other (`long`, `int8_t`, `bool`, `ssize_t`, `unsigned int`) is a new `Type` with the same kind,
+  bits and signedness and `cls` pointing at the canonical one. `trivially_convertible`,
+  `mismatch_class`, `same_pointee` and `cast_is_legal` compare `.cls` instead of identity, so
+  `long` is still `int64_t` to GIMPLE. A pointer to a spelled type has the matching pointer class.
+  Chosen over canonical printing (which changes C) and over a pair `(class, spelling)` (a second
+  object per use). `BASE_TYPES` still maps to the canonical types, so `reader.py`, `verify.py`
+  and `build.py` are unchanged. `spelled(t)` is `type_named` that answers `OPAQUE` for text it would
+  normalise (`char*`), since predicates answer for exact spellings only. `Type.ranked` marks the 13
+  spellings of the arithmetic lattice (`RANKED_SPELLINGS`, pinned equal to `generated_dispatch`).
+- **C.** The nine union predicates carry "frozen: no new callers; compose class predicates instead"
+  and are pinned by the test. Nothing of that shape was added.
+- **D.** `None`, `''`, `'unknown'` are untouched: every predicate answers what it did; `is_unsolved`
+  stays string-level. No predicate's membership changed.
+- Verified: `tools/c_oracle.py check` identical C on 285 programs and C++ on 35 coroutine programs.
+
+**Next (migration step 2):** move ONE side table, `_elem_types`, to `Type`: `type_named` at its
+writers, `.name` at the text edge, then the predicates take the `Type` directly (add `Type`-taking
+overloads beside `spelled`). Measure the C diff per table, then do the next. Step 3 (`var_types`)
+stays last. `is_pointer`/`ends_in_star` need a `Type` form before they can delegate; the union
+predicates go when their callers become `or` of class methods.

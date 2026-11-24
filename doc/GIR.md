@@ -292,6 +292,14 @@ stage 7 has an oracle before it has a builder.
   `== 'double'` 0. The live remainder is comments that quote a test, `endswith(' *')` on a receiver that
   may be `None` (left alone: `ends_in_star(None)` is False where `.endswith` raises), and `rt_call.py`, which
   has no `gimple_ctypes` import and so stays as it was. The ratchet baseline is lowered to these counts.
+  *One vocabulary (landed 2026-11-23, migration step 1 of
+  `bugs/hard/GIR_stage4_one_type_vocabulary.md`).* `mojo/ir/types.py` is the single source: `Type` is
+  interned by C SPELLING (`char`/`int8_t`, `long`/`int64_t`, `bool`/`_Bool` are distinct objects) and
+  carries `cls`, the semantic type, so `trivially_convertible`, `mismatch_class` and `cast_is_legal`
+  compare `.cls` and still treat `long` and `int64_t` as one GIMPLE class. Every `TypeLattice.is_*`
+  now delegates to `spelled(t)` plus a `Type` method and answers exactly the spellings it did; the nine
+  union predicates are frozen (no new callers). C is byte-identical on all 285 programs. Next: move
+  one side table (`_elem_types`) to `Type`.
 - **Stage 5a (landed 2026-11-14). A value's facts travel with a copy.**
   `carry_value_info(gen, dst, src)` (`emit_infra.py`) copies what the backend
   knows about a VALUE from one name to another, and `gen._copy` calls it for
