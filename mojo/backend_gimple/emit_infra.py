@@ -4950,28 +4950,8 @@ def boxed_param_names(gen) -> set:
     return out
 
 
-def _literal_store_kind(value):
-    """The scalar kind a LITERAL value stores, or None (no evidence).
-
-    Only literals count: a call or a name says nothing this pass can rely on,
-    so it is silence, not a second kind (doc/GIR.md stage 5c)."""
-    if isinstance(value, gimple_ctypes.NoneLiteral) \
-            or (isinstance(value, gimple_ctypes.IdentExpr) and value.name == 'None'):
-        # The parser spells `None` either way (infra_infer checks both too).
-        return 'none'
-    if isinstance(value, gimple_ctypes.BoolLiteral):
-        return 'bool'
-    if isinstance(value, gimple_ctypes.IntLiteral):
-        return 'int'
-    if isinstance(value, gimple_ctypes.FloatLiteral):
-        return 'float'
-    if isinstance(value, gimple_ctypes.StringLiteral):
-        return 'str'
-    return None
-
-
 def _self_field_stores(node, out: list) -> None:
-    """Append `(field, literal kind)` for every `self.<field> = <value>` under
+    """Append `(field, value node)` for every `self.<field> = <value>` under
     `node` (a statement, a list of statements, or a nested block)."""
     if isinstance(node, (list, tuple)):
         for item in node:
@@ -4982,7 +4962,7 @@ def _self_field_stores(node, out: list) -> None:
         if isinstance(t, gimple_ctypes.MemberExpr) \
                 and isinstance(t.obj, gimple_ctypes.IdentExpr) \
                 and t.obj.name == 'self':
-            out.append((t.member, _literal_store_kind(node.value)))
+            out.append((t.member, node.value))
     if dataclasses.is_dataclass(node):
         for f in dataclasses.fields(node):
             v = getattr(node, f.name, None)
@@ -4990,21 +4970,417 @@ def _self_field_stores(node, out: list) -> None:
                 _self_field_stores(v, out)
 
 
-def mixed_field_names(struct) -> frozenset:
-    """The fields of `struct` that hold a `None` literal AND a scalar literal
-    across the struct's methods (`self.<f> = None` beside `self.<f> = 42`).
+# The value classes of doc/GIR.md stage 5c ("DECISION"): what a slot can hold
+# decides how `None` is spelled in it. A bitmask per (callee, parameter), keyed
+# by one flat string so the table has no tuple key.
+_PV_REFS = 1       # a struct pointer, str, list, dict, set, bytes, ...
+_PV_SCALAR = 2     # an int, float or bool
+_PV_UNKNOWN = 4    # an argument whose kind nothing here proves
+_PV_SEP = '\x1f'
 
-    Such a field is the box-holding kind: a bare word would read the `None`
-    back as the integer 0 (the 2026-11-22 corpus group, doc/GIR.md stage 5c).
-    This is the predicate only; the stores and reads do not consult it yet."""
-    kinds: dict = {}
+
+def param_value_key(func_name, param_name) -> str:
+    """The flat key of one parameter in `gen._param_value_obs`."""
+    return _as_str(func_name) + _PV_SEP + _as_str(param_name)
+
+
+def param_value_class(gen, func_name, param_name) -> str:
+    """What an UNANNOTATED parameter receives at its call sites, as `'refs'`,
+    `'scalar'` or `'unknown'` (doc/GIR.md stage 5c).
+
+    `None` arguments (and a padded `= None` default) are ignored: they say
+    nothing about the kind of the non-`None` values. `'refs'` means every
+    other call site passes a reference, `'scalar'` that every one passes an
+    int/float/bool. A parameter with no observation, with an argument whose
+    kind nothing proves, or with BOTH kinds, is `'unknown'` (rule 3: no
+    informative evidence, nothing changes). `func_name` is the callee key the
+    call-site pass records under: the bare name for a free function,
+    `<Struct>_<method>` for a method (a constructor is `<Struct>___init__`)."""
+    obs = getattr(gen, '_param_value_obs', None)
+    if not obs:
+        return 'unknown'
+    bits = obs.get(param_value_key(func_name, param_name), 0)
+    if bits == _PV_REFS:
+        return 'refs'
+    if bits == _PV_SCALAR:
+        return 'scalar'
+    return 'unknown'
+
+
+def _pv_is_none_node(value) -> bool:
+    return isinstance(value, gimple_ctypes.NoneLiteral) \
+        or (isinstance(value, gimple_ctypes.IdentExpr)
+            and _as_str(value.name) == 'None')
+
+
+def _pv_type_class(t) -> str:
+    """The value class a C type spelling proves: `'refs'`, `'scalar'`, or
+    `'unknown'` (the `int64_t` word is also the default for "cannot tell")."""
+    t = _as_str(t)
+    if not t:
+        return 'unknown'
+    if gimple_ctypes.TypeLattice.is_double(t) or gimple_ctypes.TypeLattice.is_float(t):
+        return 'scalar'
+    if gimple_ctypes.TypeLattice.ends_in_star(t):
+        return 'refs'
+    return 'unknown'
+
+
+def _pv_var_type(gen, caller_key, name) -> str:
+    """The C type of local `name` in `caller_key`: the inference table's
+    answer, else the struct a plain `name = Struct(...)` binding proves (the
+    inference has not typed module-level code yet when this pass runs), else a
+    module global."""
+    n = _as_str(name)
+    t = (getattr(gen, '_inferred_var_types', None) or {}).get(
+        _as_str(caller_key), {}).get(n)
+    if not t:
+        t = (getattr(gen, '_pv_local_structs', None) or {}).get(
+            _as_str(caller_key), {}).get(n)
+    if not t:
+        t = (getattr(gen, '_global_var_types', None) or {}).get(n)
+    return _as_str(t)
+
+
+def _pv_bind_local_structs(node, structs: dict, out: dict) -> None:
+    """Record `name -> '<Struct> *'` for every `name = Struct(...)` under
+    `node`; a name bound to two different structs is dropped (`''`)."""
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _pv_bind_local_structs(item, structs, out)
+        return
+    if isinstance(node, (gimple_ctypes.FunctionDef, gimple_ctypes.StructDef)):
+        return
+    if isinstance(node, gimple_ctypes.AssignStmt) \
+            and isinstance(node.target, gimple_ctypes.IdentExpr) \
+            and isinstance(node.value, gimple_ctypes.CallExpr) \
+            and isinstance(node.value.func, gimple_ctypes.IdentExpr) \
+            and _as_str(node.value.func.name) in structs:
+        nm = _as_str(node.target.name)
+        ty = _as_str(node.value.func.name) + ' *'
+        if nm in out and out[nm] != ty:
+            out[nm] = ''
+        else:
+            out[nm] = ty
+    if dataclasses.is_dataclass(node):
+        for f in dataclasses.fields(node):
+            v = getattr(node, f.name, None)
+            if isinstance(v, (list, tuple)) or dataclasses.is_dataclass(v):
+                _pv_bind_local_structs(v, structs, out)
+
+
+def value_class_of(gen, node, caller_key, caller_struct, depth) -> str:
+    """The value class of one expression evaluated inside `caller_key` (a
+    callee key, `'<toplevel>'` for module code), owned by struct
+    `caller_struct` or None: `'none'`, `'refs'`, `'scalar'` or `'unknown'`.
+
+    Only shapes that PROVE a kind answer; everything else is `'unknown'`,
+    which is silence rather than a second kind (the same discipline the
+    old literal-only store scan had)."""
+    if node is None:
+        return 'unknown'
+    if _pv_is_none_node(node):
+        return 'none'
+    if isinstance(node, gimple_ctypes.UnaryOp) \
+            and _as_str(node.op) in ('-', '+') \
+            and isinstance(node.operand, (gimple_ctypes.IntLiteral,
+                                          gimple_ctypes.FloatLiteral)):
+        return 'scalar'
+    if isinstance(node, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral,
+                         gimple_ctypes.BoolLiteral)):
+        return 'scalar'
+    if isinstance(node, (gimple_ctypes.StringLiteral, gimple_ctypes.ListExpr,
+                         gimple_ctypes.DictExpr, gimple_ctypes.SetExpr,
+                         gimple_ctypes.TupleExpr, gimple_ctypes.Comprehension)):
+        return 'refs'
+    if gen is None:
+        return 'unknown'
+    structs = getattr(gen, '_pv_structs', None) or {}
+    if isinstance(node, gimple_ctypes.CallExpr):
+        if isinstance(node.func, gimple_ctypes.IdentExpr) \
+                and _as_str(node.func.name) in structs:
+            return 'refs'
+        return 'unknown'
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        n = _as_str(node.name)
+        if n == 'self' and caller_struct:
+            return 'refs'
+        pnames = (getattr(gen, '_pv_param_names', None) or {}).get(_as_str(caller_key))
+        if pnames and n in pnames:
+            return param_value_class(gen, caller_key, n)
+        return _pv_type_class(_pv_var_type(gen, caller_key, n))
+    if isinstance(node, gimple_ctypes.MemberExpr) \
+            and isinstance(node.obj, gimple_ctypes.IdentExpr):
+        on = _as_str(node.obj.name)
+        owner = None
+        if on == 'self':
+            owner = caller_struct
+        else:
+            t = _pv_var_type(gen, caller_key, on)
+            if t and gimple_ctypes.TypeLattice.ends_in_star(t):
+                owner = t[:-2]
+        if owner and _as_str(owner) in structs:
+            return field_value_class(gen, _as_str(owner), _as_str(node.member), depth)
+    return 'unknown'
+
+
+def _field_store_classes(gen, struct, field_name, depth) -> list:
+    """The value class of every `self.<field_name> = <value>` store in
+    `struct`'s methods (one entry per store)."""
+    classes: list = []
+    sname = _as_str(struct.name)
     for m in getattr(struct, 'methods', []) or []:
         found: list = []
         _self_field_stores(getattr(m, 'body', []), found)
-        for field_name, kind in found:
-            if kind is not None:
-                kinds.setdefault(field_name, set()).add(kind)
-    return frozenset(f for f, ks in kinds.items() if 'none' in ks and (ks - {'none'}))
+        ckey = sname + '_' + _as_str(m.name)
+        for i in range(len(found)):
+            if _as_str(found[i][0]) != field_name:
+                continue
+            classes.append(value_class_of(gen, found[i][1], ckey, sname, depth + 1))
+    return classes
+
+
+def field_value_class(gen, struct_name, field_name, depth) -> str:
+    """What a struct field's NON-`None` stores are: `'refs'`, `'scalar'` or
+    `'unknown'` (no store, a store of unproven kind, or both kinds). The
+    recursion is bounded by `depth` because a field may be stored from
+    another field of the same struct."""
+    if depth > 3:
+        return 'unknown'
+    structs = getattr(gen, '_pv_structs', None) or {}
+    struct = structs.get(_as_str(struct_name))
+    if struct is None:
+        return 'unknown'
+    classes = _field_store_classes(gen, struct, _as_str(field_name), depth)
+    saw_refs = False
+    saw_scalar = False
+    for c in classes:
+        if c == 'refs':
+            saw_refs = True
+        elif c == 'scalar':
+            saw_scalar = True
+        elif c != 'none':
+            return 'unknown'
+    if saw_refs and not saw_scalar:
+        return 'refs'
+    if saw_scalar and not saw_refs:
+        return 'scalar'
+    return 'unknown'
+
+
+def _pv_bits(cls) -> int:
+    if cls == 'refs':
+        return _PV_REFS
+    if cls == 'scalar':
+        return _PV_SCALAR
+    if cls == 'unknown':
+        return _PV_UNKNOWN
+    return 0
+
+
+def _pv_note(table: dict, callee, pname, bits: int) -> None:
+    if bits == 0:
+        return
+    key = param_value_key(callee, pname)
+    table[key] = table.get(key, 0) | bits
+
+
+def _pv_method_params(fn) -> list:
+    """A method's parameter names that a call ARGUMENT binds: not the
+    receiver, not a classmethod's `cls`, not a `*args` / `**kwargs`."""
+    is_cls = 'classmethod' in (getattr(fn, 'decorators', None) or [])
+    out: list = []
+    for p in (fn.params or []):
+        n = _as_str(p[0])
+        if n == 'self' or (is_cls and n == 'cls') or n.startswith('*'):
+            continue
+        out.append(n)
+    return out
+
+
+def _pv_resolve_callee(gen, call, caller_name, caller_struct, structs, defs):
+    """The callee key of one call, or None when it is not resolvable to a
+    function of this module. A free function is its bare name, a method
+    `<Struct>_<method>`, a constructor call `<Struct>___init__`; receiver
+    resolution is the one the method-observation passes use (`self`, a local
+    typed `<Struct> *`, a `self.<field>` typed `<Struct> *`)."""
+    f = call.func
+    if isinstance(f, gimple_ctypes.IdentExpr):
+        n = _as_str(f.name)
+        if n in structs:
+            k = n + '___init__'
+            if k in defs:
+                return k
+            return None
+        if n in defs:
+            return n
+        return None
+    if not isinstance(f, gimple_ctypes.MemberExpr):
+        return None
+    recv = f.obj
+    owner = None
+    if isinstance(recv, gimple_ctypes.IdentExpr):
+        if _as_str(recv.name) == 'self':
+            owner = caller_struct
+        else:
+            t = _pv_var_type(gen, caller_name, recv.name)
+            if t and gimple_ctypes.TypeLattice.ends_in_star(t):
+                owner = t[:-2]
+    elif isinstance(recv, gimple_ctypes.MemberExpr) \
+            and isinstance(recv.obj, gimple_ctypes.IdentExpr) \
+            and _as_str(recv.obj.name) == 'self' and caller_struct:
+        ft = _as_str((getattr(gen, 'struct_field_types', None) or {}).get(
+            _as_str(caller_struct), {}).get(_as_str(recv.member)))
+        if ft and gimple_ctypes.TypeLattice.ends_in_star(ft):
+            owner = ft[:-2]
+    if not owner or _as_str(owner) not in structs:
+        return None
+    k = _as_str(owner) + '_' + _as_str(f.member)
+    if k in defs:
+        return k
+    return None
+
+
+def _pv_collect_round(gen, bodies: list, structs: dict, defs: dict, pnames: dict) -> dict:
+    """One pass over every call site, into a fresh table."""
+    table: dict = {}
+    for entry in bodies:
+        caller_name = _as_str(entry[0])
+        caller_struct = entry[1]
+        calls: list = []
+        gen._calls_in_stmts(entry[2], calls)
+        for call in calls:
+            callee = _pv_resolve_callee(gen, call, caller_name, caller_struct, structs, defs)
+            if callee is None:
+                continue
+            fn = defs[callee]
+            names = pnames[callee]
+            bound: set = set()
+            spread = False
+            for a in call.args:
+                if isinstance(a, gimple_ctypes.UnaryOp) and _as_str(a.op) in ('*', '**'):
+                    spread = True
+            for kw in (getattr(call, 'kwargs', None) or []):
+                if isinstance(kw[1], gimple_ctypes.UnaryOp) and _as_str(kw[1].op) == '**':
+                    spread = True
+            if spread:
+                # A spread has no one argument per slot: every parameter may
+                # receive anything, which is "no informative evidence".
+                for n in names:
+                    _pv_note(table, callee, n, _PV_UNKNOWN)
+                continue
+            for i in range(len(call.args)):
+                if i >= len(names):
+                    break
+                bound.add(names[i])
+                cls = value_class_of(gen, call.args[i], caller_name, caller_struct, 0)
+                _pv_note(table, callee, names[i], _pv_bits(cls))
+            for kw in (getattr(call, 'kwargs', None) or []):
+                kn = _as_str(kw[0])
+                if kn in names:
+                    bound.add(kn)
+                    cls = value_class_of(gen, kw[1], caller_name, caller_struct, 0)
+                    _pv_note(table, callee, kn, _pv_bits(cls))
+            dflts = getattr(fn, 'param_defaults', None) or {}
+            for n in names:
+                if n in bound or n not in dflts:
+                    continue
+                cls = value_class_of(gen, dflts[n], '', None, 0)
+                _pv_note(table, callee, n, _pv_bits(cls))
+    return table
+
+
+def collect_param_value_obs(gen, all_functions: list, all_structs: list,
+                            caller_bodies: list) -> None:
+    """Fill `gen._param_value_obs` (and the tables `value_class_of` reads):
+    for every unannotated parameter of a function, method or constructor of
+    this module, the kinds of value its call sites pass (doc/GIR.md stage 5c).
+
+    `caller_bodies` is `[(caller key, owning struct name or None, body)]`, the
+    method-caller list the other cross-call passes walk. The walk repeats (at
+    most three rounds) because an argument that is itself a forwarded
+    parameter, or a field stored from one, is classified from the PREVIOUS
+    round's table; each round starts from an empty table so a stale
+    `unknown` from round one cannot outlive the evidence that settles it."""
+    structs: dict = {}
+    defs: dict = {}
+    pnames: dict = {}
+    allnames: dict = {}
+    for fn in all_functions:
+        if isinstance(fn, gimple_ctypes.FunctionDef):
+            k = _as_str(fn.name)
+            defs[k] = fn
+            names: list = []
+            for p in (fn.params or []):
+                n = _as_str(p[0])
+                if not n.startswith('*'):
+                    names.append(n)
+            pnames[k] = names
+    for st in all_structs:
+        if not isinstance(st, gimple_ctypes.StructDef):
+            continue
+        sname = _as_str(st.name)
+        structs[sname] = st
+        for m in (st.methods or []):
+            k = sname + '_' + _as_str(m.name)
+            defs[k] = m
+            pnames[k] = _pv_method_params(m)
+    for k in pnames:
+        allnames[k] = set(pnames[k])
+    gen._pv_structs = structs
+    gen._pv_param_names = allnames
+    locs: dict = {}
+    for entry in caller_bodies:
+        one: dict = {}
+        _pv_bind_local_structs(entry[2], structs, one)
+        locs[_as_str(entry[0])] = one
+    gen._pv_local_structs = locs
+    gen._param_value_obs = {}
+    for _round in range(3):
+        table = _pv_collect_round(gen, caller_bodies, structs, defs, pnames)
+        prev = gen._param_value_obs
+        same = len(table) == len(prev)
+        if same:
+            for key in table:
+                if prev.get(key) != table[key]:
+                    same = False
+                    break
+        gen._param_value_obs = table
+        if same:
+            break
+
+
+def mixed_field_names(struct, gen=None) -> frozenset:
+    """The fields of `struct` that hold a `None` literal AND a scalar across
+    the struct's methods (`self.<f> = None` beside `self.<f> = 42`): the
+    box-holding kind, because a bare word would read the `None` back as the
+    integer 0 (the 2026-11-22 corpus group, doc/GIR.md stage 5c).
+
+    The decision rule (stage 5c "DECISION"): a slot's `None` follows what the
+    slot can hold. A field whose non-`None` stores are all references (a
+    constructor call, a string or container literal, a references-only field,
+    a `refs` parameter) keeps the NULL word and is NOT mixed. A scalar literal
+    or a `scalar` parameter beside the `None` store makes it mixed. A store of
+    unproven kind (`unknown`) is silence and does not."""
+    stores: dict = {}
+    order: list = []
+    sname = _as_str(getattr(struct, 'name', ''))
+    for m in getattr(struct, 'methods', []) or []:
+        found: list = []
+        _self_field_stores(getattr(m, 'body', []), found)
+        ckey = sname + '_' + _as_str(getattr(m, 'name', ''))
+        for i in range(len(found)):
+            fname = _as_str(found[i][0])
+            if fname not in stores:
+                stores[fname] = set()
+                order.append(fname)
+            stores[fname].add(value_class_of(gen, found[i][1], ckey, sname, 0))
+    out: list = []
+    for fname in order:
+        ks = stores[fname]
+        if 'none' in ks and 'scalar' in ks:
+            out.append(fname)
+    return frozenset(out)
 
 
 def mixed_box_name(gen, name) -> bool:
