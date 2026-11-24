@@ -868,11 +868,6 @@ import mojo.backend_gimple.cpp_core as gcc_
 import mojo.backend_gimple.emit_exprs as gex
 import mojo.backend_gimple.emit_infra as ginf
 import mojo.backend_gimple.emit_resolve as grsl
-# Nesting depth of `GimpleGen.gen_module`: only the outermost call finalizes the
-# extern return-type placeholders (see that method).
-_GEN_MODULE_DEPTH: list = [0]
-
-
 class GimpleGen:
     # Map Python builtin names to their C/runtime equivalents when used as values
     BUILTIN_VALUE_MAP: dict[str, str] = {
@@ -4760,21 +4755,7 @@ class GimpleGen:
     def gen_module(self, stmts: list) -> str:
         # Ensure _actual_types knows stmts is MojoList* so for-loop dispatch
         # works when this method is compiled by the self-hosted backend.
-        # The TU text is final once gen_module_impl returns, so every
-        # definer has recorded its measured return: resolve the importer
-        # extern placeholders now (see emit_funcs.resolve_extern_return_placeholders).
-        # Only the OUTERMOST call resolves: a nested gen_module (a comptime
-        # snippet, a per-module compile) returns text that is embedded into the
-        # outer unit before the outer unit's own definitions have recorded
-        # their answers, so resolving there would freeze the default.
-        _GEN_MODULE_DEPTH[0] += 1
-        try:
-            _code = gmg.gen_module_impl(self, stmts)
-        finally:
-            _GEN_MODULE_DEPTH[0] -= 1
-        if _GEN_MODULE_DEPTH[0] == 0:
-            _code = gfn.resolve_extern_return_placeholders(self, _code)
-        return _code
+        return gmg.gen_module_impl(self, stmts)
 
     # ---- function-extraction delegates (bodies live in gimple_gen_methods.py) ----
     def _lower_bound_method_value(self, struct_name: str, method: str, self_type: str, self_val: str) -> tuple[str, str]:
@@ -5069,12 +5050,6 @@ class GimpleGen:
         return ctype in _SCALAR_CTYPE_SIZE
     def _overload_suffix(self, bare_name: str) -> str:
         return gfn._overload_suffix(self, bare_name)
-    def _export_return_is_default(self, module, name, info) -> bool:
-        return gfn.export_return_is_default(self, module, name, info)
-    def _extern_home_qualifier(self, bare_name: str) -> str:
-        return gfn._func_home_qualifier(self, bare_name)
-    def _extern_return_ctype(self, qualifier: str, bare_name: str, default_ret: str) -> str:
-        return gfn.extern_return_ctype(self, qualifier, bare_name, default_ret)
     def _note_own_func_home(self, bare_name: str, module_name: str,
                             record_scope: bool=True,
                             record_flat: bool=True) -> None:
