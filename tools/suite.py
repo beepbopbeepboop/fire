@@ -834,6 +834,7 @@ MEASURED_PEAK_GB = {
     'preflight':                              (0.06, 'measured'),  # 0.6 s, 3 procs
     'no-new-casts':                           (0.10, 'measured'),  # 0.7 s
     'rthdrscan':                              (0.11, 'measured'),  # 0.7 s
+    'tsolve':                                 (0.05, 'estimated'),  # pure unit tests, no compile
     'gimple-lint':                            (0.50, 'measured'),  # 10 s; four --dump children, the largest (myinterpreter.py) 0.5 GB
     'type-string-ratchet':                    (0.05, 'estimated'),  # a text scan, well under 1 s
     'pydiff-ratchet':                         (1.00, 'estimated'),  # ~3 min; 8 compiles at a time, each well under 1 GB (not yet measured)
@@ -1993,6 +1994,12 @@ test('pydiff-ratchet', [PY, 'test_pydiff_ratchet.py'], cache=True, mem='tiny',
          os.path.relpath(p, REPO)
          for p in glob.glob(os.path.join(REPO, 'tools', 'pydiff_corpus', '*', '*.py'))),
      desc='programs that match CPython keep matching (ratchet over tools/pydiff_corpus)')
+test('tsolve', [PY, 'test_tsolve.py'], cache=True, mem='tiny',
+     extra=['test_tsolve.py'] + sorted(
+         os.path.relpath(p, REPO)
+         for p in glob.glob(os.path.join(REPO, 'mojo', 'tsolve', '*.py'))) + [
+         'fire_compiler.py', 'ast_rewriter.py'],
+     desc='whole-closure type solver: join/from_annotation/ret_ctype rows, summaries, fixpoint (bugs/GIR_type_solver.md, 4)')
 test('gimple-lint', [PY, 'test_gimple_lint.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + sorted(
          os.path.relpath(p, REPO)
@@ -4946,7 +4953,7 @@ BUCKETS = {
 
               'reg-conditional-conformance-candidate-diagnostic',
               'interp-tokenizer-oracle',
-              'linkmode', 'no-new-casts', 'gimple-lint', 'pydiff-ratchet', 'type-string-ratchet', 'nonlocal', 'gimplerunner',
+              'linkmode', 'no-new-casts', 'gimple-lint', 'tsolve', 'pydiff-ratchet', 'type-string-ratchet', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
 # `ptrreg-boxed-str` is master's split-out dedicated group of the
               # pointer-registry harness and `formal-ast` is the batch's
