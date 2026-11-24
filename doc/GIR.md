@@ -459,6 +459,12 @@ stage 7 has an oracle before it has a builder.
   list/tuple slots and every `.get` domain back as `DynWord`. Do NOT define
   `x == None` as `x == 0`: that was tried and reverted (it makes
   `0 == None` true).
+  *Decision (2026-11-23, owner-delegated):* a slot represents `None` according to what it can hold.
+  If it holds references only, `None` is NULL (`Erased(T)`; today's behaviour, and the compiler's own
+  code). If it holds a scalar beside `None`, `None` is the `mojo_box_none()` box (`DynWord`/`Box`) and
+  every read is box-aware. If it has no informative evidence, nothing changes. An unannotated
+  parameter is classified by the argument kinds at its call sites. Details and the next slice are in
+  `bugs/mid/GIR_stage5c_none_representation.md`.
 - **Stage 6, counted loops (started 2026-11-14).** `gen._loop_head(idx, n,
   bb_cond, bb_body, bb_post, bb_after, stmt)` and `gen._loop_tail(idx,
   bb_cond, bb_post, bb_after, stmt)` (`emit_resolve.py`) are the skeleton of
