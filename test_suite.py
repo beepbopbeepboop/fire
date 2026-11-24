@@ -2284,6 +2284,9 @@ STALE_PER_CHILD_BUDGETS = {
     'test_gimple_class_method_import_inlined.py': 2,
     'test_gimple_imported_container_global.py': 3,
     'test_gimple_set_op_boxed_container_local.py': 3,
+    # Arrived with the dump-regression / where-alias diagnostics work: one real
+    # child budget each (the ast walk's count), not converted to exec_budget.
+    'test_helper_dump_regression.py': 1,
     # tools/ pin, 2026-11-20: four subprocess timeouts on a compile/run.
     'tools/test_orchestrator_wedge.py': 4,
     'formal/x86_64_endtoend_test.py': 1,
@@ -2377,10 +2380,12 @@ STALE_PER_CHILD_BUDGETS = {
     'test_predicate_where_diagnostic.py': 1,
     'test_srcless_package_diagnostics.py': 1,
     'test_static_call_diagnostics.py': 5,
+    'test_t_func_dump_regression.py': 1,
     'test_trait_comptime_member_untyped.py': 1,
     'test_trait_imported_diagnostic.py': 1,
     'test_trait_members_diagnostic.py': 1,
     'test_trait_requirements_diagnostic.py': 1,
+    'test_where_alias_diagnostic.py': 1,
     'test_where_clause_diagnostic.py': 1,
 }
 
@@ -2998,11 +3003,8 @@ def test_a_disabled_test_is_registered_but_never_runs():
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
-        'codegen-container-param-unknown-arg',
         'gimple',
         'gimplerunner',
-        'stdlib-dylib',
-        'stdlib-syntax',
         'suite-self-test',
     ]
     check('disabled: the real registry has no job that is not run',
@@ -3216,11 +3218,8 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
-        'codegen-container-param-unknown-arg',
         'gimple',
         'gimplerunner',
-        'stdlib-dylib',
-        'stdlib-syntax',
         'suite-self-test',
     ]
     check('disabled markers: the state the section is written for is stated, '
@@ -4514,6 +4513,11 @@ UNREGISTERED = {
     # to register in tools/suite.py, and this is a build-and-RUN case that
     # wants a bucket beside `linkmode` when one is next touched.
     'test_codegen_module_alias_function_value.py': _STANDALONE_TEST_REASON,
+    # A predicate-only pin for `mixed_field_names` (GIR stage 5c): asserts the
+    # box-holding kind for a field stored a None literal AND a scalar literal.
+    # It changes no C, so it has no job of its own; run directly like the
+    # sibling analyzer pins below.
+    'test_gimple_mixed_field_names.py': _STANDALONE_TEST_REASON,
     # The cases-generator analyzer landing (2026-11-17) left these regression
     # pins next to their fixes without registering them. Each runs directly;
     # the `*_build.py` siblings compile one small source with `fire.py build`
