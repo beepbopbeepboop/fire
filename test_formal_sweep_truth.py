@@ -4168,8 +4168,8 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         GENERATED text. Measured on `const2.mojo`'s emitted text: a
         `«lib».X86:460:8` position came back as `"hstep10's side condition, line
         460"`, which is confident, specific and completely wrong, because 460 is a
-        line in `lib/X86.lean` and a `sorry` of ours happens to sit on 460 of the
-        generated file. It returned `None` for `«lib».ProofLib:4624:8` only
+        line in `lib/X86.lean` and a `sorry` of ours happened to sit on 460 of
+        the generated file. It returned `None` for `«lib».ProofLib:4624:8` only
         because 4624 is past the end of that file — luck, not a rule.
         (The line moves with the emission; earlier versions of this case used
         503 and then 461: `_GUARD`'s comment says what removed the steps between
@@ -4192,15 +4192,33 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                          "UNDER a search path, whatever the guillemets sit "
                          "around; the search path is the other half of the "
                          "rule and has its own case below")
+        # The control line has to be a line this emitter actually writes a
+        # `sorry` on, and the emission MOVES it: this case has already chased
+        # 503 -> 461 -> 460, and each literal went vacuous at the next change
+        # to the step emission (`e63e657976`'s `emit_terminates` reordering
+        # moved `hstep10`'s guards off 460).  A fixed number is a control that
+        # stops controlling; derive the first `hstep10` guard from the text.
+        # The library rows below reuse that same number on purpose — "a LIBRARY
+        # position coincides with one of OUR holes" is the coincidence this
+        # case exists to test, and a number that is not ours does not test it.
+        lines = text.split("\n")
+        ours = next(
+            (ln for ln in range(1, len(lines) + 1)
+             if E.hole_at(text, ln) == ("hstep10", "guarded")), None)
+        self.assertIsNotNone(
+            ours,
+            "the control needs one of OUR holes to point at; the emission no "
+            "longer names an `hstep10` guard, so this case could not tell a "
+            "library position from an emitted one")
         self.assertEqual(
             E.live_hole_phrase(
                 text,
                 "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«.tmp».tmpcmqrxbe0:460:8`\n", module),
-            "hstep10's side condition, line 460",
-            "the control: OUR hole at 460 still resolves, so the rows below are "
-            "refusing a library module and not refusing line 460")
-        for label, pos in (("«lib».X86", 460), ("«lib».ProofLib", 4624)):
+                "`«.tmp».tmpcmqrxbe0:%d:8`\n" % ours, module),
+            "hstep10's side condition, line %d" % ours,
+            "the control: OUR hole at %d still resolves, so the rows below are "
+            "refusing a library module and not refusing line %d" % (ours, ours))
+        for label, pos in (("«lib».X86", ours), ("«lib».ProofLib", 4624)):
             self.assertIsNone(
                 E.live_hole_phrase(
                     text,
@@ -4213,8 +4231,8 @@ class TestX86EndToEndEmitter(unittest.TestCase):
             E.live_hole_phrase(
                 text,
                 "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«lib».X86:460:8`\n"),
-            "hstep10's side condition, line 460",
+                "`«lib».X86:%d:8`\n" % ours),
+            "hstep10's side condition, line %d" % ours,
             "with no module to compare against nothing is filtered, so this is "
             "the pre-existing behaviour and not a silent tightening: a caller "
             "that has no generated file in hand still gets an answer, and it is "
