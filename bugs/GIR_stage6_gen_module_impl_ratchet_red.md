@@ -8,6 +8,7 @@ The growth after the ratchet was set (`8eba91535`):
 - `4e2efdfee` (+33): the separately compiled definer's unannotated iterated parameter fix. This is
   the one to extract.
 - `2adea3531` (+1) and `89c41e7de` (+2).
+- 2026-11-23: the stage 5c call-site pass added 14 more; it was moved into `_gmp_collect_param_value_obs` at merge, leaving a one-line call (8712 lines).
 
 ## What to do
 
