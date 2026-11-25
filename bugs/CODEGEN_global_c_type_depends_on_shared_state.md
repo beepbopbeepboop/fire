@@ -40,3 +40,15 @@ NON-container struct pointers that differ. It does NOT cover:
    `_own_overlay_global_ctype`.
 3. Regression: `test_global_homonym_struct.py` extended with a container global and a scalar
    global of the same bare name in the two modules.
+
+## Progress (2026-11-24)
+
+- DONE: the module-level tuple-unpacking store (`mojo/middle/stmts_shared.py`) now asks
+  `_global_dst_ctype`, the one owner-first rule, instead of reading `_global_c_decl_types` /
+  `_global_var_types` by bare name. Verified: c_oracle identical vs 4a4dca532 (286 + 35), compile_stdlib
+  610/0, and `test_global_homonym_struct.py` extended with a container and a scalar global that share
+  bare names with other modules' globals (PASS).
+- OPEN (the remaining audit): the other bare-name readers of the shared tables that run after an import
+  compiled. Start from `grep -rn "_global_c_decl_types\|_global_var_types" mojo/backend_gimple mojo/middle`
+  and route each store-type read through `_global_dst_ctype`; reads that only need the field's
+  declared type should use the owner's declaration (`_own_overlay_global_ctype`).

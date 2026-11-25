@@ -17,14 +17,18 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FILES = {
-    'main.py': 'import a\nimport b\nprint(a.box_n())\nprint(b.box_s())\n',
+    'main.py': ('import a\nimport b\nprint(a.box_n())\nprint(b.box_s())\n'
+                'print(a.name_len())\nprint(b.name_text())\n'),
+    # `BOX` (struct) and `NAME` (container) in a; the same names with other types in b.
     'a.py': ('class Box:\n    def __init__(self, n):\n        self.n = n\n'
-             'BOX: Box = Box(1)\n'
+             'BOX: Box = Box(1)\nNAME: list = [1, 2]\n'
              'def box_n():\n    return BOX.n\n'
+             'def name_len():\n    return len(NAME)\n'
              'import b\n'),
     'b.py': ('class Tag:\n    def __init__(self, s):\n        self.s = s\n'
-             'BOX: Tag = Tag("y")\n'
-             'def box_s():\n    return BOX.s\n'),
+             'BOX: Tag = Tag("y")\nNAME: str = "yy"\n'
+             'def box_s():\n    return BOX.s\n'
+             'def name_text():\n    return NAME\n'),
 }
 PY = sys.executable
 
@@ -47,7 +51,7 @@ def main() -> int:
     for f in failures:
         print('FAIL', f)
     if not failures:
-        print('PASS homonym module globals keep their own struct types')
+        print('PASS homonym module globals keep their own types (struct, container, scalar)')
     return 1 if failures else 0
 
 

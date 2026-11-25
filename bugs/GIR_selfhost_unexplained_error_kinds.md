@@ -134,3 +134,15 @@ When the fix lands, delete this doc in the same commit, update `doc/GIR.md`'s
 - 2026-11-24 (later): re-measured on master. The has-no-member and
   `component_ref` rows are gone. The 3 remaining errors were diagnosed to the `+`
   lowering, and the plan above was written. Next: the fix commit.
+
+## Reproduction from an external checkout (2026-11-24)
+
+A separate checkout built `fire.py --dump-full` and then `gcc-mp-15 -Os -g -fgimple
+-ftrivial-auto-var-init=zero` over `fire.ci` (after `sed` renames `int main` to `int mojo_main`).
+It reports exactly the three errors in this doc, in `mojo/middle/coro.py:7714` (`out = out + nested_bodies`)
+and `mojo/backend_gimple/elab_intu.py:4166` and `:4169` (`_nested = (_nested or []) + ...`), each
+`invalid operands to binary + (have 'MojoList *' and 'double')`. The closure compiled with
+`tools/selfhost_ci.py` at `183dc10c4` shows the same three and nothing else in that family, so the
+closure TU is the oracle for them. The same check also reports the `mojoc` and `selfhost` gate
+failures under `make gate` (`WordFacts` unknown type, in a separate build path), which this family
+does not explain.

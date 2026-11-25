@@ -74,3 +74,15 @@ from THIS module's own FromImportStmt scan, and consulted before the shared fall
 `_own_imported_struct_home` filled from the module's own `from m import K` statements, read by the
 bare constructor path (the lowering that produces `{cname}___init__`), before the shared
 `_imported_struct_home`. Regression: the minimized program above as `test_import_class_name_collision.py`.
+
+## Attempt 2 (2026-11-24): a per-module struct home, reverted
+
+Tried: a per-instance `_own_imported_struct_home`, filled by the extern-declaration path
+(`emit_resolve.py` ~2321, next to the shared `setdefault`) and read first by
+`funcs_shared._struct_method_qualifier`. Result on the minimized program: unchanged
+(`too many arguments to function 'm1_K___init__'`). So the bare constructor's C name is NOT chosen by
+`_struct_method_qualifier`; the call site builds it from another source. Reverted (tree clean).
+
+Still open. Next: find the call-site lowering of a bare struct constructor (the `K(1, 2)` expression
+in `main`): instrument the emitted callee name and the function that produces it, in a scratch copy,
+then move that choice to the module's own import.

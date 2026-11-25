@@ -695,30 +695,26 @@ Closure acceptance: section 8.
 
 ### HANDOFF (read first; kept current by whoever works on this)
 
-- STATE: the design's steps 1-5 are landed on master. The closure acceptance (section 8) is met at
-  the commit that lands this block: gcc has only the 3 out-of-scope `MojoList * + double` errors;
-  the ledger has conflict=0, weak=0, undecided=0, refined=6 (justified in the Status above), early
-  141, shadow 158; test_tsolve 74/0; c_oracle identical vs 74e74250f (286 + 35); compile_stdlib
-  610/0; test_import_cycle_sigs, test_global_homonym_struct PASS; test_gimple_lint,
-  test_type_string_ratchet, test_gir_builder pass; dangling_doc_refs ratchet passes.
-- Commits on master, in order: c7878b789 (step 1), db2a1cdba (2a), 8bc44e1ed (2b), b5a1cccdf (2c),
-  336eff194 (2d), c8bb6578a (2e/2f), 2d1a9131c (2g-2i), bacc2f396 (step 3), 77d06f327 (4a),
-  cc532b909 / 0faf3141a / 74e74250f (docs), and the step 4b fix (see the 4b entry).
-- The import-cycle back-edge bug record (deleted with its fix, 2026-11-24) is no longer in bugs/.
-- Follow-ups that are NOT blocking acceptance (each small and named):
-  1. DONE (test_return_disagreement.py, check bucket): the disagreement table has its unit test.
-  2. DONE (module_gen.py all-functions loop calls funcs_shared.annotated_return_ctype; byte-identical
-     on 286 + 35, stdlib 610/0, cycle PASS).
-  3. DONE: `tools/tsolve_why.py --fn NAME ROOT [--path PART]` (flows into a return, origin, solved value)
-     and `--undecidable ROOT` (grouped by summarizer site). Measured on fire.py at this commit:
-     66 undecidable of 7948 functions: 41 declared (decorator, generator, async, overload), 22 `yield`
-     expressions (by design), 3 f-string fields (FIXED: quoted text inside a field is skipped by
-     `_fstring_exprs`; now 63 of 7948 undecidable, all by design).
-  4. RECORDED DEVIATION: the design's request/provide loop (4.6) was replaced by a loader object with
-     `resolve` (commit 77d06f327), which meets the same rule.
-  5. OPEN BUGS (bugs/ docs, not this doc): CODEGEN_instance_global_attribute_read_raises,
-     CODEGEN_import_name_resolves_to_a_same_named_class_elsewhere,
-     CODEGEN_global_c_type_depends_on_shared_state.
+- SOLVER WORK: design steps 1-5 landed on master (commits listed below). Closure acceptance (section 8)
+  met at 77d06f327 plus 4b: gcc has only the 3 `MojoList * + double` errors (other doc); ledger
+  conflict=0, weak=0, undecided=0, refined=6 (justified above), early 141.
+- Commits (solver): c7878b789 (1), db2a1cdba (2a), 8bc44e1ed (2b), b5a1cccdf (2c), 336eff194 (2d),
+  c8bb6578a (2e/2f), 2d1a9131c (2g-2i), bacc2f396 (3), 77d06f327 (4a), 0faf3141a..cbdfe68bf (4b fix +
+  step 5 docs), 918521bd0 (annotated-return consolidation), fb21cc7a1 (tsolve_why --fn/--undecidable),
+  c37952511 (f-string quoting).
+- Tests: test_tsolve (82), test_return_disagreement, test_import_cycle_sigs, test_global_homonym_struct
+  (struct, container, scalar), test_module_global_attr_read. Registry self-test 482/0 at the last check.
+- OPEN BUGS (each has a bugs/ doc with its evidence and next step):
+  * bugs/CODEGEN_import_name_resolves_to_a_same_named_class_elsewhere.md: two attempts reverted;
+    the constructor's C name is not chosen where the attempts looked.
+  * bugs/CODEGEN_global_c_type_depends_on_shared_state.md: the module-level unpacking store is fixed;
+    the audit of the other bare-name readers remains.
+  * bugs/GATE_selfhost_and_mojoc_wordfacts_errors.md: `make gate` fails in `mojoc` and `selfhost`
+    (`WordFacts`); the pre-session check on 91140cc58 is pending.
+  * bugs/GIR_selfhost_unexplained_error_kinds.md: the three `MojoList * + double` errors; reproduced by an
+    external -Os build; the closure TU is the oracle.
+- Follow-ups not blocking acceptance: `sty.py` helper names with `_sty_` prefixes (kept; they were the
+  collision fix); the request/provide loop (4.6) replaced by a loader object (recorded deviation).
 - Tools: `tools/tsolve_why.py --classify|--shadow|--undecided LEDGER`.
 - How to verify each step: `python3 test_tsolve.py`; `python3 tools/c_oracle.py check --base <last
   commit>` (identical unless a program has an import cycle); `python3 compile_stdlib.py` (PASSED 610,
