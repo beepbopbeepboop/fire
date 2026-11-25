@@ -633,8 +633,9 @@ functions returning `list[...]` of statement text; 11 functions returning `str`;
       the function-assembly joins that print the rendered lines are the `cpp_async.py` and `emit_funcs`/`emit_loops`
       sites. Done 2026-11-23, see the T5 status below.
 - [x] T6. Call-slot text lists (`_cpp_call_arg_expr` and its consumers) take `Ex`. Done 2026-11-23, see the T6 status below.
-- [ ] T7. Verify: `test_gimple_cpp_core_arms.py`; `c_oracle check` identical on all 285 pydiff and all coroutine
-      programs; `compile_stdlib.py` `FAILED: 0`, no skips.
+- [x] T7. Verify: `test_gimple_cpp_core_arms.py` (30 arms pinned across 5 printers, 0 failures); `c_oracle check`
+      identical on all 286 pydiff and all 35 coroutine programs (base `868b3fa94`); `compile_stdlib.py` PASSED 610,
+      FAILED 0, no skip lines. Measured 2026-11-25.
 - [ ] T8. Done criterion: delete this doc in the same commit, with `python3 tools/dangling_doc_refs.py --ratchet`.
 
 ### Status 2026-11-23: T6 (call-slot text lists take `Ex`)
