@@ -709,7 +709,7 @@ Closure acceptance: section 8.
     the constructor's C name is not chosen where the attempts looked.
   * bugs/CODEGEN_global_c_type_depends_on_shared_state.md: the module-level unpacking store is fixed;
     the audit of the other bare-name readers remains.
-  * bugs/GATE_selfhost_and_mojoc_wordfacts_errors.md: `make gate` fails in `mojoc` and `selfhost`
+  * bugs/GATE_selfhost_and_mojoc_link_failures.md: `make gate` fails in `mojoc` and `selfhost`
     (`WordFacts`); the pre-session check on 91140cc58 is pending.
   * bugs/GIR_selfhost_unexplained_error_kinds.md: the three `MojoList * + double` errors; reproduced by an
     external -Os build; the closure TU is the oracle.

@@ -1908,6 +1908,11 @@ test('selfhost-struct-layout-map',
      desc='every field declared in fire_compiler.py has a row in the '
           'hardcoded struct_field_types map in module_gen.py, so the emitted '
           'self-host C struct defines every member the closure reads')
+test('importer-param-forwarder',
+     [PY, 'test_importer_param_forwarder.py'], mem='small',
+     desc='an importer compiled before its definer in an import cycle links: '
+          'the definer also defines the overload suffix the earlier call '
+          'sites hashed (annotated_return_ctype / _pack_kwargs_dict family)')
 test('dotted-module-global-accessor',
      [PY, 'test_dotted_module_global_accessor.py'], mem='small',
      desc='a module global read through a dotted project import links: the '
@@ -5166,7 +5171,7 @@ BUCKETS = {
               # it makes gcc reject, so the everyday gate has to see the next
               # one (bug doc deleted with the fix, 2026-11-21).
               'selfhost-struct-layout-map', 'selfhost-sig-types-declared',
-              'dotted-module-global-accessor'],
+              'dotted-module-global-accessor', 'importer-param-forwarder'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus
