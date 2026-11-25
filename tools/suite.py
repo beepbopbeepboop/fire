@@ -1908,6 +1908,10 @@ test('selfhost-struct-layout-map',
      desc='every field declared in fire_compiler.py has a row in the '
           'hardcoded struct_field_types map in module_gen.py, so the emitted '
           'self-host C struct defines every member the closure reads')
+test('sys-maxsize-value',
+     [PY, 'test_sys_maxsize_value.py'], mem='small',
+     desc='`sys.maxsize` read as a value compiles (the self-hosted compiler '
+          'died on startup in comptime.py\'s module-level _HOST_IS_32BIT)')
 test('importer-param-forwarder',
      [PY, 'test_importer_param_forwarder.py'], mem='small',
      desc='an importer compiled before its definer in an import cycle links: '
@@ -5171,7 +5175,8 @@ BUCKETS = {
               # it makes gcc reject, so the everyday gate has to see the next
               # one (bug doc deleted with the fix, 2026-11-21).
               'selfhost-struct-layout-map', 'selfhost-sig-types-declared',
-              'dotted-module-global-accessor', 'importer-param-forwarder'],
+              'dotted-module-global-accessor', 'importer-param-forwarder',
+              'sys-maxsize-value'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus

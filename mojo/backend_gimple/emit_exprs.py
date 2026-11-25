@@ -2561,6 +2561,18 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             t = gen._new_val('char *', gen._intern_string(
                 gimple_ctypes._c_escape(sys.platform)))
             return 'char *', t
+        if _canon == 'sys' and node.member == 'maxsize':
+            # `sys.maxsize` as a VALUE: the host's largest `Py_ssize_t`, which is
+            # `INT64_MAX` on every 64-bit target this compiler emits for (its
+            # Int is 64-bit). It was reachable only as a comptime constant; a
+            # value read fell to the generic dispatch on the bare `sys` marker
+            # and raised a fatal `AttributeError: maxsize` at run time -- which
+            # is how the self-hosted compiler died on startup, because
+            # `mojo/middle/comptime.py`'s module-level `_HOST_IS_32BIT =
+            # sys.maxsize <= 2**32` runs on import. A literal, like
+            # `sys.platform` above.
+            t = gen._new_val('int64_t', '9223372036854775807')
+            return 'int64_t', t
         if _canon == 'sys' and node.member in ('stdout', 'stderr', 'stdin'):
             # The three standard stream FILE objects. This runtime has no
             # Python-file-object model, so each is represented as its POSIX

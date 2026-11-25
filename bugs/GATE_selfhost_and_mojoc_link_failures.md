@@ -17,7 +17,10 @@ main tree with `python3 tools/suite.py -j1 mojoc selfhost` (no clean export need
    basename, the definer after its spelling (`mojo_middle_types__...`). FIXED `617f0d05c`
    (pin `test_dotted_module_global_accessor.py`: red `_lib__mojo_global_get_LABEL` before, green after).
 3. `ld: Undefined symbols` for five functions whose importer hashed the definer's parameters as
-   `int64_t`: OPEN, `bugs/GIR_importer_param_hash_disagrees_with_definer.md` (stage S4).
+   `int64_t` (`annotated_return_ctype`, `_selfhost_gen_self_param_ctype`, `_null_default_pair`,
+   `_pack_kwargs_dict`, `user_dunder_repr_call`): FIXED (the definer also defines each suffix an
+   earlier call site hashed, as a forwarder; pin `test_importer_param_forwarder.py`). The proper
+   fix, parameter types from the solver (S4), is still the long-term direction.
 
 ## Facts for the next round
 
@@ -34,6 +37,12 @@ main tree with `python3 tools/suite.py -j1 mojoc selfhost` (no clean export need
   `_WALK_AST_MAX_DEPTH`) is a separate defect: `bugs/mid/GIR_selfhost_four_new_closure_stubs.md`.
 
 ## Status
+
+- 2026-11-25 (later): after fixes 1-3, `python3 tools/suite.py -j1 selfhost mojoc`: `mojoc` PASSES
+  (peak 7.7 GB, inside its 20-minute limit once the link succeeds, so no limit change is needed).
+  `selfhost` now compiles AND links (945 s), and fails at its last check: the produced self-hosted
+  binary exits 1 on `--dump-full` of a two-line program (`exit=1 ci_bytes=0`). That is the next
+  defect; see the entry below.
 
 - 2026-11-25: items 1 and 2 fixed and verified (c_oracle identical on 286 + 35, compile_stdlib 610/0,
   test_suite 482/0). Re-run of `selfhost mojoc` after both fixes: see the next entry.
