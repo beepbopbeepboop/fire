@@ -210,8 +210,7 @@ def _module_attr_call_return_type(gen, node):
         return None
     if qual is None:
         return None
-    ret = (getattr(gen, '_home_def_return_types', None) or {}).get(
-        _pair_key(qual, _as_str(f.member)))
+    ret = gen._home_def_return_type_of(qual, _as_str(f.member))
     if isinstance(ret, str) and ret in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
         return ret
     return None

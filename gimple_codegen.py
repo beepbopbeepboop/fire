@@ -868,11 +868,6 @@ import mojo.backend_gimple.cpp_core as gcc_
 import mojo.backend_gimple.emit_exprs as gex
 import mojo.backend_gimple.emit_infra as ginf
 import mojo.backend_gimple.emit_resolve as grsl
-# Nesting depth of `GimpleGen.gen_module`: only the outermost call finalizes the
-# extern return-type placeholders (see that method).
-_GEN_MODULE_DEPTH: list = [0]
-
-
 class GimpleGen:
     # Map Python builtin names to their C/runtime equivalents when used as values
     BUILTIN_VALUE_MAP: dict[str, str] = {
@@ -3408,6 +3403,19 @@ class GimpleGen:
         # `test_gimple.py`'s
         # `two_modules_one_same_named_function_keep_their_own_return_types`.
         self._home_def_return_types: dict[str, str] = {}
+        # The whole-closure type solver (bugs/GIR_type_solver.md, S1). `_tsolve` is
+        # the solution for this compile (None without imports); `_qualifier_paths`
+        # maps a module qualifier to its abspath once the module starts compiling;
+        # `_analyzed_paths` holds the modules whose return-type passes have finished;
+        # `_tsolve_frozen` is the early answers (pair key -> ctype); the ledger lists
+        # every decision. Shared by reference with every sub-generator.
+        self._tsolve = None
+        self._qualifier_paths: dict = {}
+        self._analyzed_paths: set = set()
+        self._tsolve_frozen: dict = {}
+        self._tsolve_ledger: list = []
+        # Keys already written to the ledger (one line per decision, not per read).
+        self._tsolve_logged: dict = {}
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen
@@ -4760,21 +4768,7 @@ class GimpleGen:
     def gen_module(self, stmts: list) -> str:
         # Ensure _actual_types knows stmts is MojoList* so for-loop dispatch
         # works when this method is compiled by the self-hosted backend.
-        # The TU text is final once gen_module_impl returns, so every
-        # definer has recorded its measured return: resolve the importer
-        # extern placeholders now (see emit_funcs.resolve_extern_return_placeholders).
-        # Only the OUTERMOST call resolves: a nested gen_module (a comptime
-        # snippet, a per-module compile) returns text that is embedded into the
-        # outer unit before the outer unit's own definitions have recorded
-        # their answers, so resolving there would freeze the default.
-        _GEN_MODULE_DEPTH[0] += 1
-        try:
-            _code = gmg.gen_module_impl(self, stmts)
-        finally:
-            _GEN_MODULE_DEPTH[0] -= 1
-        if _GEN_MODULE_DEPTH[0] == 0:
-            _code = gfn.resolve_extern_return_placeholders(self, _code)
-        return _code
+        return gmg.gen_module_impl(self, stmts)
 
     # ---- function-extraction delegates (bodies live in gimple_gen_methods.py) ----
     def _lower_bound_method_value(self, struct_name: str, method: str, self_type: str, self_val: str) -> tuple[str, str]:
@@ -5069,12 +5063,6 @@ class GimpleGen:
         return ctype in _SCALAR_CTYPE_SIZE
     def _overload_suffix(self, bare_name: str) -> str:
         return gfn._overload_suffix(self, bare_name)
-    def _export_return_is_default(self, module, name, info) -> bool:
-        return gfn.export_return_is_default(self, module, name, info)
-    def _extern_home_qualifier(self, bare_name: str) -> str:
-        return gfn._func_home_qualifier(self, bare_name)
-    def _extern_return_ctype(self, qualifier: str, bare_name: str, default_ret: str) -> str:
-        return gfn.extern_return_ctype(self, qualifier, bare_name, default_ret)
     def _note_own_func_home(self, bare_name: str, module_name: str,
                             record_scope: bool=True,
                             record_flat: bool=True) -> None:
@@ -5222,6 +5210,15 @@ class GimpleGen:
             # cdecl; when it doesn't, this exclusion preserves the
             # pre-existing raw-type return).
             return 'int64_t'
+        # A STRUCT pointer this module declares (`BOOL: STy = ...`) beats a different struct
+        # pointer of the same bare name that another module declared (`mojo/ir/types.py`'s
+        # `BOOL: Type`): the homonym's cdecl must not re-type this module's own global. The
+        # field is declared from this same rule, so the field and every store agree
+        # (bugs/GIR_type_solver_precision.md, 4.6 step 4b).
+        if (cdecl is not None and cdecl != own
+                and TypeLattice.ends_in_star(own) and TypeLattice.ends_in_star(cdecl)
+                and not _is_c_container(own) and not _is_c_container(cdecl)):
+            return own
         return cdecl if cdecl is not None else own
 
     def _module_global_field_type(self, module: str, name: str) -> tuple[str, str] | None:
@@ -6161,6 +6158,12 @@ class GimpleGen:
         return grsl._locally_bound_names(self, body, params)
     def _module_candidate_paths(self, module_name: str) -> list:
         return grsl._module_candidate_paths(self, module_name)
+    def _home_def_return_type_of(self, qualifier: str, bare_name: str):
+        # The defining unit's return ctype, or the solver's early answer (see
+        # emit_funcs._home_def_return_type). Readers outside emit_funcs use this.
+        return gfn._home_def_return_type(self, qualifier, bare_name)
+    def _module_candidate_paths_from(self, module_name: str, importer) -> list:
+        return grsl._module_candidate_paths_from(self, module_name, importer)
     def _submodule_source_path(self, module_name: str) -> str | None:
         return grsl._submodule_source_path(self, module_name)
     def _compile_imported_module(self, module_name: str, loc: str = '0:0') -> tuple:
@@ -6791,6 +6794,38 @@ _PIPELINE_RESULT_ATTRS = frozenset({'_link_dylibs', '_link_objects', '_link_need
                                     '_dropped_companion_cpp'})
 
 
+def _is_c_container(ctype: str) -> bool:
+    """A runtime container pointer (`MojoList *`, `MojoDict *`, `MojoSet *`)."""
+    return TypeLattice.is_list(ctype) or TypeLattice.is_dict(ctype) or TypeLattice.is_set(ctype)
+
+
+def _solve_import_closure(gen, filename: str, stmts: list):
+    """The whole-closure type solution for this compile (bugs/GIR_type_solver.md,
+    S1). It runs once, before any code generation, over the same import closure
+    the compile walks, and reads each module through the compile's own lookup."""
+    from mojo.tsolve import solve_closure
+    from mojo.middle.funcs_shared import ClosureLoader
+    root = os.path.abspath(filename) if filename else ''
+    return solve_closure(root, stmts, ClosureLoader(gen))
+
+
+def _write_tsolve_ledger(gen) -> None:
+    """With FIRE_TSOLVE_LEDGER=<file> set, write the decisions of this compile to it,
+    then one `summary` line counting each kind (bugs/GIR_type_solver_precision.md, 4.5)."""
+    path = os.environ.get('FIRE_TSOLVE_LEDGER', '')
+    if not path:
+        return
+    counts = {'early': 0, 'conflict': 0, 'undecided': 0, 'shadow': 0}
+    with open(path, 'w') as f:
+        for line in gen._tsolve_ledger:
+            kind = line.split(' ', 1)[0]
+            if kind in counts:
+                counts[kind] += 1
+            f.write(line + '\n')
+        f.write('summary early=%d conflict=%d undecided=%d shadow=%d\n'
+                % (counts['early'], counts['conflict'], counts['undecided'], counts['shadow']))
+
+
 def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = "",
                   link_mode: bool = False, auto_gpu: bool = True):
     """Shared driver behind every public compile_* entry point.
@@ -7015,7 +7050,10 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # consistent with `stmts` — unlike an on-disk file that could have been
     # modified after parse or be unreadable (empty `_current_filename`).
     gen._source_text = mojo_src
+    if do_imports or link_mode:
+        gen._tsolve = _solve_import_closure(gen, filename, stmts)
     code = gen.gen_module(stmts)
+    _write_tsolve_ledger(gen)
     if do_imports or link_mode:
         code = _dedup_guarded_blocks(code)
         code = _relocate_module_instance_defs(code)

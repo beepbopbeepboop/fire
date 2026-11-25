@@ -32,6 +32,8 @@ import mojo.middle.coro as _coro
 # in full, and why a function-local `import X` survives where `from X import
 # NAME` cannot, is in `mojo/middle/methods_shared.py`'s header comment.
 import mojo.middle.types as gimple_ctypes
+from mojo.middle.module_parse import parse_module_file, parse_module_source
+from mojo.tsolve.summarize import ModuleFile
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 # NOT `from mojo.middle.module_shared import module_qualifier` here:
@@ -126,8 +128,7 @@ def _resolve_reexported_closure_func(gen, module: str, name: str, _depth: int = 
             if _mp:
                 with open(_mp) as _mf:
                     _msrc = _mf.read()
-                _stmts = gimple_ctypes.ast_rewriter.rewrite(
-                    gimple_ctypes.Parser(gimple_ctypes.py_tokenize(_msrc)).parse_module())
+                _stmts = parse_module_source(_msrc, _mp)
                 gen._imported_src_cache[module] = (_mp, _msrc, _stmts)
         except Exception:
             _stmts = None
@@ -896,18 +897,8 @@ def _resolved_export_entry(gen, module: str, name: str, info):
         return info
     _ret = _as_str(info.get('c_return_type') or 'int64_t')
     if _fn.return_type:
-        _ret = gen._resolve_type(_fn.return_type)
-        if (isinstance(_ret, str) and _ret.startswith('MojoTuple_')
-                and not _body_builds_struct_tuple(
-                        getattr(_fn, 'body', None))):
-            # The same body-sensitive decision the defining unit's own
-            # resolution makes (see module_gen's all-functions loop): a
-            # `-> Tuple[...]` return built as a RUNTIME (list-backed) tuple
-            # literal is a `MojoList *`, not the synthesized by-value struct
-            # — the re-emitted extern must agree with the instance TU's
-            # prototype (measured 2026-10-21 part 4 integration on
-            # `split`'s `-> Tuple[String, String]`).
-            _ret = 'MojoList *'
+        # The definer's own answer (see annotated_return_ctype).
+        _ret = annotated_return_ctype(gen, _fn)
     _pts = gen._signature_ctypes(_fn.params, _fn)
     _cparams = []
     for _i, _cpt in enumerate(_pts):
@@ -1172,6 +1163,19 @@ def register_module_member_function(gen, module_name: str, member_name: str,
     else:
         _misses[_miss_key] = sub_ref
     return sub_ref, _raw
+
+
+def annotated_return_ctype(gen, fn_node) -> str:
+    """The C return type of an ANNOTATED function, as its definer publishes it
+    (bugs/GIR_type_solver_precision.md, 4.4): the annotation resolved by the backend, except a
+    `MojoTuple_*` whose body builds a RUNTIME (list-backed) tuple literal is `MojoList *` (the
+    by-value struct is only for a body that builds the struct). An importer's early decision and
+    the definer's own record both call this, so the two cannot disagree by construction."""
+    ret = gen._resolve_type(fn_node.return_type)
+    if (isinstance(ret, str) and ret.startswith('MojoTuple_')
+            and not _body_builds_struct_tuple(getattr(fn_node, 'body', None))):
+        return 'MojoList *'
+    return ret
 
 
 def sanitize_module_qualifier(gen, q) -> str:
@@ -1463,8 +1467,7 @@ def register_module_member_value(gen, module_name: str, member_name: str):
     # own `int64_t` is only a default for an unannotated `def`; left in place
     # it declares `int64_t sym (void)` against a definition that returns
     # `MojoList *` (measured: `import fgn_b; fgn_b.make()` conflicting types).
-    _measured_ret = _as_dict(getattr(gen, '_home_def_return_types', None)).get(
-        _pair_key(sanitize_module_qualifier(gen, definer), def_name))
+    _measured_ret = gen._home_def_return_type_of(sanitize_module_qualifier(gen, definer), def_name)
     if _measured_ret:
         _ret = _as_str(_measured_ret)
         _entry['c_return_type'] = _ret
@@ -3068,8 +3071,7 @@ def _selfhost_parsed_source(_f: str) -> list:
         try:
             with open(_f) as _fh:
                 _src = _fh.read()
-            _entry = ast_rewriter.rewrite(
-                Parser(py_tokenize(_src)).with_filename(_f).parse_module())
+            _entry = parse_module_source(_src, _f)
         except Exception:
             _entry = _PARSE_FAILED
         _SELFHOST_PARSE_CACHE[_ck] = _entry
@@ -3091,3 +3093,25 @@ def _selfhost_files_key(_files: list) -> str:
 # Result cache for the passes above, keyed `<pass>#<files fingerprint>`.
 _SELFHOST_EXTRA_FIELD_CACHE: dict = {}
 
+
+class ClosureLoader:
+    """The `load(ref, importer_path)` the whole-closure type solver uses
+    (bugs/GIR_type_solver.md, 2.3).
+
+    It returns the file `_compile_imported_module` compiles for `ref`: the first
+    existing candidate of `_module_candidate_paths_from`, the same lookup the compile
+    uses, parsed by the same helper. A precompiled `.mojoc` artifact, or no candidate
+    at all, is an external module: None. The solver and the compile therefore see
+    one tree per module."""
+
+    def __init__(self, gen):
+        self.gen: object = gen
+
+    def resolve(self, ref: str, importer_path: str):
+        """A ModuleFile for `ref` as the compile would load it, or None (external)."""
+        for path in self.gen._module_candidate_paths_from(ref, importer_path):
+            if os.path.exists(path):
+                if path.endswith('.mojoc'):
+                    return None
+                return ModuleFile(os.path.abspath(path), parse_module_file(path))
+        return None

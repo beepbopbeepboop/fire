@@ -1670,7 +1670,6 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
             if not sig:
                 continue
             ret = info.get('c_return_type', 'int64_t')
-            _info_ret = ret
             c_params = info.get('c_parameters') or []
             # A callable-valued parameter is `std::function<...>` in the
             # exported signature (the cpp coroutine unit's own typing), but a
@@ -1729,17 +1728,6 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
                     _tail = sig.split(None, 1)
                     if len(_tail) == 2:
                         sig = ret + ' ' + _tail[1]
-            # An UNANNOTATED definer's scanned return is only a default (see
-            # emit_funcs.extern_return_ctype): the prototype spells the
-            # definer's measured return, or a placeholder resolved when the TU
-            # text is final. `ret` itself, which feeds func_return_types and
-            # the call sites, is unchanged.
-            if (gen._export_return_is_default(mod, name, info)
-                    and not (sym in gen._NEEDS_SELF_EXTERN and gen._LIBC_SIGS.get(sym))
-                    and isinstance(sig, str) and sig.startswith(_info_ret + ' ')):
-                _tok = gen._extern_return_ctype(
-                    gen._extern_home_qualifier(name), name, _info_ret)
-                sig = _tok + sig[len(_info_ret):]
             if not (sym in gen._NEEDS_SELF_EXTERN and gen._LIBC_SIGS.get(sym)):
                 # Only the C++-only callable spelling is rewritten. Rebuilding the whole signature from `c_params`
                 # (as an earlier version did) dropped every parameter of an export that carries only a `signature`

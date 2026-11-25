@@ -825,14 +825,24 @@ Fixed (merged; each is a real fix, not a workaround):
 - The `_mj_w` and struct-constructor `Ex` reprs in generated C++ (`ead016231`, `9ba501e2b`), which
   broke `test_gimple_generator_runner.py` (520/0 on master).
 
-Open, with bug docs:
-- `bugs/GIR_selfhost_extern_return_types.md`: `conflicting types` (30). A WIP commit
-  (`e9e4ea4a9`, merged to master as `913aa3780`) removes those 30 but adds pointer-conversion
-  errors, so it is RED. The fix is a pre-pass that records each definer's return type before any
-  importer is generated.
-- `bugs/GIR_selfhost_unexplained_error_kinds.md`: `'Scope' has no member 'declared_types'` (11),
-  `'MojoFunction' has no member 'param_types'` (10), `non-trivial conversion in 'component_ref'`
-  (10), `'Interpreter' has no member '_try_depth'` (8), and the smaller rows. Not diagnosed.
+Open, with bug docs. Re-measured 2026-11-24 on master `91140cc58`: 40 gcc errors, counted with
+`tools/selfhost_ci.py` (the method is in the second doc).
+- The import-cycle back-edge family (37 errors, 13 functions) is FIXED: the solver's early
+  decision freezes each back-edge definer's return type and the definer obeys it (the WIP placeholder
+  `e9e4ea4a9` was reverted at `2812a27c0`). The decision is in `emit_funcs._early_return_decision`;
+  the solver is `mojo/tsolve/` (`bugs/GIR_type_solver.md` S1, precision in
+  `bugs/GIR_type_solver_precision.md`). Measured at `0faf3141a`-plus: the closure has 3 gcc errors,
+  all the `MojoList * + double` family below; the ledger has zero conflict, weak and undecided lines.
+  The early-decision doc was deleted with this change; its acceptance is recorded in the
+  precision doc's Status.
+- `bugs/GIR_selfhost_unexplained_error_kinds.md`: 3 errors, `MojoList * + double`. It is a
+  `+`-lowering defect in `emit_exprs._lower_binary_tail` (a may-box word beside a list operand
+  is promoted to double, and `list + int64_t` was a silent no-op). The old has-no-member and
+  `component_ref` rows no longer reproduce.
+
+The type solver (`bugs/GIR_type_solver.md`) is the long-term direction for every signature,
+field and local type (stages S1-S6). S1 is the first consumer. S4 takes over the overload hash's
+parameter types, and S6 is the unboxing stage.
 
 The self-host gate (`bootstrap-stage1-transitive`, disabled, `bugs/gate-bootstrap-stage1-transitive.md`)
 stays disabled until the closure compiles with zero gcc errors and the stage 2/3 chain runs.

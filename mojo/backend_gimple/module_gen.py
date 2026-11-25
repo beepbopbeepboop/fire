@@ -12144,32 +12144,20 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
                 # states for the reverse case). No store entry — the
                 # definition never compiled in this closure, e.g. a dylib
                 # link — leaves the scan untouched, as before.
-                # The return type is a POSSIBLY-MULTI-TOKEN prefix
-                # (`char *`, `MojoList *`) ending where the function NAME
-                # begins — `safe` — so replace up to the first occurrence of
-                # the name, not just the first token. NOT `_m`: the compiled
-                # path types a local by its bare NAME across the function, and
-                # `_m` is a FunctionDef loop variable elsewhere in
-                # `gen_module_impl`, so `_m.end()` became a call to
-                # `FunctionDef_end` (undefined at link).
-                # An UNANNOTATED definer's scanned `int64_t` is only a default:
-                # `extern_return_ctype` spells the definer's measured answer,
-                # or a placeholder resolved once the TU text is final (see
-                # emit_funcs.resolve_extern_return_placeholders). An annotated
-                # definer's return is used as scanned unless measured.
-                _rt_match = re.match(r'.*?' + re.escape(safe), signature)
-                if _rt_match and _rt_match.end() < len(signature):
-                    _qual_home = _ggf_dup._func_home_qualifier(self, _sn)
-                    if self._export_return_is_default(
-                            sym_info.get('module'), _sn, sym_info):
-                        _scan_ret = signature[:_rt_match.end() - len(safe)].strip()
-                        _ret_text = self._extern_return_ctype(
-                            _qual_home, _sn, _scan_ret)
-                    else:
-                        _ret_text = _ggf_dup._home_def_return_type(
-                            self, _qual_home, _sn)
-                    if _ret_text:
-                        signature = (_ret_text + ' ' + safe
+                _home_ret_hit = _ggf_dup._home_def_return_type(
+                    self, _ggf_dup._func_home_qualifier(self, _sn), _sn)
+                if _home_ret_hit:
+                    # The return type is a POSSIBLY-MULTI-TOKEN prefix
+                    # (`char *`, `MojoList *`) ending where the function
+                    # NAME begins — `safe` — so replace up to the first
+                    # occurrence of the name, not just the first token.
+                    # NOT `_m`: the compiled path types a local by its bare
+                    # NAME across the function, and `_m` is a FunctionDef loop
+                    # variable elsewhere in `gen_module_impl`, so `_m.end()`
+                    # became a call to `FunctionDef_end` (undefined at link).
+                    _rt_match = re.match(r'.*?' + re.escape(safe), signature)
+                    if _rt_match and _rt_match.end() < len(signature):
+                        signature = (_home_ret_hit + ' ' + safe
                                      + signature[_rt_match.end():])
                 signature = gimple_ctypes.c_client_sanitize_signature_text(signature)
                 parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
@@ -12569,9 +12557,9 @@ def _gmp_infer_return_types_late(self, all_functions: list) -> None:
             self.var_types = _saved_vt_3b
             self._scan_scratch_top = _scratch_mark_3b
             self.current_func_name = _saved_fcn_3b
-            self.func_return_types[_p3b_s.name] = inferred
-            _ggf_dup._record_home_def_return_type(
+            inferred = _ggf_dup._record_home_def_return_type(
                 self, _p3b_raw, _p3b_s.name, inferred)
+            self.func_return_types[_p3b_s.name] = inferred
 
 
 def _gmp_discover_closures(self, stmts: list) -> None:
@@ -13224,9 +13212,9 @@ def _gmp_infer_return_types(self, stmts: list, all_functions: list) -> None:
             inferred = self._infer_return_type(_as_s_p1.body, _as_s_p1)
             if _as_s_p1.name == 'main' and gimple_ctypes.TypeLattice.is_void(inferred):
                 inferred = 'int64_t'
-            self.func_return_types[_as_s_p1.name] = inferred
-            _ggf_dup._record_home_def_return_type(
+            inferred = _ggf_dup._record_home_def_return_type(
                 self, s, _as_s_p1.name, inferred)
+            self.func_return_types[_as_s_p1.name] = inferred
             self.var_types.clear()
             self.current_func_name = _saved_fcn_p1
 
@@ -13240,27 +13228,14 @@ def _gmp_annotated_return_types(self, stmts: list, all_functions: list) -> None:
             continue
         if isinstance(s, FunctionDef) and s.return_type is not None:
             funcs_shared.record_annotated_tuple_slots(self, s.name, s.return_type)
-            _fn_ret_ct = self._resolve_type(s.return_type)
-            if isinstance(_fn_ret_ct, str) and _fn_ret_ct.startswith(
-                    'MojoTuple_'):
-                # The SAME body-sensitive decision the struct-method loop
-                # below makes (see there for the full reasoning): part 4's
-                # `_mojo_type` Tuple branch resolves a `-> Tuple[...]`
-                # return to the synthesized by-value struct, but a plain
-                # fn whose body builds the tuple as a RUNTIME (list-backed)
-                # literal — `split`'s `return String(head), String(tail)` —
-                # must keep the `MojoList *` return or the definition casts
-                # a list pointer into the struct and the typedef is never
-                # emitted (`unknown type name 'MojoTuple_...'`, measured
-                # 2026-10-21 part 4 integration: test_split/test_modf/
-                # test_location/test_tempfile's monomorphized instances).
-                if _body_builds_struct_tuple(getattr(s, 'body', None)):
-                    self._ensure_tuple_struct(s.return_type)
-                else:
-                    _fn_ret_ct = 'MojoList *'
+            # One routine for the annotated return (funcs_shared.annotated_return_ctype): the
+            # body-sensitive rule lives there, once. A struct-tuple body also registers its typedef.
+            _fn_ret_ct = funcs_shared.annotated_return_ctype(self, s)
+            if (isinstance(_fn_ret_ct, str) and _fn_ret_ct.startswith('MojoTuple_')
+                    and _body_builds_struct_tuple(getattr(s, 'body', None))):
+                self._ensure_tuple_struct(s.return_type)
+            _fn_ret_ct = _ggf_dup._record_home_def_return_type(self, s, s.name, _fn_ret_ct)
             self.func_return_types[s.name] = _fn_ret_ct
-            _ggf_dup._record_home_def_return_type(
-                self, s, s.name, self.func_return_types[s.name])
         _s_pts = None
         if isinstance(s, FunctionDef) and s.params:
             if gimple_ctypes._params_have_vararg(s.params):
@@ -14903,8 +14878,8 @@ def _gmp_infer_unannotated_function_returns(self, all_functions: list) -> None:
                 inferred = 'int64_t'
             self.var_types = _saved_vt_23e
             self._scan_scratch_top = _scratch_mark_23e
+            inferred = _ggf_dup._record_home_def_return_type(self, s, s.name, inferred)
             self.func_return_types[s.name] = inferred
-            _ggf_dup._record_home_def_return_type(self, s, s.name, inferred)
 
 
 def _gmp_propagate_generator_returns(self, _ret_changed: bool, _ret_defs: list) -> None:
@@ -15154,6 +15129,12 @@ def gen_module_impl(self, stmts: list):
     self._actual_types['stmts'] = 'MojoList *'
     if self._current_filename:
         self._inline_module_qualifiers[os.path.abspath(self._current_filename)] = self.module_name
+        # The solver's early decision needs the qualifier -> file map before this
+        # module's imports compile (see emit_funcs._early_return_decision).
+        # Keyed by the sanitized qualifier the symbols and the store use
+        # (`module_qualifier`), and by the raw module name.
+        self._qualifier_paths[self.module_name] = os.path.abspath(self._current_filename)
+        self._qualifier_paths[gimple_exprtypes.module_qualifier(self.module_name)] = os.path.abspath(self._current_filename)
     self._toplevel_dep_init_modules: list[str] = []
     self._import_module_comptime_vals = {}  # module qualifier → {name: comptime value} for import X
     _gmi_prefold_toplevel_comptime(self, stmts)
@@ -20469,6 +20450,8 @@ def gen_module_impl(self, stmts: list):
     # first line below, because `_record_home_def_return_type`'s identity test
     # is the one thing here that must see the ORIGINAL node.
     _gmp_infer_return_types_late(self, all_functions)
+    if self._current_filename:
+        self._analyzed_paths.add(os.path.abspath(self._current_filename))
 
     def _flatten_resolved_conditionals(_root_list: list) -> list:
         _out = []
@@ -20842,6 +20825,12 @@ def gen_module_impl(self, stmts: list):
                             _known.append(_qt)
         return out
 
+    # The struct names this module defines at top level: an annotation naming one is a
+    # struct-pointer type for the global it annotates (see the bare-name branch below).
+    _module_struct_names = set()
+    for _sn_stmt in _phase17_stmts:
+        if isinstance(_sn_stmt, StructDef):
+            _module_struct_names.add(_as_str(_sn_stmt.name))
     for _scan_stmt in _phase17_stmts:
         # "_phase17_stmts" deliberately spans this module's OWN top-level
         # statements AND every inline-compiled imported module's (the SHARED
@@ -20874,7 +20863,16 @@ def gen_module_impl(self, stmts: list):
             _pre_declared_globals.add(_gname)
             if _gname not in self._global_to_module and _scan_own:
                 self._global_to_module[_gname] = _phase17_mod
-            _phase17_infer_global_type(_gname, _scan_stmt.value, _scan_own)
+            # `BOX: Box = Box(1)`: the annotation names a struct this module defines, so the
+            # global IS a `Box *`, whether or not the call's inference can see the struct yet
+            # (its registration may come later in this pass). Without this the global has no
+            # type here, the module-attribute read `mod.BOX` falls back to a dynamic getattr,
+            # and that fails at run time (the module-global attribute-read bug).
+            _ann_name = _scan_stmt.type_ann
+            if _ann_name and _ann_name in _module_struct_names:
+                _gmh_phase17_set_gtype(self, _gname, _ann_name + ' *', _scan_own)
+            else:
+                _phase17_infer_global_type(_gname, _scan_stmt.value, _scan_own)
         elif isinstance(_scan_stmt, MultiAssignStmt):
             for _tgt in _scan_stmt.targets:
                 if not isinstance(_tgt, IdentExpr):

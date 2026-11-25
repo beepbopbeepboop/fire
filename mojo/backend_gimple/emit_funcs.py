@@ -2510,7 +2510,7 @@ def _commit_home_def_pts(gen, node) -> list:
     return sig
 
 
-def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> None:
+def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> str:
     """Publish one free function's DEFINITION-side return ctype into the
     whole-program-shared `_home_def_return_types`, under the qualifier its own
     emitted symbol was built from — the return-type twin of
@@ -2536,22 +2536,40 @@ def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> None:
     knows most. That is the discipline `func_return_types[bare_name]` itself
     follows, and it is why `_func_csym` re-mirrors on every call rather than
     freezing the first value it sees.
+
+    Returns the EFFECTIVE ctype, which the definer must use for its own
+    function: the early answer the type solver froze for this name when an
+    importer needed it before this unit ran (`_early_return_decision`). A
+    frozen answer wins over the measured one, and a disagreement is a ledger
+    `conflict` line (bugs/GIR_type_solver.md, S1; the acceptance count is 0).
+    Without a freeze, or when nothing is recorded, the measured ctype comes back.
     """
     store = getattr(gen, '_home_def_return_types', None)
     if store is None or not ctype:
-        return
+        return ctype
     if id(stmt) not in getattr(gen, '_local_top_level_func_stmt_ids', ()):
-        return
+        return ctype
     # Overload sets: see `_commit_home_def_pts`. The bare-name key can hold
     # only the canonical overload's answer; the others publish their own
     # return type under their own symbol at the definition (gen_func).
     if not _def_is_canonical(gen, stmt):
-        return
+        return ctype
     # Never raises for a name this unit defines: `_func_qualifier`'s tier-1
     # check (`bare_name in _local_top_level_func_names`) answers from the
     # module being compiled itself, ahead of the `_AMBIGUOUS_FUNC_HOME`
     # refusal that tiers 2/3 can raise.
-    store[_pair_key(_func_qualifier(gen, bare_name), bare_name)] = ctype
+    qualifier = _func_qualifier(gen, bare_name)
+    key = _pair_key(qualifier, bare_name)
+    frozen = gen._tsolve_frozen.get(key)
+    if frozen is not None:
+        kind = _return_disagreement(frozen, ctype)
+        if kind != 'same':
+            _tsolve_log(gen, kind + ':' + qualifier + '.' + bare_name,
+                        kind + ' ' + qualifier + '.' + bare_name
+                        + ' early=' + frozen + ' measured=' + ctype)
+        return frozen
+    store[key] = ctype
+    return ctype
 
 
 def _home_def_return_type(gen, qualifier: str, bare_name: str):
@@ -2576,80 +2594,143 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     about exactly that definition.
     """
     store = getattr(gen, '_home_def_return_types', None)
-    if not store:
+    if store is None:
         return None
-    return store.get(_pair_key(qualifier, bare_name))
+    # An imported symbol's key is the MANGLED symbol (`<qualifier>_<name>_<hash>`).
+    # The store and the solver are keyed by the definer's bare name, which the
+    # symbol carries; `_definer_name` recovers it, and only a name the closure
+    # defines counts.
+    name = _definer_name(gen, qualifier, bare_name)
+    if name is not None:
+        bare_name = name
+    key = _pair_key(qualifier, bare_name)
+    got = store.get(key)
+    if got is None:
+        return _early_return_decision(gen, qualifier, bare_name)
+    return got
 
 
-# An importer's `extern` prototype for an UNANNOTATED `def` cannot name the
-# definer's return type when it is written: the importer's preamble is emitted
-# while the definer's own body has not been generated yet, so the definer's
-# measured `_home_def_return_types` entry does not exist. Writing the scanned
-# `int64_t` default there made every such prototype conflict with the
-# definer's real prototype (`conflicting types for '..._9f63a2'`, the 30
-# selfhost errors). The prototype is therefore written as a placeholder token
-# and resolved once, when the translation unit's text is final, by
-# `resolve_extern_return_placeholders` (called at the end of
-# `GimpleGen.gen_module`, after every definer has recorded its answer).
-# The placeholder never reaches a logic path: func_return_types and every
-# call-site type still read the value at the time they are computed.
-_EXTERN_RET_TOKEN = 'MOJO_EXTERN_RET_'
-_PENDING_EXTERN_RETS: dict = {}
-_PENDING_EXTERN_RET_SEQ: list = [0]
+def _definer_name(gen, qualifier: str, sym: str):
+    """The bare name of the definition a mangled symbol `sym` names, or None.
+
+    A mangled symbol is `<qualifier>_<name>_<6 hex digits>`, and the solver's
+    table tells us which `name` is a real definition in the qualifier's module,
+    so a symbol that is not a mangled name of a closure definition gives None."""
+    sol = getattr(gen, '_tsolve', None)
+    if sol is None:
+        return None
+    path = gen._qualifier_paths.get(qualifier)
+    if not path:
+        return None
+    pre = qualifier + '_'
+    if not sym.startswith(pre) or len(sym) < len(pre) + 8:
+        return None
+    if sym[len(sym) - 7] != '_':
+        return None
+    for ch in sym[len(sym) - 6:]:
+        if ch not in '0123456789abcdef':
+            return None
+    cand = sym[len(pre):len(sym) - 7]
+    if sol.knows(path, cand):
+        return cand
+    return None
 
 
-def export_return_is_default(gen, module, name, info) -> bool:
-    """True when the DEFINING `def` of `name` in `module` writes no return
-    annotation, so the export table's `c_return_type` is the scanned default.
-    Answered by `_resolved_export_entry`, which re-parses that definition and
-    records `c_return_type_is_default` (the same fact the re-export path
-    already trusts). Unknown or unparsed means False, the pre-fix behaviour."""
-    _entry = _resolved_export_entry(gen, module, name, info)
-    return isinstance(_entry, dict) and bool(_entry.get('c_return_type_is_default'))
+def _early_return_decision(gen, qualifier: str, bare_name: str):
+    """The solver's return ctype for a definition whose module has started but has
+    not finished its return-type analysis (an import-cycle back-edge): stored and
+    frozen, so the importer and the definer agree. None otherwise.
+
+    A module reading its OWN functions before its own return passes run is not a
+    back-edge (its passes are about to answer), so it is not decided here.
+    Deciding it would freeze every program's functions, not just cyclic ones."""
+    sol = getattr(gen, '_tsolve', None)
+    if sol is None:
+        return None
+    path = gen._qualifier_paths.get(qualifier)
+    if not path or path in gen._analyzed_paths:
+        return None
+    if gen._current_filename and path == os.path.abspath(gen._current_filename):
+        return None
+    # Only a NAME the closure defines is a decision. An imported-symbol key (a
+    # mangled `a_make_<hash>`) is not a definition, so there is nothing to decide.
+    if not sol.knows(path, bare_name):
+        return None
+    key = _pair_key(qualifier, bare_name)
+    if sol.is_annotated(path, bare_name):
+        # An annotated return is a fact: the definer's own routine answers it (4.4).
+        definition = sol.definition(path, bare_name)
+        ctype = annotated_return_ctype(gen, definition) if definition is not None else None
+        suffix = ' annotated'
+    else:
+        ctype = sol.ret_ctype(gen, path, bare_name)
+        suffix = ''
+    if ctype is None:
+        _tsolve_log(gen, 'undecided:' + qualifier + '.' + bare_name,
+                    'undecided ' + qualifier + '.' + bare_name
+                    + ' reason=' + sol.why_none(path, bare_name))
+        return None
+    gen._home_def_return_types[key] = ctype
+    gen._tsolve_frozen[key] = ctype
+    _tsolve_log(gen, 'early:' + qualifier + '.' + bare_name,
+                'early ' + qualifier + '.' + bare_name + ' ' + ctype + suffix)
+    return ctype
 
 
-def extern_return_ctype(gen, qualifier: str, bare_name: str, default_ret: str):
-    """The return ctype an `extern` prototype for `bare_name` (defined under
-    `qualifier`) should spell, for an UNANNOTATED definition.
+def _return_disagreement(frozen: str, measured: str) -> str:
+    """How a frozen early return ctype and the definer's measured one differ
+    (bugs/GIR_type_solver_precision.md, 4.5):
+      same     -- identical;
+      refined  -- the frozen answer is a pointer or `_Bool` and the measured one the boxed
+                  word `int64_t`: the solver knew more than the backend (allowed, listed);
+      weak     -- the frozen answer is the boxed word and the measured one a pointer or
+                  `_Bool`: the solver lost a type the backend knew (must be 0);
+      conflict -- anything else (two pointer types, a word or pointer against `double`,
+                  `void` against a value): a miscompile risk (must be 0).
+    A boxed word and a pointer are representation-compatible (`mojo_box_word` converts)."""
+    if frozen == measured:
+        return 'same'
+    if gimple_ctypes.TypeLattice.is_word(frozen) and _is_boxable_ctype(measured):
+        return 'weak'
+    if gimple_ctypes.TypeLattice.is_word(measured) and _is_boxable_ctype(frozen):
+        return 'refined'
+    return 'conflict'
 
-    A measured answer already in `_home_def_return_types` wins at once. When
-    there is none yet, a placeholder token is returned and the default is kept
-    for `resolve_extern_return_placeholders` to fall back on. Callers use this
-    ONLY for prototype text; logic reads still use `_home_def_return_type` or
-    `func_return_types`."""
-    _hit = _home_def_return_type(gen, qualifier, bare_name)
-    if _hit:
-        return _hit
-    _n = _PENDING_EXTERN_RET_SEQ[0]
-    _PENDING_EXTERN_RET_SEQ[0] = _n + 1
-    _PENDING_EXTERN_RETS[_n] = (qualifier, bare_name, default_ret)
-    return _EXTERN_RET_TOKEN + str(_n) + '_'
+
+def _is_boxable_ctype(ctype: str) -> bool:
+    """`_Bool` or a pointer: a value the runtime boxes into the boxed word."""
+    return gimple_ctypes.TypeLattice.is_bool(ctype) or gimple_ctypes.TypeLattice.ends_in_star(ctype)
 
 
-def resolve_extern_return_placeholders(gen, code: str) -> str:
-    """Replace every `extern_return_ctype` placeholder in `code` with the
-    definer's measured return (the final store entry), or the scanned default
-    when no definer in this compile measured one. Each placeholder is consumed
-    by the one compile whose text contains it, so a nested compile never
-    resolves an outer compile's token against the wrong store."""
-    if not code or _EXTERN_RET_TOKEN not in code:
-        return code
-    _pieces = code.split(_EXTERN_RET_TOKEN)
-    _out = [_pieces[0]]
-    for _chunk in _pieces[1:]:
-        _end = _chunk.find('_')
-        if _end <= 0 or not _chunk[:_end].isdigit():
-            _out.append(_EXTERN_RET_TOKEN + _chunk)
-            continue
-        _n = int(_chunk[:_end])
-        _entry = _PENDING_EXTERN_RETS.pop(_n, None)
-        if _entry is None:
-            _out.append(_EXTERN_RET_TOKEN + _chunk)
-            continue
-        _qual, _bare, _default = _entry
-        _hit = _home_def_return_type(gen, _qual, _bare)
-        _out.append((_hit if _hit else _default) + _chunk[_end + 1:])
-    return ''.join(_out)
+def _tsolve_log(gen, dedupe_key: str, line: str) -> None:
+    """Append one ledger line per key: a decision is made once, a read of it is not
+    a new decision (bugs/GIR_type_solver_precision.md, 4.5)."""
+    if dedupe_key in gen._tsolve_logged:
+        return
+    gen._tsolve_logged[dedupe_key] = True
+    gen._tsolve_ledger.append(line)
+
+
+def _shadow_check(gen, bare_name: str, measured: str) -> None:
+    """Ledger only (no C change): for an unannotated definer the solver answers and that
+    was not frozen, record when the solver's lowered return differs from the backend's
+    measured one. This is the S2 shadow report, measured over the whole closure by the
+    same acceptance run (bugs/GIR_type_solver_precision.md, 4.5)."""
+    sol = getattr(gen, '_tsolve', None)
+    if sol is None or not measured or not gen._current_filename:
+        return
+    path = os.path.abspath(gen._current_filename)
+    if not sol.knows(path, bare_name):
+        return
+    qualifier = _func_qualifier(gen, bare_name)
+    if _pair_key(qualifier, bare_name) in gen._tsolve_frozen:
+        return
+    solver = sol.ret_ctype(gen, path, bare_name)
+    if solver is None or solver == measured:
+        return
+    _tsolve_log(gen, 'shadow:' + qualifier + '.' + bare_name,
+                'shadow ' + qualifier + '.' + bare_name + ' solver=' + solver
+                + ' measured=' + measured)
 
 
 def _imported_def_pts(gen, bare_name: str) -> list | None:
@@ -3871,7 +3952,10 @@ def _func_csym_impl(gen, bare_name: str, def_pts: list | None = None) -> str:
         _ov_set = (getattr(gen, '_local_def_overloads', None) or {}).get(bare_name)
         if _ov_set and len(_ov_set) >= 2:
             return mangled
-        _eff_ret = _home_def_return_type(gen, qualifier, bare_name)
+        # The store is keyed by the DEFINER's name, which is `_orig` for an
+        # imported alias (the same name the symbol base above was built from).
+        _def_name = _orig if (_orig and _orig != bare_name) else bare_name
+        _eff_ret = _home_def_return_type(gen, qualifier, _def_name)
         if _eff_ret is None:
             _eff_ret = gen.func_return_types.get(bare_name)
         if _eff_ret is not None:
@@ -4223,21 +4307,10 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
 
     # Determine return type: annotation takes priority; infer if absent.
     if node.return_type is not None:
-        ret_type = gen._resolve_type(node.return_type)
         # The SAME body-sensitive decision the struct-method definition
-        # pass makes below (`_gen_struct_method`): a `-> Tuple[...]` return
-        # whose body builds the tuple as a RUNTIME (list-backed) tuple
-        # literal returns `MojoList *`, not the synthesized by-value
-        # struct — without this this definition pass overwrites the
-        # signature pass's `MojoList *` back into func_return_types, the
-        # prototype declares a struct return, and the typedef is never
-        # emitted (`unknown type name 'MojoTuple_...'`; measured 2026-10-21
-        # part 4 integration on `split`'s `-> Tuple[String, String]`).
-        if (isinstance(ret_type, str)
-                and ret_type.startswith('MojoTuple_')
-                and not _body_builds_struct_tuple(
-                        getattr(node, 'body', None))):
-            ret_type = 'MojoList *'
+        # pass makes below (`_gen_struct_method`); one routine for both
+        # (annotated_return_ctype, bugs/GIR_type_solver_precision.md, 4.4).
+        ret_type = annotated_return_ctype(gen, node)
     else:
         # Seed any local holding a closure VALUE (`var f = inner`) so
         # `return f` infers the closure's real MojoBoundMethod*/void*
@@ -4260,6 +4333,10 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         if node.name == 'main' and gimple_ctypes.TypeLattice.is_void(ret_type):
             ret_type = 'int64_t'
 
+    # The definer's answer, made effective first: a frozen early answer (the
+    # solver decided this return type for an importer) wins over the measured one.
+    ret_type = _record_home_def_return_type(gen, node, node.name, ret_type)
+    _shadow_check(gen, node.name, ret_type)
     gen.func_ret_type = ret_type
     gen.current_func_ret_ann = (
         node.return_type if isinstance(node.return_type, str) else '')
@@ -4280,8 +4357,6 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # (generated line 885606) precedes its own definition (885849), so the
     # definition's own answer was not in the slot yet and the call site read
     # elab_intu's `MojoList *`.
-    _record_home_def_return_type(gen, node, node.name, ret_type)
-
     # Run layout solver for struct locals
     solver = gimple_solvers.LayoutSolver(gen.struct_field_types)
     gen._struct_layout = solver.solve(node.params, node.body)
