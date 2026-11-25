@@ -727,6 +727,21 @@ Closure acceptance: section 8.
   * test_import_cycle_sigs.py: annotated `label -> str` and `pair -> tuple[str, str]` in the cycle.
   * STILL OPEN in step 3: a unit test of `_return_disagreement` over its table (design 6); and
     module_gen's all-functions loop (~line 13180) still computes its own annotated return.
+- CLOSURE MEASURED at 77d06f327 (clean export, tools/selfhost_ci.py under memcap 24 GB, peak
+  10.6 GB): gcc errors 5 = 3 `invalid operands to binary + (MojoList * and double)` (other doc, out of
+  scope) + 2 `assignment to 'STy *' from 'Type *'` (sty.py BOOL/INT: the backend global-type bug, step
+  4b below). Ledger: early 141, conflict 0, weak 0, undecided 0, refined 6, shadow 158.
+  The 6 `refined` names, each justified from the source (acceptance 8.2):
+    * `emit_funcs._home_def_return_type`: `got = store.get(key)` on `_home_def_return_types`, a
+      `dict[str, str]` field, so the solver's `char *` is right; the backend does not type `getattr`.
+    * `funcs_shared.param_aug_rebinding_ctype`: returns `cache[key]` (a ctype string) or `widened`
+      (`TypeLattice.join` of ctype strings).
+    * `calls_shared._ref_scalar_param_ctype`: returns `ct` only after `isinstance(ct, str)` and
+      `ends_in_star(ct)` (calls_shared.py:735-742).
+    * `elaborate.extract_fn_source`: returns `src` / `candidates[0]`, source-text strings.
+    * `elaborate.unbound_type_parameter`: returns the parameter name from `_first_unbound_type_param`.
+    * `elaborate.infer_struct_type_args`: `resolved[0]`, a list of type-argument lists: `MojoList *`
+      is right; the backend's element read is boxed (3.3).
 - STEP 4 IN PROGRESS.
   * DONE (verified: c_oracle identical vs bacc2f396, 286 + 35; compile_stdlib 610/0; cycle PASS;
     test_tsolve 74/0): the loader is an OBJECT with `resolve(ref, importer) -> ModuleFile | None`
@@ -740,6 +755,7 @@ Closure acceptance: section 8.
     emit_exprs `_lie_global_window`). Regression test: two modules each with a module-level
     `X: <own class> = <ctor>()`, one importing the other; build, run, compare with CPython.
     Find the store emitter first (grep the generated `(Type *)` cast in a closure TU).
+    4b STATUS: not yet done; it is the only change left to make the 2 `sty.py` gcc errors go.
 - STEP 5 (not started): acceptance (section 8): closure run (2.1) and the doc updates of section 9.
 - Tools: `tools/tsolve_why.py --classify|--shadow|--undecided LEDGER`. `--fn` and `--undecidable`
   (section 2.6, need the solved program) are not written yet.
