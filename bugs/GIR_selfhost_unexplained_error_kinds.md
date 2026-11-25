@@ -2,7 +2,7 @@
 
 Part of the whole-closure self-host failure (`python3 test_selfhost.py`). See `doc/GIR.md`,
 section "Selfhost closure: remaining errors". The extern-return-type family is
-`bugs/GIR_selfhost_extern_return_types.md`; this doc is everything else.
+the import-cycle back-edge fix (commits `6826e2aed` ... `2d1a9131c` and the precision work; see `bugs/GIR_type_solver_precision.md`); this doc is everything else.
 
 ## Measurement (2026-11-24, master `91140cc58`). This replaces the old table.
 

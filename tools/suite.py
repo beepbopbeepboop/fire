@@ -2000,6 +2000,10 @@ test('tsolve', [PY, 'test_tsolve.py'], cache=True, mem='tiny',
          for p in glob.glob(os.path.join(REPO, 'mojo', 'tsolve', '*.py'))) + [
          'fire_compiler.py', 'ast_rewriter.py'],
      desc='whole-closure type solver: join/from_annotation/ret_ctype rows, summaries, fixpoint (bugs/GIR_type_solver.md, 4)')
+test('global-homonym-struct', [PY, 'test_global_homonym_struct.py'], cache=True, mem='tiny',
+     extra=['test_global_homonym_struct.py', 'fire.py', 'gimple_codegen.py',
+            'mojo/backend_gimple/module_gen.py', 'mojo/middle/funcs_shared.py'],
+     desc='two modules declare one global name with two struct types: each keeps its own (bugs/GIR_type_solver_precision.md, 4b)')
 test('import-cycle-sigs', [PY, 'test_import_cycle_sigs.py'], cache=True, mem='tiny',
      extra=['test_import_cycle_sigs.py', 'fire.py', 'gimple_codegen.py',
             'mojo/backend_gimple/emit_funcs.py', 'mojo/backend_gimple/module_gen.py',
@@ -4961,7 +4965,7 @@ BUCKETS = {
 
               'reg-conditional-conformance-candidate-diagnostic',
               'interp-tokenizer-oracle',
-              'linkmode', 'no-new-casts', 'gimple-lint', 'tsolve', 'import-cycle-sigs', 'pydiff-ratchet', 'type-string-ratchet', 'nonlocal', 'gimplerunner',
+              'linkmode', 'no-new-casts', 'gimple-lint', 'tsolve', 'import-cycle-sigs', 'global-homonym-struct', 'pydiff-ratchet', 'type-string-ratchet', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
 # `ptrreg-boxed-str` is master's split-out dedicated group of the
               # pointer-registry harness and `formal-ast` is the batch's

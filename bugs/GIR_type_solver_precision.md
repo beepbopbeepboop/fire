@@ -3,11 +3,11 @@
 Author: design owner, 2026-11-24 (session 3). Replaces the Haiku draft (`design_haiku_v1`,
 scratch only, never checked in). This doc is self-contained: an implementer needs nothing
 else, but the background is in `bugs/GIR_type_solver.md` (the solver, S1-S6) and
-`bugs/GIR_selfhost_extern_return_types.md` (its first consumer, the early decision).
+the import-cycle back-edge bug (its first consumer, the early decision; the bug record was deleted with its fix, 2026-11-24).
 
 Supersedes, and the implementer should edit those docs when the step that replaces them
 lands (see section 9 for the exact paragraphs):
-- `bugs/GIR_selfhost_extern_return_types.md`: the Status "Remaining" list of 2026-11-24
+- the import-cycle back-edge bug record (deleted with its fix, 2026-11-24): the Status "Remaining" list of 2026-11-24
   (items 1-4) and Acceptance item 2's definition of `conflict` and "expect about 32 early".
 - `bugs/GIR_type_solver.md`: the bare-container rows of 2.1, the `with`/external-import
   rows and the isinstance paragraph of 2.3, the builtin table of 2.3, and the
@@ -586,7 +586,7 @@ early-set `weak`. Verify: test_tsolve, test_import_cycle_sigs, c_oracle against 
 ### Step 5: acceptance and the docs
 
 Run 2.1 once. Record every number of section 8 in this doc's Status. Then: delete
-`bugs/GIR_selfhost_extern_return_types.md` if its own acceptance is met (it is, when section 8
+the import-cycle back-edge bug record if its own acceptance is met (it is, when section 8
 is), update `doc/GIR.md` "Selfhost closure: remaining errors", edit `bugs/GIR_type_solver.md`
 per section 9, rewrite this doc's own citations of the deleted doc (name the bug or the
 commit instead), run `python3 tools/dangling_doc_refs.py --ratchet`. If anything in section 8
@@ -677,7 +677,7 @@ Closure acceptance: section 8.
 
 ## 9. What this replaces in the other docs
 
-- `bugs/GIR_selfhost_extern_return_types.md`: Status "Remaining, in order of what the census
+- the import-cycle back-edge bug record (deleted with its fix): Status "Remaining, in order of what the census
   shows" items 1-4 (2026-11-24, later) are replaced by sections 3-5 here; item 1's "narrow a
   parameter by what its uses prove" is rejected (4.8); item 3's "their answer is `bot`" is
   wrong (2.3). Acceptance item 2: "0 `conflict`" now means the 4.5 table; "expect about 32
@@ -695,92 +695,29 @@ Closure acceptance: section 8.
 
 ### HANDOFF (read first; kept current by whoever works on this)
 
-- Branch: master. Commits so far (newest last): c7878b789 (step 1 instruments), db2a1cdba
-  (2a None receivers, bot-return), 8bc44e1ed (2b externs), b5a1cccdf (2c narrowing),
-  336eff194 (2d dotted annotations), c8bb6578a (2e static/class methods, 2f loose fields).
-- 4.2e (static/class methods) and 4.2f (loose fields) LANDED and verified: test_tsolve 64/0,
-  c_oracle identical vs 336eff194 (286 + 35), compile_stdlib 610/0, cycle test PASS.
-- 4.2g (kind pins), 4.2h (cast helpers), 4.2i (coverage) IMPLEMENTED (session 3, on master, not
-  VERIFIED: test_tsolve 74/0, c_oracle identical vs 08849a810 (286 + 35), compile_stdlib 610/0,
-  cycle test PASS. Deviations, decided while
-  implementing:
-  * 4.2h: the design's own test expects `_as_dict(g.f)` (an unknown argument) to give
-    `tuple[int, str]`, but its rule says an argument of another kind gives the named kind with
-    `dyn` contents. The sound rule is kept (3.4: unknown is not empty; `dyn` is the join's top);
-    the test now passes a real dict, and a second test pins the unknown-contents case as `dyn`.
-  * 4.2i: a store into a container no modelled name holds (`a[i][j] = v`) flows nowhere (R2), so
-    it is decidable; a class inside a function is a `dyn` local, its methods are not summarized
-    (the same reach as a nested def's flows, noted as a coverage limit).
-  * 4.2g: `kind_join` keeps `none`/`bot` out of the contents; a kind-pinned variable that only
-    ever receives `None` stays `bot` (no information), which is undecided, not a wrong answer.
-- STEP 2 DONE (2d1a9131c: 2g-2i; earlier commits as listed above).
-- STEP 3 LANDED (verified: c_oracle identical vs 2d1a9131c, 286 + 35; compile_stdlib 610/0;
-  test_import_cycle_sigs PASS including the annotated `label`/`pair` cases). Contents:
-  * `funcs_shared.annotated_return_ctype(gen, fn_node)`: the one annotated-return routine. Used by
-    gen_func (emit_funcs) and `_resolved_export_entry` (funcs_shared). NOT yet used by
-    module_gen's all-functions loop (~line 13180, its ordering differs; to consolidate next).
-  * `FnSummary.node`, `Solution.definition`, `Solution.is_annotated`.
-  * `_early_return_decision` decides an annotated definer by `annotated_return_ctype` (ledger suffix
-    ` annotated`).
-  * `_return_disagreement(frozen, measured)` (same | refined | weak | conflict) in emit_funcs, with its
-    table in the docstring; the record path logs refined/weak/conflict lines.
-  * test_import_cycle_sigs.py: annotated `label -> str` and `pair -> tuple[str, str]` in the cycle.
-  * STILL OPEN in step 3: a unit test of `_return_disagreement` over its table (design 6); and
-    module_gen's all-functions loop (~line 13180) still computes its own annotated return.
-- CLOSURE MEASURED at 77d06f327 (clean export, tools/selfhost_ci.py under memcap 24 GB, peak
-  10.6 GB): gcc errors 5 = 3 `invalid operands to binary + (MojoList * and double)` (other doc, out of
-  scope) + 2 `assignment to 'STy *' from 'Type *'` (sty.py BOOL/INT: the backend global-type bug, step
-  4b below). Ledger: early 141, conflict 0, weak 0, undecided 0, refined 6, shadow 158.
-  The 6 `refined` names, each justified from the source (acceptance 8.2):
-    * `emit_funcs._home_def_return_type`: `got = store.get(key)` on `_home_def_return_types`, a
-      `dict[str, str]` field, so the solver's `char *` is right; the backend does not type `getattr`.
-    * `funcs_shared.param_aug_rebinding_ctype`: returns `cache[key]` (a ctype string) or `widened`
-      (`TypeLattice.join` of ctype strings).
-    * `calls_shared._ref_scalar_param_ctype`: returns `ct` only after `isinstance(ct, str)` and
-      `ends_in_star(ct)` (calls_shared.py:735-742).
-    * `elaborate.extract_fn_source`: returns `src` / `candidates[0]`, source-text strings.
-    * `elaborate.unbound_type_parameter`: returns the parameter name from `_first_unbound_type_param`.
-    * `elaborate.infer_struct_type_args`: `resolved[0]`, a list of type-argument lists: `MojoList *`
-      is right; the backend's element read is boxed (3.3).
-- STEP 4 IN PROGRESS.
-  * DONE (verified: c_oracle identical vs bacc2f396, 286 + 35; compile_stdlib 610/0; cycle PASS;
-    test_tsolve 74/0): the loader is an OBJECT with `resolve(ref, importer) -> ModuleFile | None`
-    (summarize.ModuleFile, `_Pending`); `solve_closure(root, stmts, loader)`; no stored callable,
-    no tuple results. DEVIATION from 4.6: no request/provide loop; a method call on the loader object
-    meets the same rule (no closures, no stored callables) with less code.
-  * NOT DONE: owner-first global C types (4.6, backend). Measured reason to do it: `sty.py`'s
-    `BOOL`/`INT` globals get a cast to `mojo/ir/types.py`'s `Type` (2 of the 12 gcc errors). The
-    emission path is `gen._global_var_types` (bare name, first writer wins) read by the store of an
-    annotated top-level assignment; the fix must look up `_own_global_var_types` first (see
-    emit_exprs `_lie_global_window`). Regression test: two modules each with a module-level
-    `X: <own class> = <ctor>()`, one importing the other; build, run, compare with CPython.
-    Find the store emitter first (grep the generated `(Type *)` cast in a closure TU).
-    4b STATUS (investigated 2026-11-24, NOT changed yet). The trace, measured on selfhost.ci of
-    77d06f327: the store `sty.BOOL = _sty_intern(...)` (sty.py:75) is emitted by
-    emit_stmts.py ~1850 as `gen._safe_coerce_emit(vtype, gen._global_dst_ctype(tname), ...)`.
-    `_global_dst_ctype` (gimple_codegen.py ~5256) asks `_own_overlay_global_ctype` first, which
-    returns None (no owner conclusion: module_gen.py ~14250 records only int-word cdecls; no writer
-    records an annotated struct-pointer global), then falls back to the SHARED
-    `_global_c_decl_types`/`_global_var_types`, which hold `Type *` from mojo/ir/types.py's `BOOL`.
-    So the store casts to `Type *` while the owner's field is declared `STy *`.
-    Fix, in order: (1) find where the owner's struct field `BOOL` is declared as `STy *` (the
-    `_declared_globals` loop in gen_module_impl; it must read the same helper); (2) record the
-    owner's annotated struct-pointer type in `_own_global_var_types` (a new writer for top-level
-    annotated AssignStmt whose annotation names a class of this module), so rule 3 of
-    `_own_overlay_global_ctype` returns the owner's own type instead of the shared one; (3) a
-    regression test (two modules, each with `X: <own class> = <ctor>()`, one importing the other;
-    build, run, compare with CPython).
-    (4) FINDING (2026-11-24, later): the field declaration loop (module_gen.py ~6995,
-    `_gmp_fill_missing_global_decls`) reads `_own_overlay_global_ctype` FIRST, then
-    `_global_c_decl_types`, then `_global_var_types`; the store reads `_global_dst_ctype`, which
-    reads the same owner overlay first, then `_global_c_decl_types`, then `_global_var_types`.
-    Both read the same chain, so they can only disagree if the shared dicts change BETWEEN the field
-    declaration and the store (or if the field is declared before `BOOL`'s own conclusion exists).
-    The next step is to log both reads for `BOOL` (one-line temporary print in each, closure run) to
-    see which moment differs, before changing any rule.
-- STEP 5 (not started): acceptance (section 8): closure run (2.1) and the doc updates of section 9.
-- Tools: `tools/tsolve_why.py --classify|--shadow|--undecided LEDGER`. `--fn` and `--undecidable`
-  (section 2.6, need the solved program) are not written yet.
+- STATE: the design's steps 1-5 are landed on master. The closure acceptance (section 8) is met at
+  the commit that lands this block: gcc has only the 3 out-of-scope `MojoList * + double` errors;
+  the ledger has conflict=0, weak=0, undecided=0, refined=6 (justified in the Status above), early
+  141, shadow 158; test_tsolve 74/0; c_oracle identical vs 74e74250f (286 + 35); compile_stdlib
+  610/0; test_import_cycle_sigs, test_global_homonym_struct PASS; test_gimple_lint,
+  test_type_string_ratchet, test_gir_builder pass; dangling_doc_refs ratchet passes.
+- Commits on master, in order: c7878b789 (step 1), db2a1cdba (2a), 8bc44e1ed (2b), b5a1cccdf (2c),
+  336eff194 (2d), c8bb6578a (2e/2f), 2d1a9131c (2g-2i), bacc2f396 (step 3), 77d06f327 (4a),
+  cc532b909 / 0faf3141a / 74e74250f (docs), and the step 4b fix (see the 4b entry).
+- The early-decision bug record (`bugs/GIR_selfhost_extern_return_types.md`) was deleted with its fix.
+- Follow-ups that are NOT blocking acceptance (each small and named):
+  1. A unit test of `_return_disagreement` over its table (step 3's design item; the function is in
+     emit_funcs.py, so the test belongs in a compiler-side test file, not test_tsolve.py).
+  2. `module_gen.py`'s all-functions loop (~line 13180) still computes its own annotated return; it
+     should call `funcs_shared.annotated_return_ctype`.
+  3. The `--fn` and `--undecidable` modes of `tools/tsolve_why.py` (section 2.6; they need the
+     solved program).
+  4. The design's request/provide loop (4.6) was replaced by a loader object with `resolve`
+     (commit 77d06f327): a recorded deviation, equivalent for the rule it serves.
+  5. Module `X.Y` attribute reads of a global in a compiled program raise at runtime
+     (`AttributeError: BOX`, seen while building the homonym test): a separate gap, not in this doc;
+     record it in a bug doc if it is still real.
+- Tools: `tools/tsolve_why.py --classify|--shadow|--undecided LEDGER`.
 - How to verify each step: `python3 test_tsolve.py`; `python3 tools/c_oracle.py check --base <last
   commit>` (identical unless a program has an import cycle); `python3 compile_stdlib.py` (PASSED 610,
   FAILED 0); `python3 test_import_cycle_sigs.py`. Acceptance (section 8) is the closure run (2.1),

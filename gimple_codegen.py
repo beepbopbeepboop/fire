@@ -5210,6 +5210,15 @@ class GimpleGen:
             # cdecl; when it doesn't, this exclusion preserves the
             # pre-existing raw-type return).
             return 'int64_t'
+        # A STRUCT pointer this module declares (`BOOL: STy = ...`) beats a different struct
+        # pointer of the same bare name that another module declared (`mojo/ir/types.py`'s
+        # `BOOL: Type`): the homonym's cdecl must not re-type this module's own global. The
+        # field is declared from this same rule, so the field and every store agree
+        # (bugs/GIR_type_solver_precision.md, 4.6 step 4b).
+        if (cdecl is not None and cdecl != own
+                and TypeLattice.ends_in_star(own) and TypeLattice.ends_in_star(cdecl)
+                and not _is_c_container(own) and not _is_c_container(cdecl)):
+            return own
         return cdecl if cdecl is not None else own
 
     def _module_global_field_type(self, module: str, name: str) -> tuple[str, str] | None:
@@ -6783,6 +6792,11 @@ def _relocate_module_instance_defs(code: str) -> str:
 # end-of-compile cleanup in `_run_pipeline` must leave them alone.
 _PIPELINE_RESULT_ATTRS = frozenset({'_link_dylibs', '_link_objects', '_link_needs_cxx_box',
                                     '_dropped_companion_cpp'})
+
+
+def _is_c_container(ctype: str) -> bool:
+    """A runtime container pointer (`MojoList *`, `MojoDict *`, `MojoSet *`)."""
+    return TypeLattice.is_list(ctype) or TypeLattice.is_dict(ctype) or TypeLattice.is_set(ctype)
 
 
 def _solve_import_closure(gen, filename: str, stmts: list):

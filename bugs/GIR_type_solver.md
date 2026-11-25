@@ -1,7 +1,7 @@
 # GIR: a whole-closure type solver (`mojo/tsolve/`)
 
 Design and staged plan, written 2026-11-24. The first consumer is
-`bugs/GIR_selfhost_extern_return_types.md`, which needs stage S1 only. The later stages
+the import-cycle back-edge fix (S1; now landed, see `bugs/GIR_type_solver_precision.md`). The later stages
 are the road to one type solver that answers every signature, field and local type in
 the program. Unboxed code depends on that: a value can only be emitted unboxed when
 something has proved its type.
@@ -262,7 +262,7 @@ def solve_closure(root_path: str, root_stmts: list, load) -> Solution
 Each stage is shippable on its own and has its own acceptance test.
 
 - **S1: the solver and its first consumer.** §2 in full, plus the integration in
-  `bugs/GIR_selfhost_extern_return_types.md`. The solver's answer is used only for a
+  the import-cycle back-edge fix (landed). The solver's answer is used only for a
   return type an importer needs before its definer has analyzed. Everything else
   still comes from the existing passes, so C output is unchanged for any program
   without an import cycle.
@@ -308,4 +308,4 @@ Pure unit tests, with no compile:
 ## Status
 
 - 2026-11-24: designed. Nothing implemented. S1 is specified together with its
-  consumer in `bugs/GIR_selfhost_extern_return_types.md`.
+  consumer: the import-cycle back-edge fix (landed; its record is `bugs/GIR_type_solver_precision.md`).

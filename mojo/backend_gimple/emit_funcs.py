@@ -2690,16 +2690,16 @@ def _return_disagreement(frozen: str, measured: str) -> str:
     A boxed word and a pointer are representation-compatible (`mojo_box_word` converts)."""
     if frozen == measured:
         return 'same'
-    if frozen == 'int64_t' and _is_boxable_ctype(measured):
+    if gimple_ctypes.TypeLattice.is_word(frozen) and _is_boxable_ctype(measured):
         return 'weak'
-    if measured == 'int64_t' and _is_boxable_ctype(frozen):
+    if gimple_ctypes.TypeLattice.is_word(measured) and _is_boxable_ctype(frozen):
         return 'refined'
     return 'conflict'
 
 
 def _is_boxable_ctype(ctype: str) -> bool:
     """`_Bool` or a pointer: a value the runtime boxes into the boxed word."""
-    return ctype == '_Bool' or ctype.endswith(' *')
+    return gimple_ctypes.TypeLattice.is_bool(ctype) or gimple_ctypes.TypeLattice.ends_in_star(ctype)
 
 
 def _tsolve_log(gen, dedupe_key: str, line: str) -> None:

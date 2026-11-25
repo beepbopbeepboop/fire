@@ -827,13 +827,14 @@ Fixed (merged; each is a real fix, not a workaround):
 
 Open, with bug docs. Re-measured 2026-11-24 on master `91140cc58`: 40 gcc errors, counted with
 `tools/selfhost_ci.py` (the method is in the second doc).
-- `bugs/GIR_selfhost_extern_return_types.md`: 37 errors. The cause is import-cycle back-edges:
-  the closure has one 76-module import cycle, and an importer is generated before its
-  definer's return-type passes run. 13 functions are affected. The WIP commit (`e9e4ea4a9`,
-  merged as `913aa3780`) patched prototype text with placeholders, so call-site temps stayed
-  `int64_t`; it is reverted as step 0. The fix is the pre-pass `bugs/GIR_type_solver.md` (S1):
-  the importer's read freezes the solver's answer, the definer obeys it, and a ledger proves
-  there are no conflicts.
+- The import-cycle back-edge family (37 errors, 13 functions) is FIXED: the solver's early
+  decision freezes each back-edge definer's return type and the definer obeys it (the WIP placeholder
+  `e9e4ea4a9` was reverted at `2812a27c0`). The decision is in `emit_funcs._early_return_decision`;
+  the solver is `mojo/tsolve/` (`bugs/GIR_type_solver.md` S1, precision in
+  `bugs/GIR_type_solver_precision.md`). Measured at `0faf3141a`-plus: the closure has 3 gcc errors,
+  all the `MojoList * + double` family below; the ledger has zero conflict, weak and undecided lines.
+  The early-decision doc was deleted with this change; its acceptance is recorded in the
+  precision doc's Status.
 - `bugs/GIR_selfhost_unexplained_error_kinds.md`: 3 errors, `MojoList * + double`. It is a
   `+`-lowering defect in `emit_exprs._lower_binary_tail` (a may-box word beside a list operand
   is promoted to double, and `list + int64_t` was a silent no-op). The old has-no-member and
