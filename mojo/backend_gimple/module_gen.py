@@ -13171,24 +13171,12 @@ def _gmp_annotated_return_types(self, stmts: list, all_functions: list) -> None:
             continue
         if isinstance(s, FunctionDef) and s.return_type is not None:
             funcs_shared.record_annotated_tuple_slots(self, s.name, s.return_type)
-            _fn_ret_ct = self._resolve_type(s.return_type)
-            if isinstance(_fn_ret_ct, str) and _fn_ret_ct.startswith(
-                    'MojoTuple_'):
-                # The SAME body-sensitive decision the struct-method loop
-                # below makes (see there for the full reasoning): part 4's
-                # `_mojo_type` Tuple branch resolves a `-> Tuple[...]`
-                # return to the synthesized by-value struct, but a plain
-                # fn whose body builds the tuple as a RUNTIME (list-backed)
-                # literal — `split`'s `return String(head), String(tail)` —
-                # must keep the `MojoList *` return or the definition casts
-                # a list pointer into the struct and the typedef is never
-                # emitted (`unknown type name 'MojoTuple_...'`, measured
-                # 2026-10-21 part 4 integration: test_split/test_modf/
-                # test_location/test_tempfile's monomorphized instances).
-                if _body_builds_struct_tuple(getattr(s, 'body', None)):
-                    self._ensure_tuple_struct(s.return_type)
-                else:
-                    _fn_ret_ct = 'MojoList *'
+            # One routine for the annotated return (funcs_shared.annotated_return_ctype): the
+            # body-sensitive rule lives there, once. A struct-tuple body also registers its typedef.
+            _fn_ret_ct = funcs_shared.annotated_return_ctype(self, s)
+            if (isinstance(_fn_ret_ct, str) and _fn_ret_ct.startswith('MojoTuple_')
+                    and _body_builds_struct_tuple(getattr(s, 'body', None))):
+                self._ensure_tuple_struct(s.return_type)
             _fn_ret_ct = _ggf_dup._record_home_def_return_type(self, s, s.name, _fn_ret_ct)
             self.func_return_types[s.name] = _fn_ret_ct
         _s_pts = None

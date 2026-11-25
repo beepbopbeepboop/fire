@@ -706,17 +706,15 @@ Closure acceptance: section 8.
   cc532b909 / 0faf3141a / 74e74250f (docs), and the step 4b fix (see the 4b entry).
 - The import-cycle back-edge bug record (deleted with its fix, 2026-11-24) is no longer in bugs/.
 - Follow-ups that are NOT blocking acceptance (each small and named):
-  1. A unit test of `_return_disagreement` over its table (step 3's design item; the function is in
-     emit_funcs.py, so the test belongs in a compiler-side test file, not test_tsolve.py).
-  2. `module_gen.py`'s all-functions loop (~line 13180) still computes its own annotated return; it
-     should call `funcs_shared.annotated_return_ctype`.
-  3. The `--fn` and `--undecidable` modes of `tools/tsolve_why.py` (section 2.6; they need the
-     solved program).
-  4. The design's request/provide loop (4.6) was replaced by a loader object with `resolve`
-     (commit 77d06f327): a recorded deviation, equivalent for the rule it serves.
-  5. Module `X.Y` attribute reads of a global in a compiled program raise at runtime
-     (`AttributeError: BOX`, seen while building the homonym test): a separate gap, not in this doc;
-     record it in a bug doc if it is still real.
+  1. DONE (test_return_disagreement.py, check bucket): the disagreement table has its unit test.
+  2. DONE (module_gen.py all-functions loop calls funcs_shared.annotated_return_ctype; byte-identical
+     on 286 + 35, stdlib 610/0, cycle PASS).
+  3. OPEN: `tools/tsolve_why.py --fn` and `--undecidable` (section 2.6; they need the solved program).
+  4. RECORDED DEVIATION: the design's request/provide loop (4.6) was replaced by a loader object with
+     `resolve` (commit 77d06f327), which meets the same rule.
+  5. OPEN BUGS (bugs/ docs, not this doc): CODEGEN_instance_global_attribute_read_raises,
+     CODEGEN_import_name_resolves_to_a_same_named_class_elsewhere,
+     CODEGEN_global_c_type_depends_on_shared_state.
 - Tools: `tools/tsolve_why.py --classify|--shadow|--undecided LEDGER`.
 - How to verify each step: `python3 test_tsolve.py`; `python3 tools/c_oracle.py check --base <last
   commit>` (identical unless a program has an import cycle); `python3 compile_stdlib.py` (PASSED 610,
