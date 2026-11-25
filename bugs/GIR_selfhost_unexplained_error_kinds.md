@@ -154,3 +154,16 @@ does not explain.
   real call (`coro.py:7713`) by dumping its generated C (`fire.py build` on `mojo/middle/coro.py`'s
   `lower` path) and checking which unpacked slot is `int64_t` there, instead of guessing shapes.
   No code has changed for this bug yet.
+- 2026-11-25: FIX LANDED in `mojo/backend_gimple/emit_exprs.py` `_lower_binary_tail`: (1) a may-box
+  word beside a list operand of `+` is kept as a word (`_word_mark_dyn`), in both the `lv` and `rv`
+  blocks; (2) the `MojoList * + int` identity arm is replaced by `mojo_list_concat` (mirror of the
+  `int64_t + MojoList *` arm). Generated C for the real site (`coro.py:7714`): `out + _t1951` where
+  `_t1951 = mojo_box_double (nested_bodies)`; the callee returns a list, so the unpacked slot is an
+  unknown-kind word, which is the case the fix covers.
+  Verification: closure `selfhost_ci` + `gcc-mp-15 -O0 -fgimple` exit 0 (the three errors gone;
+  the one census line `too few arguments` is a docstring echo, not an error). `c_oracle check
+  --base 6b825b6c4`: 286 pydiff + 35 coroutine programs identical (no corpus program changed).
+  `compile_stdlib.py`: PASSED 610, FAILED 0.
+  NOT DONE: the red test. Both reductions listed above build and run correctly on the unchanged
+  tree, so no reduced program yet shows the defect. Until one does, this doc stays open; the
+  remaining step is a reduction that fails before the fix (from the callee's actual list return).
