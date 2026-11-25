@@ -2000,6 +2000,9 @@ test('tsolve', [PY, 'test_tsolve.py'], cache=True, mem='tiny',
          for p in glob.glob(os.path.join(REPO, 'mojo', 'tsolve', '*.py'))) + [
          'fire_compiler.py', 'ast_rewriter.py'],
      desc='whole-closure type solver: join/from_annotation/ret_ctype rows, summaries, fixpoint (bugs/GIR_type_solver.md, 4)')
+test('return-disagreement', [PY, 'test_return_disagreement.py'], cache=True, mem='tiny',
+     extra=['test_return_disagreement.py', 'mojo/backend_gimple/emit_funcs.py', 'gimple_codegen.py'],
+     desc='the early-decision disagreement classes (same | refined | weak | conflict), bugs/GIR_type_solver_precision.md 4.5')
 test('global-homonym-struct', [PY, 'test_global_homonym_struct.py'], cache=True, mem='tiny',
      extra=['test_global_homonym_struct.py', 'fire.py', 'gimple_codegen.py',
             'mojo/backend_gimple/module_gen.py', 'mojo/middle/funcs_shared.py'],
@@ -4965,7 +4968,7 @@ BUCKETS = {
 
               'reg-conditional-conformance-candidate-diagnostic',
               'interp-tokenizer-oracle',
-              'linkmode', 'no-new-casts', 'gimple-lint', 'tsolve', 'import-cycle-sigs', 'global-homonym-struct', 'pydiff-ratchet', 'type-string-ratchet', 'nonlocal', 'gimplerunner',
+              'linkmode', 'no-new-casts', 'gimple-lint', 'tsolve', 'import-cycle-sigs', 'global-homonym-struct', 'return-disagreement', 'pydiff-ratchet', 'type-string-ratchet', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
 # `ptrreg-boxed-str` is master's split-out dedicated group of the
               # pointer-registry harness and `formal-ast` is the batch's

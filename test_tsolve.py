@@ -348,6 +348,41 @@ class Origins(unittest.TestCase):
         self.assertEqual(_solve({'main': 'x = 1\n'}).why_none('/t/main.py', 'nope'), 'not-defined')
 
 
+class KindPins(unittest.TestCase):
+    """bugs/GIR_type_solver_precision.md, 4.2g: a bare container annotation fixes the kind."""
+
+    def test_bare_annotations_are_kind_pins(self):
+        for text, kind in [('list', 'list'), ('List', 'list'), ('dict', 'dict'), ('Dict', 'dict'),
+                           ('set', 'set'), ('Set', 'set'), ('set | None', 'set'), ('None | list', 'list')]:
+            self.assertEqual(sty.bare_container_kind(text), kind, text)
+
+    def test_parameterised_and_other_annotations_are_full_pins(self):
+        for text in ['list[str]', 'dict[str, int]', 'int', 'list | int', 'Tok', '', None]:
+            self.assertEqual(sty.bare_container_kind(text), '', repr(text))
+
+    def test_none_and_bot_add_nothing(self):
+        old = list_of(INT)
+        self.assertIs(sty.kind_join('list', old, NONE), old)
+        self.assertIs(sty.kind_join('list', old, BOT), old)
+
+    def test_a_list_value_joins_its_contents(self):
+        self.assertIs(sty.kind_join('list', BOT, list_of(INT)), list_of(INT))
+        self.assertIs(sty.kind_join('list', list_of(INT), list_of(STR)), list_of(DYN))
+
+    def test_a_tuple_into_a_list_contributes_its_slots(self):
+        self.assertIs(sty.kind_join('list', BOT, tuple_of([INT, INT])), list_of(INT))
+
+    def test_an_unknown_value_makes_the_contents_dyn_and_keeps_the_kind(self):
+        self.assertIs(sty.kind_join('list', BOT, DYN), list_of(DYN))
+        self.assertIs(sty.kind_join('list', list_of(INT), STR), list_of(DYN))
+
+    def test_a_dict_value_joins_keys_and_values(self):
+        self.assertIs(sty.kind_join('dict', BOT, dict_of(STR, INT)), dict_of(STR, INT))
+        # `None` joined with int is dyn (the lattice's rule 2), so the value contents widen.
+        self.assertIs(sty.kind_join('dict', dict_of(STR, INT), dict_of(STR, NONE)),
+                      dict_of(STR, DYN))
+
+
 class Externs(unittest.TestCase):
     """bugs/GIR_type_solver_precision.md, 4.2a: external modules have CPython's types."""
 
@@ -539,7 +574,7 @@ class Summaries(unittest.TestCase):
 def main():
     suite = unittest.TestSuite()
     loader = unittest.TestLoader()
-    for case in (JoinTable, FromAnnotation, LowerRows, Origins, Externs, Summaries):
+    for case in (JoinTable, FromAnnotation, LowerRows, Origins, Externs, KindPins, Summaries):
         suite.addTests(loader.loadTestsFromTestCase(case))
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     return 0 if result.wasSuccessful() else 1
