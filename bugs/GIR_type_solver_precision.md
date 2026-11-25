@@ -755,7 +755,21 @@ Closure acceptance: section 8.
     emit_exprs `_lie_global_window`). Regression test: two modules each with a module-level
     `X: <own class> = <ctor>()`, one importing the other; build, run, compare with CPython.
     Find the store emitter first (grep the generated `(Type *)` cast in a closure TU).
-    4b STATUS: not yet done; it is the only change left to make the 2 `sty.py` gcc errors go.
+    4b STATUS (investigated 2026-11-24, NOT changed yet). The trace, measured on selfhost.ci of
+    77d06f327: the store `sty.BOOL = _sty_intern(...)` (sty.py:75) is emitted by
+    emit_stmts.py ~1850 as `gen._safe_coerce_emit(vtype, gen._global_dst_ctype(tname), ...)`.
+    `_global_dst_ctype` (gimple_codegen.py ~5256) asks `_own_overlay_global_ctype` first, which
+    returns None (no owner conclusion: module_gen.py ~14250 records only int-word cdecls; no writer
+    records an annotated struct-pointer global), then falls back to the SHARED
+    `_global_c_decl_types`/`_global_var_types`, which hold `Type *` from mojo/ir/types.py's `BOOL`.
+    So the store casts to `Type *` while the owner's field is declared `STy *`.
+    Fix, in order: (1) find where the owner's struct field `BOOL` is declared as `STy *` (the
+    `_declared_globals` loop in gen_module_impl; it must read the same helper); (2) record the
+    owner's annotated struct-pointer type in `_own_global_var_types` (a new writer for top-level
+    annotated AssignStmt whose annotation names a class of this module), so rule 3 of
+    `_own_overlay_global_ctype` returns the owner's own type instead of the shared one; (3) a
+    regression test (two modules, each with `X: <own class> = <ctor>()`, one importing the other;
+    build, run, compare with CPython).
 - STEP 5 (not started): acceptance (section 8): closure run (2.1) and the doc updates of section 9.
 - Tools: `tools/tsolve_why.py --classify|--shadow|--undecided LEDGER`. `--fn` and `--undecidable`
   (section 2.6, need the solved program) are not written yet.
