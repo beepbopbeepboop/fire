@@ -24,6 +24,18 @@ class Solution:
         """True when `name` in module `path` is a definition the closure has."""
         return func_key(path, name) in self.prog.fns
 
+    def definition(self, path: str, name: str):
+        """The FunctionDef the closure defines for `name` in `path`, or None."""
+        fs = self.prog.fns.get(func_key(path, name))
+        if fs is None:
+            return None
+        return fs.node
+
+    def is_annotated(self, path: str, name: str) -> bool:
+        """True when the closure defines `name` with an annotated return (4.4)."""
+        fs = self.prog.fns.get(func_key(path, name))
+        return fs is not None and fs.annotated_ret
+
     def why_none(self, path: str, name: str) -> str:
         """Why `ret_sty` answers None for `name` in module `path`: '' when it answers,
         else `not-defined`, `undecidable`, `annotated` or `bot` (no value reaches a return)."""

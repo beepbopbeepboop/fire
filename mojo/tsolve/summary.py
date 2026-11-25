@@ -75,6 +75,7 @@ class FnSummary:
         self.ret_terms: list = []         # every term that flows into `ret` (returns and fall-off)
         self.deco: str = ''               # '' | 'staticmethod' | 'classmethod' (4.2e)
         self.cast_ty = None               # the annotated return of a CAST HELPER, else None (4.2h)
+        self.node = None                  # the FunctionDef, for the backend's annotation routine (4.4)
 
 
 class ClassSummary:

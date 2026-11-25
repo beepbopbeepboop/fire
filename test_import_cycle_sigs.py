@@ -24,10 +24,12 @@ FILES = {
     'a.py': ('import b\n'
              'def make(n):\n    return [n, n + 1]\n'
              'def name_of(x):\n    if x:\n        return "yes"\n    return None\n'
+             'def label(x) -> str:\n    return "L" + str(x)\n'
+             'def pair(n) -> tuple[str, str]:\n    return (str(n), "x")\n'
              'def run():\n    return b.use()\n'),
     'b.py': ('import a\n'
-             'def use():\n    xs = a.make(3)\n'
-             '    return str(len(xs)) + " " + a.name_of(1)\n'),
+             'def use():\n    xs = a.make(3)\n    p = a.pair(2)\n'
+             '    return str(len(xs)) + " " + a.name_of(1) + " " + a.label(4) + " " + p[0]\n'),
 }
 PY = sys.executable
 
@@ -53,10 +55,11 @@ def main() -> int:
         if os.path.exists(ledger):
             with open(ledger) as f:
                 lines = f.read().splitlines()
-        for want in ('early a.make ', 'early a.name_of '):
+        # Annotated definers are decided by the backend's own routine (4.4).
+        for want in ('early a.make ', 'early a.name_of ', 'early a.label ', 'early a.pair '):
             if not any(ln.startswith(want) for ln in lines):
                 failures.append('ledger has no `%s` line: %r' % (want.strip(), lines))
-        for bad in ('conflict', 'undecided'):
+        for bad in ('conflict', 'weak', 'undecided'):
             hits = [ln for ln in lines if ln.startswith(bad)]
             if hits:
                 failures.append('ledger has `%s` lines: %r' % (bad, hits))

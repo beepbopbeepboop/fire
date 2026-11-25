@@ -713,8 +713,23 @@ Closure acceptance: section 8.
     (the same reach as a nested def's flows, noted as a coverage limit).
   * 4.2g: `kind_join` keeps `none`/`bot` out of the contents; a kind-pinned variable that only
     ever receives `None` stays `bot` (no information), which is undecided, not a wrong answer.
-- Still open, in order: step 3 (annotated early decisions, ledger classes), step 4 (ClosureBuilder
-  protocol; owner-first global C types), step 5 (acceptance, section 8).
+- STEP 2 DONE (2d1a9131c: 2g-2i; earlier commits as listed above).
+- STEP 3 LANDED (verified: c_oracle identical vs 2d1a9131c, 286 + 35; compile_stdlib 610/0;
+  test_import_cycle_sigs PASS including the annotated `label`/`pair` cases). Contents:
+  * `funcs_shared.annotated_return_ctype(gen, fn_node)`: the one annotated-return routine. Used by
+    gen_func (emit_funcs) and `_resolved_export_entry` (funcs_shared). NOT yet used by
+    module_gen's all-functions loop (~line 13180, its ordering differs; to consolidate next).
+  * `FnSummary.node`, `Solution.definition`, `Solution.is_annotated`.
+  * `_early_return_decision` decides an annotated definer by `annotated_return_ctype` (ledger suffix
+    ` annotated`).
+  * `_return_disagreement(frozen, measured)` (same | refined | weak | conflict) in emit_funcs, with its
+    table in the docstring; the record path logs refined/weak/conflict lines.
+  * test_import_cycle_sigs.py: annotated `label -> str` and `pair -> tuple[str, str]` in the cycle.
+  * STILL OPEN in step 3: a unit test of `_return_disagreement` over its table (design 6); and
+    module_gen's all-functions loop (~line 13180) still computes its own annotated return.
+- STEP 4 (not started): ClosureBuilder request/provide protocol (no stored callables), owner-first
+  global C types (backend), regression test for the global homonym.
+- STEP 5 (not started): acceptance (section 8): closure run (2.1) and the doc updates of section 9.
 - Tools: `tools/tsolve_why.py --classify|--shadow|--undecided LEDGER`. `--fn` and `--undecidable`
   (section 2.6, need the solved program) are not written yet.
 - How to verify each step: `python3 test_tsolve.py`; `python3 tools/c_oracle.py check --base <last

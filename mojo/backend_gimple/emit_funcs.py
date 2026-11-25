@@ -2562,9 +2562,10 @@ def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> str:
     key = _pair_key(qualifier, bare_name)
     frozen = gen._tsolve_frozen.get(key)
     if frozen is not None:
-        if frozen != ctype:
-            _tsolve_log(gen, 'conflict:' + qualifier + '.' + bare_name,
-                        'conflict ' + qualifier + '.' + bare_name
+        kind = _return_disagreement(frozen, ctype)
+        if kind != 'same':
+            _tsolve_log(gen, kind + ':' + qualifier + '.' + bare_name,
+                        kind + ' ' + qualifier + '.' + bare_name
                         + ' early=' + frozen + ' measured=' + ctype)
         return frozen
     store[key] = ctype
@@ -2655,8 +2656,15 @@ def _early_return_decision(gen, qualifier: str, bare_name: str):
     # mangled `a_make_<hash>`) is not a definition, so there is nothing to decide.
     if not sol.knows(path, bare_name):
         return None
-    ctype = sol.ret_ctype(gen, path, bare_name)
     key = _pair_key(qualifier, bare_name)
+    if sol.is_annotated(path, bare_name):
+        # An annotated return is a fact: the definer's own routine answers it (4.4).
+        definition = sol.definition(path, bare_name)
+        ctype = annotated_return_ctype(gen, definition) if definition is not None else None
+        suffix = ' annotated'
+    else:
+        ctype = sol.ret_ctype(gen, path, bare_name)
+        suffix = ''
     if ctype is None:
         _tsolve_log(gen, 'undecided:' + qualifier + '.' + bare_name,
                     'undecided ' + qualifier + '.' + bare_name
@@ -2665,8 +2673,33 @@ def _early_return_decision(gen, qualifier: str, bare_name: str):
     gen._home_def_return_types[key] = ctype
     gen._tsolve_frozen[key] = ctype
     _tsolve_log(gen, 'early:' + qualifier + '.' + bare_name,
-                'early ' + qualifier + '.' + bare_name + ' ' + ctype)
+                'early ' + qualifier + '.' + bare_name + ' ' + ctype + suffix)
     return ctype
+
+
+def _return_disagreement(frozen: str, measured: str) -> str:
+    """How a frozen early return ctype and the definer's measured one differ
+    (bugs/GIR_type_solver_precision.md, 4.5):
+      same     -- identical;
+      refined  -- the frozen answer is a pointer or `_Bool` and the measured one the boxed
+                  word `int64_t`: the solver knew more than the backend (allowed, listed);
+      weak     -- the frozen answer is the boxed word and the measured one a pointer or
+                  `_Bool`: the solver lost a type the backend knew (must be 0);
+      conflict -- anything else (two pointer types, a word or pointer against `double`,
+                  `void` against a value): a miscompile risk (must be 0).
+    A boxed word and a pointer are representation-compatible (`mojo_box_word` converts)."""
+    if frozen == measured:
+        return 'same'
+    if frozen == 'int64_t' and _is_boxable_ctype(measured):
+        return 'weak'
+    if measured == 'int64_t' and _is_boxable_ctype(frozen):
+        return 'refined'
+    return 'conflict'
+
+
+def _is_boxable_ctype(ctype: str) -> bool:
+    """`_Bool` or a pointer: a value the runtime boxes into the boxed word."""
+    return ctype == '_Bool' or ctype.endswith(' *')
 
 
 def _tsolve_log(gen, dedupe_key: str, line: str) -> None:
@@ -4274,21 +4307,10 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
 
     # Determine return type: annotation takes priority; infer if absent.
     if node.return_type is not None:
-        ret_type = gen._resolve_type(node.return_type)
         # The SAME body-sensitive decision the struct-method definition
-        # pass makes below (`_gen_struct_method`): a `-> Tuple[...]` return
-        # whose body builds the tuple as a RUNTIME (list-backed) tuple
-        # literal returns `MojoList *`, not the synthesized by-value
-        # struct — without this this definition pass overwrites the
-        # signature pass's `MojoList *` back into func_return_types, the
-        # prototype declares a struct return, and the typedef is never
-        # emitted (`unknown type name 'MojoTuple_...'`; measured 2026-10-21
-        # part 4 integration on `split`'s `-> Tuple[String, String]`).
-        if (isinstance(ret_type, str)
-                and ret_type.startswith('MojoTuple_')
-                and not _body_builds_struct_tuple(
-                        getattr(node, 'body', None))):
-            ret_type = 'MojoList *'
+        # pass makes below (`_gen_struct_method`); one routine for both
+        # (annotated_return_ctype, bugs/GIR_type_solver_precision.md, 4.4).
+        ret_type = annotated_return_ctype(gen, node)
     else:
         # Seed any local holding a closure VALUE (`var f = inner`) so
         # `return f` infers the closure's real MojoBoundMethod*/void*

@@ -620,6 +620,7 @@ class _Summarizer:
 
     def _new_fn(self, path: str, name: str, cls: str, node, key: str, names: dict) -> FnSummary:
         fs = FnSummary(key, path, name, cls)
+        fs.node = node
         # A staticmethod or classmethod is an ordinary function with no receiver, or with
         # `cls` pinned to the class; any other decorator is not modelled (4.2e).
         if cls and len(node.decorators) == 1 and node.decorators[0] in ('staticmethod', 'classmethod'):

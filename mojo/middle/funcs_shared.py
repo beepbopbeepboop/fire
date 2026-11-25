@@ -896,18 +896,8 @@ def _resolved_export_entry(gen, module: str, name: str, info):
         return info
     _ret = _as_str(info.get('c_return_type') or 'int64_t')
     if _fn.return_type:
-        _ret = gen._resolve_type(_fn.return_type)
-        if (isinstance(_ret, str) and _ret.startswith('MojoTuple_')
-                and not _body_builds_struct_tuple(
-                        getattr(_fn, 'body', None))):
-            # The same body-sensitive decision the defining unit's own
-            # resolution makes (see module_gen's all-functions loop): a
-            # `-> Tuple[...]` return built as a RUNTIME (list-backed) tuple
-            # literal is a `MojoList *`, not the synthesized by-value struct
-            # — the re-emitted extern must agree with the instance TU's
-            # prototype (measured 2026-10-21 part 4 integration on
-            # `split`'s `-> Tuple[String, String]`).
-            _ret = 'MojoList *'
+        # The definer's own answer (see annotated_return_ctype).
+        _ret = annotated_return_ctype(gen, _fn)
     _pts = gen._signature_ctypes(_fn.params, _fn)
     _cparams = []
     for _i, _cpt in enumerate(_pts):
@@ -1172,6 +1162,19 @@ def register_module_member_function(gen, module_name: str, member_name: str,
     else:
         _misses[_miss_key] = sub_ref
     return sub_ref, _raw
+
+
+def annotated_return_ctype(gen, fn_node) -> str:
+    """The C return type of an ANNOTATED function, as its definer publishes it
+    (bugs/GIR_type_solver_precision.md, 4.4): the annotation resolved by the backend, except a
+    `MojoTuple_*` whose body builds a RUNTIME (list-backed) tuple literal is `MojoList *` (the
+    by-value struct is only for a body that builds the struct). An importer's early decision and
+    the definer's own record both call this, so the two cannot disagree by construction."""
+    ret = gen._resolve_type(fn_node.return_type)
+    if (isinstance(ret, str) and ret.startswith('MojoTuple_')
+            and not _body_builds_struct_tuple(getattr(fn_node, 'body', None))):
+        return 'MojoList *'
+    return ret
 
 
 def sanitize_module_qualifier(gen, q) -> str:
