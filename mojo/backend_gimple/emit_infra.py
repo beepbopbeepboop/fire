@@ -1908,6 +1908,10 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
 
     _walk_func_stmts(stmts, _collect, into_defs=True)
 
+    # abspath of a dotted project module -> the qualifier its definer emits
+    # (`_resolve_module` fills it; `_register_global` reads it for a home path).
+    _spelled_quals: dict[str, str] = {}
+
     def _resolve_module(mod):
         # `_as_str`: a bare `.module` FIELD read used unguarded below in
         # string concatenation (`mod + '.py'`) and as a resolver
@@ -1930,8 +1934,10 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
         # `load_module`/`resolve_module_path` rather than relying on the
         # try/except below, which (see the comment above) does not
         # reliably catch a raised exception on the compiled backend.
+        _from_sibling = False
         if _is_py_sibling or not _mlmod.can_resolve_module_path(mod):
             exports, qual = gen._local_sibling_module_exports(mod)
+            _from_sibling = True
         else:
             try:
                 exports = gimple_ctypes.load_module(mod)
@@ -1941,6 +1947,20 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
                     qual = _mlmod.module_name_for_path(_imp_path)
             except Exception:
                 exports, qual = gen._local_sibling_module_exports(mod)
+                _from_sibling = True
+        # A dotted PROJECT module (`from mojo.middle.types import N`) is
+        # compiled under its own spelling, so its definer emits the accessor
+        # as `<spelling>__mojo_global_get_N` (`module_gen`: `safe_name`), not
+        # under the file's basename that `module_name_for_path` answers
+        # (`types`; two project files may share one). The same remap a free
+        # function's qualifier takes (`funcs_shared.sanitize_module_qualifier`) makes the
+        # extern name the definer's, so the read links.
+        if exports and qual and _from_sibling and '.' in mod and not mod.startswith('.'):
+            _qkey = msh.module_qualifier(mod)
+            qual = msh.module_qualifier(gen._inline_module_qualifiers.get(_qkey, _qkey))
+            _qpath = gen._parsed_import(mod)[0]
+            if _qpath:
+                _spelled_quals[os.path.abspath(_qpath)] = qual
         if (not exports or not qual):
             # Self-host bootstrap: `from gimple_codegen import _C_RESERVED_
             # FUNCS` names a sibling `.py` compiler module that neither
@@ -2011,7 +2031,8 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
         _hp = info.get('home_module_path')
         if _hp:
             import module_loader as _mlmod_g
-            _home_qual = _mlmod_g.module_name_for_path(_hp) or qual
+            _home_qual = (_spelled_quals.get(os.path.abspath(_hp))
+                          or _mlmod_g.module_name_for_path(_hp) or qual)
         accessor_csym = (f'{gimple_ctypes._c_field_name(_home_qual)}__mojo_global_get_'
                          f'{gimple_ctypes._c_field_name(name)}')
         guard = gimple_ctypes._stub_guard_name(accessor_csym)

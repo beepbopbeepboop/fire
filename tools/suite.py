@@ -1908,6 +1908,11 @@ test('selfhost-struct-layout-map',
      desc='every field declared in fire_compiler.py has a row in the '
           'hardcoded struct_field_types map in module_gen.py, so the emitted '
           'self-host C struct defines every member the closure reads')
+test('dotted-module-global-accessor',
+     [PY, 'test_dotted_module_global_accessor.py'], mem='small',
+     desc='a module global read through a dotted project import links: the '
+          'extern accessor is named after the definer\'s spelling, not the '
+          'file basename (mojoc/selfhost undefined *__mojo_global_get_*)')
 test('selfhost-sig-types-declared',
      [PY, 'test_selfhost_sig_types_declared.py'], mem='tiny',
      desc='every struct type a _SELFHOST_SIGS row names is declared in a '
@@ -5160,7 +5165,8 @@ BUCKETS = {
               # without a row is dropped from the struct the next reader of
               # it makes gcc reject, so the everyday gate has to see the next
               # one (bug doc deleted with the fix, 2026-11-21).
-              'selfhost-struct-layout-map', 'selfhost-sig-types-declared'],
+              'selfhost-struct-layout-map', 'selfhost-sig-types-declared',
+              'dotted-module-global-accessor'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus
