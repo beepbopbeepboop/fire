@@ -146,3 +146,11 @@ and `mojo/backend_gimple/elab_intu.py:4166` and `:4169` (`_nested = (_nested or 
 closure TU is the oracle for them. The same check also reports the `mojoc` and `selfhost` gate
 failures under `make gate` (`WordFacts` unknown type, in a separate build path), which this family
 does not explain.
+- 2026-11-25: red check for the fix. Two reductions were built on the unchanged tree with
+  `fire.py build`, and neither produced the gcc error: (a) the `split`/`kept or None` shape from
+  the test above prints `[1, 2, 3, 2, 3]`; (b) a `hoist()` returning `(kept, hoisted, {})` with
+  `hoisted` built by `append` prints `[1, 2, 3] 0`, matching CPython. So neither shape gets a
+  may-box slot on this tree, and the test above is not a valid red test. Next: reduce from the
+  real call (`coro.py:7713`) by dumping its generated C (`fire.py build` on `mojo/middle/coro.py`'s
+  `lower` path) and checking which unpacked slot is `int64_t` there, instead of guessing shapes.
+  No code has changed for this bug yet.
