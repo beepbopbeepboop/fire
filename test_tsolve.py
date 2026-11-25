@@ -13,6 +13,7 @@ import unittest
 import fire_compiler as N
 import ast_rewriter
 from mojo.tsolve import lower, sty, solve_closure
+from mojo.tsolve.summarize import ModuleFile
 from mojo.tsolve.sty import (BOT, BOOL, DYN, FLOAT, FUNC, INT, NONE, STR,
                              dict_of, from_annotation, join, list_of, set_of,
                              struct_of, tuple_of)
@@ -28,16 +29,16 @@ class _Files:
     def __init__(self, files):
         self.files = files  # {ref: source}
 
-    def load(self, ref, importer):
+    def resolve(self, ref, importer):
         if ref not in self.files:
             return None
-        return ('/t/' + ref + '.py', _parse(self.files[ref]))
+        return ModuleFile('/t/' + ref + '.py', _parse(self.files[ref]))
 
 
 def _solve(files, root='main'):
     f = _Files(files)
     stmts = _parse(files[root])
-    return solve_closure('/t/' + root + '.py', stmts, f.load)
+    return solve_closure('/t/' + root + '.py', stmts, f)
 
 
 def _ret(files, name, mod='main', root='main'):

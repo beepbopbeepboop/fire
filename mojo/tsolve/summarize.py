@@ -443,10 +443,28 @@ def _add_ann(out: dict, name: str, ann) -> None:
             out[name] = None
 
 
+class ModuleFile:
+    """A module the loader found: its abspath and its parsed statements."""
+
+    def __init__(self, path: str, stmts: list):
+        self.path: str = path
+        self.stmts: list = stmts
+
+
+class _Pending:
+    """A module still to be collected (breadth-first queue entry)."""
+
+    def __init__(self, path: str, stmts: list):
+        self.path: str = path
+        self.stmts: list = stmts
+
+
 class _Summarizer:
-    def __init__(self, root_path: str, root_stmts: list, load):
+    def __init__(self, root_path: str, root_stmts: list, loader):
         self.prog: Program = Program()
-        self.load: object = load
+        # The loader is an OBJECT with a `resolve(ref, importer)` method, never a stored
+        # callable (doc/GIR.md rule 2; bugs/GIR_type_solver_precision.md, 4.6).
+        self.loader: object = loader
         self.root_path: str = root_path
         self.root_stmts: list = root_stmts
         self.mods: dict = {}         # abspath -> _Mod
@@ -459,12 +477,12 @@ class _Summarizer:
     # ── phase 1: the closure ────────────────────────────────────────────
 
     def collect(self) -> None:
-        queue = [(self.root_path, self.root_stmts)]
+        queue = [_Pending(self.root_path, self.root_stmts)]
         seen: dict = {self.root_path: True}
         head = 0
         while head < len(queue):
-            path = queue[head][0]
-            stmts = queue[head][1]
+            path = queue[head].path
+            stmts = queue[head].stmts
             head += 1
             mod = _Mod(path, stmts)
             self.mods[path] = mod
@@ -475,15 +493,14 @@ class _Summarizer:
                 for ref in _import_refs(node):
                     if ref in mod.imports:
                         continue
-                    res = self.load(ref, path)
+                    res = self.loader.resolve(ref, path)
                     if res is None:
                         mod.imports[ref] = ''
                         continue
-                    apath = res[0]
-                    mod.imports[ref] = apath
-                    if apath not in seen:
-                        seen[apath] = True
-                        queue.append((apath, res[1]))
+                    mod.imports[ref] = res.path
+                    if res.path not in seen:
+                        seen[res.path] = True
+                        queue.append(_Pending(res.path, res.stmts))
 
     # ── phase 2: declarations ───────────────────────────────────────────
 
@@ -1589,12 +1606,12 @@ def _param_slot(fs: FnSummary, name: str) -> int:
     return -1
 
 
-def summarize_closure(root_path: str, root_stmts: list, load) -> Program:
+def summarize_closure(root_path: str, root_stmts: list, loader) -> Program:
     """The summary of the import closure of `root_stmts` (bugs/GIR_type_solver.md, 2.3).
 
-    `load(ref, importer_path)` returns `(abspath, stmts)`, or None for a module
-    that is not in the closure (an external one)."""
-    s = _Summarizer(root_path, root_stmts, load)
+    `loader.resolve(ref, importer_path)` returns a ModuleFile, or None for a module that is
+    not in the closure (an external one)."""
+    s = _Summarizer(root_path, root_stmts, loader)
     s.collect()
     s.declare()
     s.summarize()

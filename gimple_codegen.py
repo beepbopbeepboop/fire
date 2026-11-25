@@ -6792,7 +6792,7 @@ def _solve_import_closure(gen, filename: str, stmts: list):
     from mojo.tsolve import solve_closure
     from mojo.middle.funcs_shared import ClosureLoader
     root = os.path.abspath(filename) if filename else ''
-    return solve_closure(root, stmts, ClosureLoader(gen).load)
+    return solve_closure(root, stmts, ClosureLoader(gen))
 
 
 def _write_tsolve_ledger(gen) -> None:

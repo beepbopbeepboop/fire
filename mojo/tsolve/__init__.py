@@ -81,7 +81,8 @@ class Solution:
         return lower.ret_ctype(gen, t)
 
 
-def solve_closure(root_path: str, root_stmts: list, load) -> Solution:
-    prog = _summarize.summarize_closure(root_path, root_stmts, load)
+def solve_closure(root_path: str, root_stmts: list, loader) -> Solution:
+    """`loader` is an object whose `resolve(ref, importer)` returns a ModuleFile or None."""
+    prog = _summarize.summarize_closure(root_path, root_stmts, loader)
     _solve.solve(prog)
     return Solution(prog)

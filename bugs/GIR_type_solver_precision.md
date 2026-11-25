@@ -727,8 +727,19 @@ Closure acceptance: section 8.
   * test_import_cycle_sigs.py: annotated `label -> str` and `pair -> tuple[str, str]` in the cycle.
   * STILL OPEN in step 3: a unit test of `_return_disagreement` over its table (design 6); and
     module_gen's all-functions loop (~line 13180) still computes its own annotated return.
-- STEP 4 (not started): ClosureBuilder request/provide protocol (no stored callables), owner-first
-  global C types (backend), regression test for the global homonym.
+- STEP 4 IN PROGRESS.
+  * DONE (verified: c_oracle identical vs bacc2f396, 286 + 35; compile_stdlib 610/0; cycle PASS;
+    test_tsolve 74/0): the loader is an OBJECT with `resolve(ref, importer) -> ModuleFile | None`
+    (summarize.ModuleFile, `_Pending`); `solve_closure(root, stmts, loader)`; no stored callable,
+    no tuple results. DEVIATION from 4.6: no request/provide loop; a method call on the loader object
+    meets the same rule (no closures, no stored callables) with less code.
+  * NOT DONE: owner-first global C types (4.6, backend). Measured reason to do it: `sty.py`'s
+    `BOOL`/`INT` globals get a cast to `mojo/ir/types.py`'s `Type` (2 of the 12 gcc errors). The
+    emission path is `gen._global_var_types` (bare name, first writer wins) read by the store of an
+    annotated top-level assignment; the fix must look up `_own_global_var_types` first (see
+    emit_exprs `_lie_global_window`). Regression test: two modules each with a module-level
+    `X: <own class> = <ctor>()`, one importing the other; build, run, compare with CPython.
+    Find the store emitter first (grep the generated `(Type *)` cast in a closure TU).
 - STEP 5 (not started): acceptance (section 8): closure run (2.1) and the doc updates of section 9.
 - Tools: `tools/tsolve_why.py --classify|--shadow|--undecided LEDGER`. `--fn` and `--undecidable`
   (section 2.6, need the solved program) are not written yet.

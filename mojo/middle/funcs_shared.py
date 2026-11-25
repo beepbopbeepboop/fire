@@ -33,6 +33,7 @@ import mojo.middle.coro as _coro
 # NAME` cannot, is in `mojo/middle/methods_shared.py`'s header comment.
 import mojo.middle.types as gimple_ctypes
 from mojo.middle.module_parse import parse_module_file, parse_module_source
+from mojo.tsolve.summarize import ModuleFile
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 # NOT `from mojo.middle.module_shared import module_qualifier` here:
@@ -3106,10 +3107,11 @@ class ClosureLoader:
     def __init__(self, gen):
         self.gen: object = gen
 
-    def load(self, ref: str, importer_path: str):
+    def resolve(self, ref: str, importer_path: str):
+        """A ModuleFile for `ref` as the compile would load it, or None (external)."""
         for path in self.gen._module_candidate_paths_from(ref, importer_path):
             if os.path.exists(path):
                 if path.endswith('.mojoc'):
                     return None
-                return (os.path.abspath(path), parse_module_file(path))
+                return ModuleFile(os.path.abspath(path), parse_module_file(path))
         return None
