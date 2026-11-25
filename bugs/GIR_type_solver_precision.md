@@ -770,6 +770,14 @@ Closure acceptance: section 8.
     `_own_overlay_global_ctype` returns the owner's own type instead of the shared one; (3) a
     regression test (two modules, each with `X: <own class> = <ctor>()`, one importing the other;
     build, run, compare with CPython).
+    (4) FINDING (2026-11-24, later): the field declaration loop (module_gen.py ~6995,
+    `_gmp_fill_missing_global_decls`) reads `_own_overlay_global_ctype` FIRST, then
+    `_global_c_decl_types`, then `_global_var_types`; the store reads `_global_dst_ctype`, which
+    reads the same owner overlay first, then `_global_c_decl_types`, then `_global_var_types`.
+    Both read the same chain, so they can only disagree if the shared dicts change BETWEEN the field
+    declaration and the store (or if the field is declared before `BOOL`'s own conclusion exists).
+    The next step is to log both reads for `BOOL` (one-line temporary print in each, closure run) to
+    see which moment differs, before changing any rule.
 - STEP 5 (not started): acceptance (section 8): closure run (2.1) and the doc updates of section 9.
 - Tools: `tools/tsolve_why.py --classify|--shadow|--undecided LEDGER`. `--fn` and `--undecidable`
   (section 2.6, need the solved program) are not written yet.
