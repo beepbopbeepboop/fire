@@ -30,3 +30,20 @@ Found 2026-11-24 by `make gate` on a clean export of `4a4dca532` (306 jobs: 150 
   here: if they fail there too, it predates the session and is not caused by the solver work.
 - Then: reproduce `WordFacts` as an oracle census (the closure gcc census with a `WordFacts` count),
   and find which generated module refers to `WordFacts *` without a typedef.
+
+## Pre-session result (2026-11-24, on `91140cc58`, the session's starting commit)
+
+Run: `python3 tools/suite.py -j1 mojoc selfhost` in a clean export of `91140cc58`.
+
+- BOTH jobs still FAIL there: `mojoc` exit 2 (819 s, peak 13.5 GB; memcap `child exit 1`), `selfhost`
+  `self-host compile/link regressed`.
+- The `WordFacts` error is NOT in that run. `WordFacts` appears only as an unused-function warning
+  (`_mojo_elem_repr_WordFacts`). So the `unknown type name 'WordFacts'` failure seen at `4a4dca532` is
+  not what the old commit fails on.
+- The old commit's `mojoc` failure is a different, not-yet-identified error; the captured log has no
+  `file:line:col: error:` line for it (the failing `child exit 1` is after the gcc warnings).
+
+Conclusion: the gate's `selfhost` / `mojoc` failures are NOT new with this session's `WordFacts`
+change, but the specific error changed. Both failures exist before the session. Next: identify the
+`child exit 1` error in `mojoc` on `91140cc58` (run the mojoc job's command directly, not through
+memcap, and keep its stderr), and separately the `WordFacts` error at HEAD.
