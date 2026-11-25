@@ -1908,6 +1908,11 @@ test('selfhost-struct-layout-map',
      desc='every field declared in fire_compiler.py has a row in the '
           'hardcoded struct_field_types map in module_gen.py, so the emitted '
           'self-host C struct defines every member the closure reads')
+test('selfhost-sig-types-declared',
+     [PY, 'test_selfhost_sig_types_declared.py'], mem='tiny',
+     desc='every struct type a _SELFHOST_SIGS row names is declared in a '
+          'compiler-source module that does not define it (WordFacts: the '
+          'mojoc / stdlib-dylib `unknown type name` failure)')
 test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'test_runtime_diff.py'],
@@ -5155,7 +5160,7 @@ BUCKETS = {
               # without a row is dropped from the struct the next reader of
               # it makes gcc reject, so the everyday gate has to see the next
               # one (bug doc deleted with the fix, 2026-11-21).
-              'selfhost-struct-layout-map'],
+              'selfhost-struct-layout-map', 'selfhost-sig-types-declared'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus
