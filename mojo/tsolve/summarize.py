@@ -291,6 +291,14 @@ def _fstring_exprs(body: str):
         cut = -1
         while j < n:
             c = body[j]
+            if c == '"' or c == "'":
+                # A string literal inside the field: its text is not a bracket, a format
+                # spec or the field's end, so skip it whole.
+                close = body.find(c, j + 1)
+                if close < 0:
+                    return None
+                j = close + 1
+                continue
             if c == '}' and depth == 0:
                 break
             if c == '(' or c == '[' or c == '{':

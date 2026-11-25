@@ -712,8 +712,8 @@ Closure acceptance: section 8.
   3. DONE: `tools/tsolve_why.py --fn NAME ROOT [--path PART]` (flows into a return, origin, solved value)
      and `--undecidable ROOT` (grouped by summarizer site). Measured on fire.py at this commit:
      66 undecidable of 7948 functions: 41 declared (decorator, generator, async, overload), 22 `yield`
-     expressions (by design), 3 f-string fields the expression parser could not read (open: find the
-     field shape and extend `_fstring_exprs`).
+     expressions (by design), 3 f-string fields (FIXED: quoted text inside a field is skipped by
+     `_fstring_exprs`; now 63 of 7948 undecidable, all by design).
   4. RECORDED DEVIATION: the design's request/provide loop (4.6) was replaced by a loader object with
      `resolve` (commit 77d06f327), which meets the same rule.
   5. OPEN BUGS (bugs/ docs, not this doc): CODEGEN_instance_global_attribute_read_raises,

@@ -339,6 +339,14 @@ class Origins(unittest.TestCase):
         src = 'def f():\n    class K:\n        var n: Int\n    return 1\n'
         self.assertEqual(_ret({'main': src}, 'f'), 'int')
 
+    def test_an_fstring_field_with_quoted_colon_and_bracket_is_decidable(self):
+        # Quoted text inside a field is not a format spec (`:`) and not a bracket (`[`).
+        src = ('def f(x: str):\n'
+               '    return f"{x.split(\'[\')[0]}{\': \' + x if x else \'\'}"\n'
+               'def g():\n    return f("a")\n')
+        self.assertEqual(_ret({'main': src}, 'g'), 'str')
+        self.assertIsNotNone(_solve({'main': src}).ret_sty('/t/main.py', 'f'))
+
     def test_why_none_names_the_reason(self):
         self.assertEqual(_solve({'main': 'def f():\n    return 1\n'}).why_none('/t/main.py', 'f'), '')
         self.assertEqual(_solve({'main': 'def f() -> Int:\n    return 1\n'}).why_none('/t/main.py', 'f'),
