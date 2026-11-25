@@ -47,3 +47,22 @@ Conclusion: the gate's `selfhost` / `mojoc` failures are NOT new with this sessi
 change, but the specific error changed. Both failures exist before the session. Next: identify the
 `child exit 1` error in `mojoc` on `91140cc58` (run the mojoc job's command directly, not through
 memcap, and keep its stderr), and separately the `WordFacts` error at HEAD.
+
+## Direct `mojoc` builds (2026-11-24): the fix measured, and the gate difference
+
+The gate's `mojoc` job runs `$(PYTHON) fire.py build fire.py -O2 -g0 -o mojoc` under memslot. The same
+command was run directly, with `/opt/homebrew/bin/python3` (the same interpreter the gate's PATH resolves):
+
+- `91140cc58` (session start): 41 gcc error lines, mostly `assignment to 'int64_t' from 'MojoList *' /
+  'char *' makes integer from pointer` in `emit_methods.py` (the import-cycle back-edge family).
+  Exit 1.
+- `4a4dca532` (HEAD of the gate export): 3 gcc error lines, all `invalid operands to binary + (have
+  'MojoList *' and 'double')` (coro.py:7714, elab_intu.py:4166/4169; the out-of-scope family). Exit 1.
+  (A fourth match was a docstring echo, not a compile error.)
+
+So the session's solver work removed the back-edge family from `mojoc` (41 -> 3). The `WordFacts`
+unknown-type errors reported by the GATE's `mojoc` job did NOT reproduce in the direct build. The gate
+job's errors start right after its `memcap: mojoc` header, so the gate builds `mojoc` in a different
+environment from the direct command. Next: diff the suite's environment for the `mojoc` job against the
+shell (suite.py's env setup for `driver='make'` jobs, and the memslot wrapper), and rerun the gate job
+alone with that environment.
