@@ -296,7 +296,8 @@ def _assign_target(gen, tgt, et, ev):
             # module GLOBALS: `_write_dest` routes the store to the globals
             # struct, and a `_toplevel` local of the same name would only
             # shadow nothing. The value is coerced to the field's own C type.
-            _gdt = gen._global_c_decl_types.get(tgt.name) or gen._global_var_types[tgt.name]
+            # The owner-first destination type (one rule for every store; see gimple_codegen).
+            _gdt = gen._global_dst_ctype(tgt.name)
             gen._safe_coerce_emit(et, _gdt, ev, gen._write_dest(tgt.name))
             return
         if tgt.name not in gen.var_types:
