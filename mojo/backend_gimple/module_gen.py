@@ -20768,6 +20768,12 @@ def gen_module_impl(self, stmts: list):
                             _known.append(_qt)
         return out
 
+    # The struct names this module defines at top level: an annotation naming one is a
+    # struct-pointer type for the global it annotates (see the bare-name branch below).
+    _module_struct_names = set()
+    for _sn_stmt in _phase17_stmts:
+        if isinstance(_sn_stmt, StructDef):
+            _module_struct_names.add(_as_str(_sn_stmt.name))
     for _scan_stmt in _phase17_stmts:
         # "_phase17_stmts" deliberately spans this module's OWN top-level
         # statements AND every inline-compiled imported module's (the SHARED
@@ -20800,7 +20806,16 @@ def gen_module_impl(self, stmts: list):
             _pre_declared_globals.add(_gname)
             if _gname not in self._global_to_module and _scan_own:
                 self._global_to_module[_gname] = _phase17_mod
-            _phase17_infer_global_type(_gname, _scan_stmt.value, _scan_own)
+            # `BOX: Box = Box(1)`: the annotation names a struct this module defines, so the
+            # global IS a `Box *`, whether or not the call's inference can see the struct yet
+            # (its registration may come later in this pass). Without this the global has no
+            # type here, the module-attribute read `mod.BOX` falls back to a dynamic getattr,
+            # and that fails at run time (the module-global attribute-read bug).
+            _ann_name = _scan_stmt.type_ann
+            if _ann_name and _ann_name in _module_struct_names:
+                _gmh_phase17_set_gtype(self, _gname, _ann_name + ' *', _scan_own)
+            else:
+                _phase17_infer_global_type(_gname, _scan_stmt.value, _scan_own)
         elif isinstance(_scan_stmt, MultiAssignStmt):
             for _tgt in _scan_stmt.targets:
                 if not isinstance(_tgt, IdentExpr):
