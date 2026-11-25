@@ -1908,6 +1908,11 @@ test('selfhost-struct-layout-map',
      desc='every field declared in fire_compiler.py has a row in the '
           'hardcoded struct_field_types map in module_gen.py, so the emitted '
           'self-host C struct defines every member the closure reads')
+test('uncompiled-marker-alias',
+     [PY, 'test_uncompiled_marker_alias.py'], mem='tiny',
+     desc='a call through `import a.b as alias` of a COMPILED module is not '
+          'lowered to a "module not compiled" raise (the self-hosted '
+          'compiler died on its first compile)')
 test('sys-maxsize-value',
      [PY, 'test_sys_maxsize_value.py'], mem='small',
      desc='`sys.maxsize` read as a value compiles (the self-hosted compiler '
@@ -5176,7 +5181,7 @@ BUCKETS = {
               # one (bug doc deleted with the fix, 2026-11-21).
               'selfhost-struct-layout-map', 'selfhost-sig-types-declared',
               'dotted-module-global-accessor', 'importer-param-forwarder',
-              'sys-maxsize-value'],
+              'sys-maxsize-value', 'uncompiled-marker-alias'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus

@@ -1832,6 +1832,15 @@ def _uncompiled_module_marker(gen, node) -> str:
         return cache[name]
     _info = (gen.imported_symbols or {}).get(name)
     _mod = _as_str(_info.get('module') or '') if isinstance(_info, dict) else ''
+    # The check above asks about the NAME the call is spelled with, which for
+    # `import mojo.middle.import_ambiguity as _import_ambiguity` is the alias, not
+    # the module. `_compiled_modules` records module spellings, so the alias's
+    # MODULE is what says whether its code was emitted. Without this the call in
+    # `module_gen` raised `module 'mojo.middle.import_ambiguity' is not compiled
+    # into this binary` in the self-hosted compiler on its first compile.
+    if _mod and _mod in (getattr(gen, '_compiled_modules', None) or ()):
+        cache[name] = ''
+        return ''
     _resolvable = True
     if _mod:
         try:
