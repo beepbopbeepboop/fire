@@ -167,3 +167,17 @@ does not explain.
   NOT DONE: the red test. Both reductions listed above build and run correctly on the unchanged
   tree, so no reduced program yet shows the defect. Until one does, this doc stays open; the
   remaining step is a reduction that fails before the fix (from the callee's actual list return).
+- 2026-11-25 (red test, second round): three more reductions built on the PRE-FIX export
+  (`6b825b6c4`) all compile with no gcc error and print the CPython answer: (A) a dict-guarded
+  `hoisted.append(d.get(s))` return; (B) a `while` worklist with `meta.get` returning
+  `(stmts, hoisted, meta)`; (C) `hoisted.append(Box(s).v)` returning `(stmts, hoisted, None)`.
+  So a same-module tuple return the solver can type does not reproduce.
+  Solver readout for the real callee (`tools/tsolve_why.py --fn _hoist_nested_async
+  mojo/middle/coro.py`): the return is DECIDED, `tuple[list[dyn], list[struct:FunctionDef],
+  dict[str, dict[str, str]]]`. The defect is therefore in the CALLER: the tuple-unpack
+  (`out, nested_bodies, local_maps = _hoist_nested_async(...)`) reads each slot from the C
+  return (`MojoList *`, read with `mojo_list_get_boxed`) as an unknown-kind word and does not
+  use the solver's slot type. Next step for the red test: find where the tuple-unpack emitter
+  (`emit_stmts`/`stmts_shared` tuple-target path) gives an unpacked name a word type when the
+  callee's solved return is a tuple, and reproduce with a callee in ANOTHER module (the closure
+  is one TU of 137 modules; cross-module calls are the case the small reductions did not cover).
