@@ -704,7 +704,7 @@ Closure acceptance: section 8.
 - Commits on master, in order: c7878b789 (step 1), db2a1cdba (2a), 8bc44e1ed (2b), b5a1cccdf (2c),
   336eff194 (2d), c8bb6578a (2e/2f), 2d1a9131c (2g-2i), bacc2f396 (step 3), 77d06f327 (4a),
   cc532b909 / 0faf3141a / 74e74250f (docs), and the step 4b fix (see the 4b entry).
-- The early-decision bug record (`bugs/GIR_selfhost_extern_return_types.md`) was deleted with its fix.
+- The import-cycle back-edge bug record (deleted with its fix, 2026-11-24) is no longer in bugs/.
 - Follow-ups that are NOT blocking acceptance (each small and named):
   1. A unit test of `_return_disagreement` over its table (step 3's design item; the function is in
      emit_funcs.py, so the test belongs in a compiler-side test file, not test_tsolve.py).
