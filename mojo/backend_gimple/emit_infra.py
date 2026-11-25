@@ -3248,7 +3248,8 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             aval = _ub
         if (gimple_ctypes.TypeLattice.is_word(atype) and gen._word_may_be_box(aval)
                 and not _is_pointer_view_helper(fname)
-                and not _as_str(fname).startswith(('mojo_', '__mojo_tuple_box_'))):
+                and not rt_call.is_runtime_function(_as_str(fname))
+                and not _as_str(fname).startswith('__mojo_tuple_box_')):
             # A slot read out of a kind-mixed tuple/list arrives as a BOX, and a
             # `None` slot is the shared kind-'n' box. A USER function's
             # parameter has no None word: it is `0` (the same word a `None`

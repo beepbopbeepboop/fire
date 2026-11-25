@@ -1908,6 +1908,16 @@ test('selfhost-struct-layout-map',
      desc='every field declared in fire_compiler.py has a row in the '
           'hardcoded struct_field_types map in module_gen.py, so the emitted '
           'self-host C struct defines every member the closure reads')
+test('runtime-function-not-prefix',
+     [PY, 'test_runtime_function_not_prefix.py'], mem='tiny',
+     desc='"runtime helper" is an rt_sigs lookup, not a `mojo_` prefix: the '
+          'compiler\'s own mojo_middle_* symbols were handed an unconverted '
+          'None box (self-hosted compiler crash under ASLR)')
+test('presence-helpers-annotated',
+     [PY, 'test_presence_helpers_annotated.py'], mem='tiny',
+     desc='the presence-bit helpers take an annotated StructDef (an '
+          'unannotated one was a dynamic getattr that killed the '
+          'self-hosted compiler on its first compile)')
 test('uncompiled-marker-alias',
      [PY, 'test_uncompiled_marker_alias.py'], mem='tiny',
      desc='a call through `import a.b as alias` of a COMPILED module is not '
@@ -5181,7 +5191,8 @@ BUCKETS = {
               # one (bug doc deleted with the fix, 2026-11-21).
               'selfhost-struct-layout-map', 'selfhost-sig-types-declared',
               'dotted-module-global-accessor', 'importer-param-forwarder',
-              'sys-maxsize-value', 'uncompiled-marker-alias'],
+              'sys-maxsize-value', 'uncompiled-marker-alias',
+              'presence-helpers-annotated', 'runtime-function-not-prefix'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus

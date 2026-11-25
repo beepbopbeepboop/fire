@@ -36,6 +36,17 @@ _SCALAR_CLASS: dict[str, str] = {
 }
 
 
+def is_runtime_function(fname: str) -> bool:
+    """Is `fname` declared by a runtime header (`rt_sigs.RT_SIGS`)?
+
+    The question a name PREFIX cannot answer: the compiler's own modules are
+    `mojo/middle/...`, so their C symbols are `mojo_middle_*`,
+    `mojo_backend_gimple_*` and `mojo_tsolve_*`, and `startswith('mojo_')` took
+    them for runtime helpers (which are box-aware and so were handed a
+    `dict.get` None-box unconverted)."""
+    return fname in RT_SIGS
+
+
 def rt_param_types(fname: str) -> list[str]:
     """Parameter C types of runtime function `fname` ('...' marks a variadic
     tail); [] when `fname` is not a runtime function or takes no parameters."""
