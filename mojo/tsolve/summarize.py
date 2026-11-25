@@ -154,31 +154,109 @@ def _terminates(stmts: list) -> bool:
     return False
 
 
-def _target_names(target) -> list:
-    """The names bound by a `for`/comprehension target, or None when it is not
-    a plain name or a tuple of plain names. A target is a string such as `i`,
-    `k, v` or `(i, j)`, or a node."""
-    if isinstance(target, N.IdentExpr):
-        return [target.name]
-    if not isinstance(target, str):
-        return None
-    s = target.strip()
-    if s.startswith('(') and s.endswith(')'):
-        s = s[1:len(s) - 1]
-    names = []
+def _items_of_text(s: str):
+    """The items of a tuple target written as text (`a, *b, (c, d)`): a name, `*name` for a
+    starred one, or a nested list of items. None when a part is not one of those."""
+    items = []
     for part in sty.split_top(s, ','):
-        if part == '':
+        p = part.strip()
+        if p == '':
             continue
-        if not part.isidentifier():
+        if p.startswith('(') and p.endswith(')'):
+            sub = _items_of_text(p[1:len(p) - 1])
+            if sub is None:
+                return None
+            items.append(sub)
+        elif p.startswith('*') and p[1:].strip().isidentifier():
+            items.append('*' + p[1:].strip())
+        elif p.isidentifier():
+            items.append(p)
+        else:
             return None
-        names.append(part)
-    return names
+    return items
 
 
-def _is_tuple_target(target) -> bool:
+def _items_of_nodes(elems: list):
+    """The items of a tuple target given as nodes (see `_items_of_text`)."""
+    items = []
+    for el in elems:
+        if isinstance(el, N.IdentExpr):
+            items.append(el.name)
+        elif isinstance(el, N.UnaryOp) and el.op == '*' and isinstance(el.operand, N.IdentExpr):
+            items.append('*' + el.operand.name)
+        elif isinstance(el, N.TupleExpr):
+            sub = _items_of_nodes(el.elements)
+            if sub is None:
+                return None
+            items.append(sub)
+        else:
+            return None
+    return items
+
+
+def _target_items(target):
+    """The items of a for/assignment target that is a tuple (text or node), else None."""
+    if isinstance(target, N.TupleExpr):
+        return _items_of_nodes(target.elements)
     if isinstance(target, str):
-        return ',' in target
-    return isinstance(target, N.TupleExpr)
+        s = target.strip()
+        if s.startswith('(') and s.endswith(')'):
+            s = s[1:len(s) - 1]
+        return _items_of_text(s)
+    return None
+
+
+def _flatten_items(items: list, out: list) -> None:
+    for it in items:
+        if isinstance(it, str):
+            out.append(it.lstrip('*'))
+        else:
+            _flatten_items(it, out)
+
+
+def _plain_target_name(target):
+    """The name of a plain (non-tuple) target, else None."""
+    if isinstance(target, N.IdentExpr):
+        return target.name
+    if isinstance(target, str):
+        s = target.strip()
+        if s.startswith('(') and s.endswith(')'):
+            s = s[1:len(s) - 1].strip()
+        if ',' not in s and s.isidentifier():
+            return s
+    return None
+
+
+def _target_names(target) -> list:
+    """Every name a for/comprehension target binds, or None when it is not names or tuples
+    of names (bugs/GIR_type_solver_precision.md, 4.2i: nested and starred targets included)."""
+    plain = _plain_target_name(target)
+    if plain is not None:
+        return [plain]
+    items = _target_items(target)
+    if items is None:
+        return None
+    out = []
+    _flatten_items(items, out)
+    return out
+
+
+
+
+def _is_cast_helper(node) -> bool:
+    """A function with one parameter, an annotated return, and a body that (after its
+    docstring) is exactly `return <that parameter>`: `def _as_dict(e: object) -> dict:
+    return e`. Such helpers exist to tell the backend a type; the solver reads the type
+    (bugs/GIR_type_solver_precision.md, 4.2h)."""
+    if len(node.params) != 1 or not node.return_type:
+        return False
+    body = node.body
+    if len(body) > 0 and isinstance(body[0], N.ExprStmt) and isinstance(body[0].value, N.StringLiteral):
+        body = body[1:]
+    if len(body) != 1 or not isinstance(body[0], N.ReturnStmt):
+        return False
+    value = body[0].value
+    return isinstance(value, N.IdentExpr) and value.name == node.params[0][0]
 
 
 def _fstring_body(value: str) -> str:
@@ -342,6 +420,8 @@ def _assigned_names(stmts: list, out: dict) -> None:
 def _name_targets(t, ann, out: dict) -> None:
     if isinstance(t, N.IdentExpr):
         _add_ann(out, t.name, ann)
+    elif isinstance(t, N.UnaryOp) and t.op == '*':
+        _name_targets(t.operand, None, out)
     elif isinstance(t, N.TupleExpr):
         for el in t.elements:
             _name_targets(el, None, out)
@@ -480,7 +560,7 @@ class _Summarizer:
             return
         var = self.prog.new_var(name)
         if ann:
-            self.prog.pin(var, sty.from_annotation(ann, self._names_for(mod)))
+            self.prog.pin_ann(var, ann, self._names_for(mod))
         mod.names[name] = _Binding('var', '', var, '', '')
 
     def _declare_module_fn(self, mod: _Mod, node) -> None:
@@ -517,7 +597,7 @@ class _Summarizer:
             if isinstance(f, N.VarDecl):
                 var = self.prog.new_var(f.name)
                 if f.type_ann:
-                    self.prog.pin(var, sty.from_annotation(f.type_ann, self._names_for(mod)))
+                    self.prog.pin_ann(var, f.type_ann, self._names_for(mod))
                 cs.fields[f.name] = var
         for m in node.methods:
             if isinstance(m, N.FunctionDef):
@@ -562,11 +642,13 @@ class _Summarizer:
             elif pname == 'self' and cls:
                 self.prog.pin(var, sty.DYN)
             elif ptype:
-                self.prog.pin(var, sty.from_annotation(ptype, names))
+                self.prog.pin_ann(var, ptype, names)
         fs.ret = self.prog.new_var(name + '.ret')
+        if not cls and _is_cast_helper(node):
+            fs.cast_ty = sty.from_annotation(node.return_type, names)
         if node.return_type:
             fs.annotated_ret = True
-            self.prog.pin(fs.ret, sty.from_annotation(node.return_type, names))
+            self.prog.pin_ann(fs.ret, node.return_type, names)
         elif not fs.decidable:
             self.prog.pin(fs.ret, sty.DYN)
         return fs
@@ -693,7 +775,7 @@ class _Summarizer:
             else:
                 var = self.prog.new_var(n)
                 if names[n]:
-                    self.prog.pin(var, sty.from_annotation(names[n], self._names_for(scope.mod)))
+                    self.prog.pin_ann(var, names[n], self._names_for(scope.mod))
             scope.locals[n] = _Binding('var', '', var, '', '')
 
     # ── statements ──────────────────────────────────────────────────────
@@ -927,6 +1009,8 @@ class _Summarizer:
             self._bind_local_from_import(scope, st)
         elif isinstance(st, N.FunctionDef):
             self._nested_def(scope, st)
+        elif isinstance(st, N.StructDef):
+            scope.locals[st.name] = _Binding('dyn', '', -1, '', '')
         else:
             self._undecidable(scope)
 
@@ -965,28 +1049,75 @@ class _Summarizer:
                     self._flow(value, v)
         elif isinstance(target, N.SubscriptExpr):
             conts = self._lvalue_vars(scope, target.obj)
-            key = self._term(scope, target.index)
-            if not conts:
-                self._undecidable(scope)
+            if isinstance(target.index, N.SliceExpr):
+                self._slice_parts(scope, target.index)
+                # `x[a:b] = v` extends x with the elements of v.
+                for v in conts:
+                    self._flow(op_term('grow', 'extend', [var_term(v), value]), v)
                 return
+            key = self._term(scope, target.index)
+            # A store into a container that no modelled variable holds (`a[i][j] = v`,
+            # `f()[k] = v`) flows nowhere: no read of a modelled name can see it. This is the
+            # alias limitation, R2 in bugs/GIR_type_solver_precision.md.
             for v in conts:
                 self._flow(op_term('grow', 'setitem', [var_term(v), key, value]), v)
         elif isinstance(target, N.TupleExpr):
-            for i in range(len(target.elements)):
-                self._assign(scope, target.elements[i], op_term('slot', str(i), [value]))
+            self._assign_seq(scope, target.elements, value)
+        elif isinstance(target, N.SliceExpr):
+            # `x[a:b] = v`, parsed with the slice as the target itself (4.2i).
+            self._slice_parts(scope, target)
+            for v in self._lvalue_vars(scope, target.obj):
+                self._flow(op_term('grow', 'extend', [var_term(v), value]), v)
         else:
             self._undecidable(scope)
 
+    def _assign_seq(self, scope: _Scope, elems: list, value: Term) -> None:
+        """`a, *b, c = value`: `b` gets a list of the value's elements, and what comes after the
+        star takes an element's type (its index is not known) (4.2i)."""
+        star = -1
+        for i in range(len(elems)):
+            el = elems[i]
+            if isinstance(el, N.UnaryOp) and el.op == '*':
+                star = i
+        for i in range(len(elems)):
+            el = elems[i]
+            if i == star:
+                term = op_term('cont', 'list', [op_term('elem', '', [value])])
+                self._assign(scope, el.operand, term)
+            elif star >= 0 and i > star:
+                self._assign(scope, el, op_term('elem', '', [value]))
+            else:
+                self._assign(scope, el, op_term('slot', str(i), [value]))
+
     def _bind_target(self, scope: _Scope, target, el: Term) -> None:
-        names = _target_names(target)
-        if names is None:
+        plain = _plain_target_name(target)
+        if plain is not None:
+            self._flow(el, self._local_var(scope, plain))
+            return
+        items = _target_items(target)
+        if items is None:
             self._undecidable(scope)
             return
-        if not _is_tuple_target(target):
-            self._flow(el, self._local_var(scope, names[0]))
-            return
-        for i in range(len(names)):
-            self._flow(op_term('slot', str(i), [el]), self._local_var(scope, names[i]))
+        self._bind_items(scope, items, el)
+
+    def _bind_items(self, scope: _Scope, items: list, el: Term) -> None:
+        star = -1
+        for i in range(len(items)):
+            it = items[i]
+            if isinstance(it, str) and it.startswith('*'):
+                star = i
+        for i in range(len(items)):
+            it = items[i]
+            if i == star:
+                t = op_term('cont', 'list', [op_term('elem', '', [el])])
+            elif star >= 0 and i > star:
+                t = op_term('elem', '', [el])
+            else:
+                t = op_term('slot', str(i), [el])
+            if isinstance(it, str):
+                self._flow(t, self._local_var(scope, it.lstrip('*')))
+            else:
+                self._bind_items(scope, it, t)
 
     # ── names ───────────────────────────────────────────────────────────
 
@@ -1133,7 +1264,14 @@ class _Summarizer:
         if isinstance(e, N.DictExpr):
             flat = []
             for pair in e.pairs:
-                flat.append(self._term(scope, pair[0]))
+                key = pair[0]
+                if isinstance(key, N.UnaryOp) and key.op == '**':
+                    # `{**d, ...}`: d's keys are not modelled (BOT), its values are d's.
+                    splat = self._term(scope, key.operand)
+                    flat.append(const_term(sty.BOT))
+                    flat.append(op_term('elem', '', [splat]))
+                    continue
+                flat.append(self._term(scope, key))
                 flat.append(self._term(scope, pair[1]))
             return op_term('cont', 'dict', flat)
         if isinstance(e, N.WalrusExpr):
@@ -1364,6 +1502,9 @@ class _Summarizer:
         fs = self.prog.fns.get(key)
         if fs is None:
             return const_term(sty.DYN)
+        if fs.cast_ty is not None and len(args) == 1 and len(kwvals) == 0:
+            # A cast helper hands its argument back with the type it names (4.2h).
+            return Term('cast', fs.cast_ty, -1, '', [args[0]], [])
         self._feed(fs, 0, args + kwvals, [''] * len(args) + names)
         return Term('call', None, fs.ret, key, [], [])
 

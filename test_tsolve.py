@@ -282,6 +282,62 @@ class Origins(unittest.TestCase):
                'def main():\n    g = G(1)\n    put(g)\n    return get(g)\n')
         self.assertEqual(_ret({'main': src}, 'main'), 'dict[str, int]')
 
+    def test_a_bare_dict_return_keeps_its_contents(self):
+        # `-> dict` fixes the kind; the contents are what flows in (4.2g).
+        files = {'main': ('def f() -> dict:\n    return {"a": [1]}\n'
+                          'def g():\n    return f()["a"]\n')}
+        self.assertEqual(_ret(files, 'g'), 'list[int]')
+
+    def test_a_bare_list_parameter_reads_its_contents(self):
+        src = 'def g(x: list):\n    return x[0]\ndef h():\n    return g(["s"])\n'
+        self.assertEqual(_ret({'main': src}, 'h'), 'str')
+
+    def test_an_unknown_argument_to_a_bare_list_is_dyn(self):
+        src = 'def g(x: list):\n    return x[0]\ndef h():\n    return g(weird())\n'
+        self.assertEqual(_ret({'main': src}, 'h'), 'dyn')
+
+    def test_a_cast_helper_keeps_a_dict_argument_and_its_contents(self):
+        # `_as_dict` returns its argument typed `dict`. A dict argument keeps its own
+        # contents, so the element read through the cast is the literal's (4.2h).
+        src = ('def _as_dict(e: object) -> dict:\n    return e\n'
+               'def g(gen):\n    c = _as_dict(gen)\n    return c["k"]\n'
+               'def h():\n    return g({"k": (1, "s")})\n')
+        self.assertEqual(_ret({'main': src}, 'h'), 'tuple[int, str]')
+
+    def test_a_cast_of_an_unknown_value_has_unknown_contents(self):
+        # The kind is known (dict) but the contents are not: `dyn`, never an empty answer.
+        src = ('struct G:\n    var n: Int\n'
+               'def _as_dict(e: object) -> dict:\n    return e\n'
+               'def g(gen):\n    c = _as_dict(gen.f)\n    return c["k"]\n'
+               'def h():\n    return g(G(1))\n')
+        self.assertEqual(_ret({'main': src}, 'h'), 'dyn')
+
+    def test_nested_and_starred_targets_bind_the_right_slots(self):
+        src = ('def f(xs):\n    for a, (b, c) in xs:\n        return c\n    return 0\n'
+               'def g():\n    return f([(1, ("x", 2.0))])\n')
+        self.assertEqual(_ret({'main': src}, 'g'), 'dyn')
+        src2 = ('def h(xs: list[tuple[int, tuple[int, str]]]):\n    for a, (b, c) in xs:\n        return b\n'
+                '    return 0\n')
+        self.assertEqual(_ret({'main': src2}, 'h'), 'int')
+        src3 = 'def k(xs: list[int]):\n    *p, q = xs\n    return p\n'
+        self.assertEqual(_ret({'main': src3}, 'k'), 'list[int]')
+
+    def test_a_slice_store_extends_its_container(self):
+        src = 'def f(xs: list[int]):\n    xs[0:1] = [2]\n    return xs[0]\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'int')
+
+    def test_a_store_into_an_unmodelled_container_is_decidable(self):
+        src = 'def f(a):\n    a[0][1] = 2\n    return 3\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'int')
+
+    def test_a_dict_splat_keeps_the_splatted_values(self):
+        src = 'def f(d: dict[str, int]):\n    r = {**d, "k": 1}\n    return r["k"]\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'int')
+
+    def test_a_class_inside_a_function_is_a_value_not_undecidable(self):
+        src = 'def f():\n    class K:\n        var n: Int\n    return 1\n'
+        self.assertEqual(_ret({'main': src}, 'f'), 'int')
+
     def test_why_none_names_the_reason(self):
         self.assertEqual(_solve({'main': 'def f():\n    return 1\n'}).why_none('/t/main.py', 'f'), '')
         self.assertEqual(_solve({'main': 'def f() -> Int:\n    return 1\n'}).why_none('/t/main.py', 'f'),

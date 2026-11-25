@@ -700,11 +700,20 @@ Closure acceptance: section 8.
   336eff194 (2d dotted annotations), c8bb6578a (2e static/class methods, 2f loose fields).
 - 4.2e (static/class methods) and 4.2f (loose fields) LANDED and verified: test_tsolve 64/0,
   c_oracle identical vs 336eff194 (286 + 35), compile_stdlib 610/0, cycle test PASS.
-- Still open, in order: 4.2g kind pins (`sty.is_bare_container`, `Program.kind_pinned`,
-  `sty.kind_join`, `Program.pin_ann` used by every annotation pin site), 4.2h cast helpers
-  (`FnSummary.cast_ty`, a `cast` term), 4.2i summarizer coverage (nested tuple targets, slice
-  stores, subscript stores into non-name containers, dict splat, class in a function, starred
-  target). Then step 3 (annotated early decisions, ledger classes), step 4 (ClosureBuilder
+- 4.2g (kind pins), 4.2h (cast helpers), 4.2i (coverage) IMPLEMENTED (session 3, on master, not
+  VERIFIED: test_tsolve 74/0, c_oracle identical vs 08849a810 (286 + 35), compile_stdlib 610/0,
+  cycle test PASS. Deviations, decided while
+  implementing:
+  * 4.2h: the design's own test expects `_as_dict(g.f)` (an unknown argument) to give
+    `tuple[int, str]`, but its rule says an argument of another kind gives the named kind with
+    `dyn` contents. The sound rule is kept (3.4: unknown is not empty; `dyn` is the join's top);
+    the test now passes a real dict, and a second test pins the unknown-contents case as `dyn`.
+  * 4.2i: a store into a container no modelled name holds (`a[i][j] = v`) flows nowhere (R2), so
+    it is decidable; a class inside a function is a `dyn` local, its methods are not summarized
+    (the same reach as a nested def's flows, noted as a coverage limit).
+  * 4.2g: `kind_join` keeps `none`/`bot` out of the contents; a kind-pinned variable that only
+    ever receives `None` stays `bot` (no information), which is undecided, not a wrong answer.
+- Still open, in order: step 3 (annotated early decisions, ledger classes), step 4 (ClosureBuilder
   protocol; owner-first global C types), step 5 (acceptance, section 8).
 - Tools: `tools/tsolve_why.py --classify|--shadow|--undecided LEDGER`. `--fn` and `--undecidable`
   (section 2.6, need the solved program) are not written yet.

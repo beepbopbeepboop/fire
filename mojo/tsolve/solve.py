@@ -92,7 +92,10 @@ class _Solver:
             if prog.pinned[dst] or val.kind == 'bot':
                 continue
             old = prog.vars[dst]
-            new = sty.join(old, val)
+            if dst in prog.kind_pinned:
+                new = sty.kind_join(prog.kind_pinned[dst], old, val)
+            else:
+                new = sty.join(old, val)
             if new.key != old.key:
                 prog.vars[dst] = new
                 readers = self.depends.get(dst, {})
@@ -107,6 +110,8 @@ class _Solver:
             return t.ty
         if op == 'var' or op == 'call':
             return self.read(t.var)
+        if op == 'cast':
+            return self.cast(t)
         if op == 'narrow':
             # A fact: `isinstance(x, C)` proves x is a C (a unique class, else dyn). A container
             # fact keeps the variable's own value when that already has the kind, since it has
@@ -137,6 +142,24 @@ class _Solver:
         if op == 'grow':
             return self.grow(t)
         return sty.DYN
+
+    def cast(self, t: Term):
+        """A cast helper's result (4.2h): the argument when it already has the named kind,
+        else the named kind with `dyn` contents (the backend's type tells us the kind, not
+        what is in it), a unique struct, or the scalar itself."""
+        arg = self.ev(t.args[0])
+        ty = t.ty
+        if arg.kind == 'bot':
+            return sty.BOT
+        if ty.kind == 'struct':
+            return ty if self.prog.class_is_unique(ty.name) else sty.DYN
+        if ty.kind == 'list' or ty.kind == 'tuple':
+            return arg if arg.kind == 'list' or arg.kind == 'tuple' else sty.list_of(sty.DYN)
+        if ty.kind == 'dict':
+            return arg if arg.kind == 'dict' else sty.dict_of(sty.DYN, sty.DYN)
+        if ty.kind == 'set':
+            return arg if arg.kind == 'set' else sty.set_of(sty.DYN)
+        return ty
 
     def cont(self, t: Term):
         vals = []

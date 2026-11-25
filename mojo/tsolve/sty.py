@@ -262,3 +262,71 @@ def from_annotation(text, class_names) -> STy:
             slots.append(from_annotation(a, class_names))
         return cap(tuple_of(slots))
     return DYN
+
+
+# ── kind pins (bugs/GIR_type_solver_precision.md, 4.2g) ─────────────────────
+
+_BARE_KIND = {'list': 'list', 'List': 'list', 'dict': 'dict', 'Dict': 'dict',
+              'set': 'set', 'Set': 'set'}
+
+
+def bare_container_kind(text) -> str:
+    """The container KIND of a bare annotation (`list`, `-> dict`, `set | None`), or ''.
+
+    A bare container annotation says what kind of value it is, not what is in it: its
+    contents are whatever flows in (`kind_join`), not `dyn` (the old full pin)."""
+    if text is None:
+        return ''
+    kept = []
+    for p in split_top(text.strip(), '|'):
+        if p != 'None' and p != '':
+            kept.append(p)
+    if len(kept) != 1:
+        return ''
+    return _BARE_KIND.get(kept[0], '')
+
+
+def kind_join(kind: str, old: STy, val: STy) -> STy:
+    """The value of a kind-pinned variable after `val` flows in (4.2g).
+
+    `none` and `bot` add nothing. A value of the pinned kind (a tuple into a list too) joins
+    its contents into the old ones; any other value, `dyn` included, makes the contents
+    `dyn` while the kind stays. So the contents are exactly what flows in, and `dyn` when
+    something unknown does: an unknown is never taken for an empty container."""
+    if val.kind == 'none' or val.kind == 'bot':
+        return old
+    if kind == 'list':
+        old_el = old.args[0] if old.kind == 'list' else BOT
+        if val.kind == 'list':
+            el = val.args[0]
+        elif val.kind == 'tuple':
+            el = _join_all(val.args)
+        else:
+            el = DYN
+        return cap(list_of(join(old_el, el)))
+    if kind == 'set':
+        old_el = old.args[0] if old.kind == 'set' else BOT
+        el = val.args[0] if val.kind == 'set' else DYN
+        return cap(set_of(join(old_el, el)))
+    # dict
+    if old.kind == 'dict':
+        old_k = old.args[0]
+        old_v = old.args[1]
+    else:
+        old_k = BOT
+        old_v = BOT
+    if val.kind == 'dict':
+        k = val.args[0]
+        v = val.args[1]
+    else:
+        k = DYN
+        v = DYN
+    return cap(dict_of(join(old_k, k), join(old_v, v)))
+
+
+def _join_all(types: list) -> STy:
+    out = BOT
+    for t in types:
+        out = join(out, t)
+    return out
+

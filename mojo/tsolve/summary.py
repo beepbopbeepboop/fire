@@ -74,6 +74,7 @@ class FnSummary:
         self.decidable: bool = True       # False: no answer is claimed for it
         self.ret_terms: list = []         # every term that flows into `ret` (returns and fall-off)
         self.deco: str = ''               # '' | 'staticmethod' | 'classmethod' (4.2e)
+        self.cast_ty = None               # the annotated return of a CAST HELPER, else None (4.2h)
 
 
 class ClassSummary:
@@ -109,6 +110,7 @@ class Program:
         self.classes: dict = {}        # class name -> ClassSummary (first definition)
         self.field_index: dict = {}    # field name -> [TVar] over every class
         self.loose: dict = {}          # field name -> TVar, for a field no class declares (4.2f)
+        self.kind_pinned: dict = {}    # TVar -> container kind of a bare annotation (4.2g)
 
     def new_var(self, name: str) -> int:
         self.vars.append(sty.BOT)
@@ -119,6 +121,15 @@ class Program:
     def pin(self, var: int, ty) -> None:
         self.vars[var] = ty
         self.pinned[var] = True
+
+    def pin_ann(self, var: int, text, names: dict) -> None:
+        """Pin `var` to an annotation: a bare container fixes only its kind (4.2g); any other
+        annotation is a full pin."""
+        kind = sty.bare_container_kind(text)
+        if kind != '':
+            self.kind_pinned[var] = kind
+        else:
+            self.pin(var, sty.from_annotation(text, names))
 
     def loose_var(self, name: str) -> int:
         """The one variable a store to a field NO class declares writes, and a read through a
