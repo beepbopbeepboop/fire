@@ -2561,6 +2561,18 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             t = gen._new_val('char *', gen._intern_string(
                 gimple_ctypes._c_escape(sys.platform)))
             return 'char *', t
+        if _canon == 'sys' and node.member == 'maxsize':
+            # `sys.maxsize` as a VALUE: the host's largest `Py_ssize_t`, which is
+            # `INT64_MAX` on every 64-bit target this compiler emits for (its
+            # Int is 64-bit). It was reachable only as a comptime constant; a
+            # value read fell to the generic dispatch on the bare `sys` marker
+            # and raised a fatal `AttributeError: maxsize` at run time -- which
+            # is how the self-hosted compiler died on startup, because
+            # `mojo/middle/comptime.py`'s module-level `_HOST_IS_32BIT =
+            # sys.maxsize <= 2**32` runs on import. A literal, like
+            # `sys.platform` above.
+            t = gen._new_val('int64_t', '9223372036854775807')
+            return 'int64_t', t
         if _canon == 'sys' and node.member in ('stdout', 'stderr', 'stdin'):
             # The three standard stream FILE objects. This runtime has no
             # Python-file-object model, so each is represented as its POSIX
@@ -5202,7 +5214,11 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     _bitwise = op in _BITWISE_INT_OPS
     _lv_ptr_kind = _as_str(gen._get_actual_type(lt, lv)).endswith(' *') \
         if gen._word_may_be_box(lv) else False
-    if gen._word_may_be_box(lv) and gimple_ctypes.TypeLattice.is_cstr(rt) and op == '+':
+    # A word beside a str or list operand of `+` is that container at run time
+    # (Python's `x + list` is only defined for a list), so keep the word rather
+    # than boxing it as a double.
+    if gen._word_may_be_box(lv) and (gimple_ctypes.TypeLattice.is_cstr(rt)
+                                     or gimple_ctypes.TypeLattice.is_list(rt)) and op == '+':
         gen._word_mark_dyn(lv)
     elif gen._word_may_be_box(lv):
         if op in _ident_ops and (op in ('is', 'is not')
@@ -5219,7 +5235,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             lt = 'double'
     _rv_ptr_kind = _as_str(gen._get_actual_type(rt, rv)).endswith(' *') \
         if gen._word_may_be_box(rv) else False
-    if gen._word_may_be_box(rv) and gimple_ctypes.TypeLattice.is_cstr(lt) and op == '+':
+    if gen._word_may_be_box(rv) and (gimple_ctypes.TypeLattice.is_cstr(lt)
+                                     or gimple_ctypes.TypeLattice.is_list(lt)) and op == '+':
         gen._word_mark_dyn(rv)
     elif gen._word_may_be_box(rv):
         if op in _ident_ops and (op in ('is', 'is not')
@@ -5275,9 +5292,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             gen._free_fresh_container(rv, 'MojoList *')
         return 'MojoList *', t
 
-    # MojoList * + int/int64_t → identity (DynamicVector not supported; treat as no-op)
+    # MojoList * + <int word> → mojo_list_concat. The MIRROR of the
+    # `<opaque int64_t> + MojoList *` arm below. The old arm returned the list
+    # unchanged, silently dropping the right operand; adding an integer to a
+    # list is never meaningful, so a list operand makes this a concat of the
+    # word, read as the list it carries at run time.
     if op == '+' and gimple_ctypes.TypeLattice.is_list(lt) and gimple_ctypes.TypeLattice.is_int_word(rt):
-        return 'MojoList *', lv
+        rcast = gen._coerce_to_type(rt, 'MojoList *', rv)
+        t = gen._rt_call('MojoList *', 'mojo_list_concat', [f"{lv}", f"{rcast}"])
+        if lv in gen._elem_types:
+            gen._elem_types[t] = gen._elem_types[lv]
+        return 'MojoList *', t
 
     # MojoList * + <pointer-ish> → mojo_list_concat after casting the RHS to
     # MojoList *. Covers polymorphic locals: a name (e.g. `body`) that is a

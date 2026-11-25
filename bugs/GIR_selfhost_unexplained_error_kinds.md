@@ -146,3 +146,38 @@ and `mojo/backend_gimple/elab_intu.py:4166` and `:4169` (`_nested = (_nested or 
 closure TU is the oracle for them. The same check also reports the `mojoc` and `selfhost` gate
 failures under `make gate` (`WordFacts` unknown type, in a separate build path), which this family
 does not explain.
+- 2026-11-25: red check for the fix. Two reductions were built on the unchanged tree with
+  `fire.py build`, and neither produced the gcc error: (a) the `split`/`kept or None` shape from
+  the test above prints `[1, 2, 3, 2, 3]`; (b) a `hoist()` returning `(kept, hoisted, {})` with
+  `hoisted` built by `append` prints `[1, 2, 3] 0`, matching CPython. So neither shape gets a
+  may-box slot on this tree, and the test above is not a valid red test. Next: reduce from the
+  real call (`coro.py:7713`) by dumping its generated C (`fire.py build` on `mojo/middle/coro.py`'s
+  `lower` path) and checking which unpacked slot is `int64_t` there, instead of guessing shapes.
+  No code has changed for this bug yet.
+- 2026-11-25: FIX LANDED in `mojo/backend_gimple/emit_exprs.py` `_lower_binary_tail`: (1) a may-box
+  word beside a list operand of `+` is kept as a word (`_word_mark_dyn`), in both the `lv` and `rv`
+  blocks; (2) the `MojoList * + int` identity arm is replaced by `mojo_list_concat` (mirror of the
+  `int64_t + MojoList *` arm). Generated C for the real site (`coro.py:7714`): `out + _t1951` where
+  `_t1951 = mojo_box_double (nested_bodies)`; the callee returns a list, so the unpacked slot is an
+  unknown-kind word, which is the case the fix covers.
+  Verification: closure `selfhost_ci` + `gcc-mp-15 -O0 -fgimple` exit 0 (the three errors gone;
+  the one census line `too few arguments` is a docstring echo, not an error). `c_oracle check
+  --base 6b825b6c4`: 286 pydiff + 35 coroutine programs identical (no corpus program changed).
+  `compile_stdlib.py`: PASSED 610, FAILED 0.
+  NOT DONE: the red test. Both reductions listed above build and run correctly on the unchanged
+  tree, so no reduced program yet shows the defect. Until one does, this doc stays open; the
+  remaining step is a reduction that fails before the fix (from the callee's actual list return).
+- 2026-11-25 (red test, second round): three more reductions built on the PRE-FIX export
+  (`6b825b6c4`) all compile with no gcc error and print the CPython answer: (A) a dict-guarded
+  `hoisted.append(d.get(s))` return; (B) a `while` worklist with `meta.get` returning
+  `(stmts, hoisted, meta)`; (C) `hoisted.append(Box(s).v)` returning `(stmts, hoisted, None)`.
+  So a same-module tuple return the solver can type does not reproduce.
+  Solver readout for the real callee (`tools/tsolve_why.py --fn _hoist_nested_async
+  mojo/middle/coro.py`): the return is DECIDED, `tuple[list[dyn], list[struct:FunctionDef],
+  dict[str, dict[str, str]]]`. The defect is therefore in the CALLER: the tuple-unpack
+  (`out, nested_bodies, local_maps = _hoist_nested_async(...)`) reads each slot from the C
+  return (`MojoList *`, read with `mojo_list_get_boxed`) as an unknown-kind word and does not
+  use the solver's slot type. Next step for the red test: find where the tuple-unpack emitter
+  (`emit_stmts`/`stmts_shared` tuple-target path) gives an unpacked name a word type when the
+  callee's solved return is a tuple, and reproduce with a callee in ANOTHER module (the closure
+  is one TU of 137 modules; cross-module calls are the case the small reductions did not cover).

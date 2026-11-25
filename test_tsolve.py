@@ -7,6 +7,7 @@ solved and their return types compared with what the language means.
 
 Run directly: python3 test_tsolve.py   (exit 0 when every case passes)
 """
+import os
 import sys
 import unittest
 
@@ -579,10 +580,48 @@ class Summaries(unittest.TestCase):
         self.assertEqual([t.key for t in a], [t.key for t in b])
 
 
+class SelfHostable(unittest.TestCase):
+    """The closure compiles `mojo/tsolve`, and the compiled path has no `vars`, no
+    `type(x).__module__` and no `getattr`: the self-hosted compiler died on startup
+    with `AttributeError: __module__` from `summarize._is_node`."""
+
+    def test_no_reflection_in_the_solver(self):
+        import ast
+        import glob
+        banned = {'vars', 'getattr', 'hasattr', 'setattr', 'type', 'eval', 'exec'}
+        offenders = []
+        for path in glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                           'mojo', 'tsolve', '*.py')):
+            tree = ast.parse(open(path).read())
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id in banned):
+                    offenders.append('%s:%d %s()' % (os.path.basename(path), node.lineno, node.func.id))
+                if isinstance(node, ast.Attribute) and node.attr in ('__module__', '__class__', '__dict__'):
+                    offenders.append('%s:%d .%s' % (os.path.basename(path), node.lineno, node.attr))
+        self.assertEqual(offenders, [])
+
+    def test_find_imports_sees_nested_imports(self):
+        from mojo.tsolve import summarize
+        import fire_compiler as N
+        src = ('import a\n'
+               'def f():\n    from b import x\n'
+               'class K:\n    def m(self):\n        import c\n'
+               'if True:\n    import d\n'
+               'try:\n    import e\nexcept Exception:\n    import g\n')
+        stmts = N.Parser(N.py_tokenize(src)).parse_module()
+        found = []
+        summarize._find_imports(stmts, found)
+        refs = []
+        for st in found:
+            refs.append(st.module)
+        self.assertEqual(sorted(refs), ['a', 'b', 'c', 'd', 'e', 'g'])
+
+
 def main():
     suite = unittest.TestSuite()
     loader = unittest.TestLoader()
-    for case in (JoinTable, FromAnnotation, LowerRows, Origins, Externs, KindPins, Summaries):
+    for case in (JoinTable, FromAnnotation, LowerRows, Origins, Externs, KindPins, Summaries, SelfHostable):
         suite.addTests(loader.loadTestsFromTestCase(case))
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     return 0 if result.wasSuccessful() else 1

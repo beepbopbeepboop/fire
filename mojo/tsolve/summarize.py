@@ -71,10 +71,6 @@ class _Scope:
         self.deferred: list = []     # nested defs, summarized after this body
 
 
-def _is_node(x) -> bool:
-    return type(x).__module__ == 'fire_compiler'
-
-
 def _walk_stmts(stmts: list, out: list) -> None:
     """Append every statement of `stmts`, and of the blocks inside them, to `out`.
 
@@ -346,17 +342,28 @@ def _exits(stmts: list) -> bool:
     return _terminates(stmts)
 
 
-def _find_imports(obj, out: list) -> None:
-    if isinstance(obj, (list, tuple)):
-        for x in obj:
-            _find_imports(x, out)
-        return
-    if not _is_node(obj):
-        return
-    if isinstance(obj, (N.ImportStmt, N.FromImportStmt)):
-        out.append(obj)
-    for v in vars(obj).values():
-        _find_imports(v, out)
+def _find_imports(stmts: list, out: list) -> None:
+    """Append every `import` / `from ... import` statement of `stmts` to `out`,
+    in source order, including those inside blocks, function bodies, struct
+    methods and match cases.
+
+    A typed walk, not a generic one over `vars(node)`: the closure compiles this
+    function, and the compiled path has neither `vars` nor a class's `__module__`
+    (the self-hosted compiler died on startup with `AttributeError: __module__`)."""
+    for st in stmts:
+        if isinstance(st, (N.ImportStmt, N.FromImportStmt)):
+            out.append(st)
+        elif isinstance(st, N.FunctionDef):
+            _find_imports(st.body, out)
+        elif isinstance(st, N.StructDef):
+            for m in st.methods:
+                _find_imports(m.body, out)
+        elif isinstance(st, N.MatchStmt):
+            for case in st.cases:
+                _find_imports(case.body, out)
+        else:
+            for block in _sub_blocks(st):
+                _find_imports(block, out)
 
 
 def _import_refs(node) -> list:

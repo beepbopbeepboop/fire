@@ -1021,6 +1021,8 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 # mangled call-site suffix, so both halves of one mangled
                 # symbol always agree (log_match c52cbf-vs-7a6366 family).
                 temp_gen._home_def_param_types = gen._home_def_param_types
+                temp_gen._home_def_pts_committed = gen._home_def_pts_committed
+                temp_gen._early_def_pts_used = gen._early_def_pts_used
                 # share: the RETURN-type twin of the store just shared, for the
                 # same reason and read by the same `_func_csym` mirror — a
                 # call site's emitted symbol carries the module qualifier, so

@@ -1912,6 +1912,30 @@ test('selfhost-struct-layout-map',
      desc='every field declared in fire_compiler.py has a row in the '
           'hardcoded struct_field_types map in module_gen.py, so the emitted '
           'self-host C struct defines every member the closure reads')
+test('uncompiled-marker-alias',
+     [PY, 'test_uncompiled_marker_alias.py'], mem='tiny',
+     desc='a call through `import a.b as alias` of a COMPILED module is not '
+          'lowered to a "module not compiled" raise (the self-hosted '
+          'compiler died on its first compile)')
+test('sys-maxsize-value',
+     [PY, 'test_sys_maxsize_value.py'], mem='small',
+     desc='`sys.maxsize` read as a value compiles (the self-hosted compiler '
+          'died on startup in comptime.py\'s module-level _HOST_IS_32BIT)')
+test('importer-param-forwarder',
+     [PY, 'test_importer_param_forwarder.py'], mem='small',
+     desc='an importer compiled before its definer in an import cycle links: '
+          'the definer also defines the overload suffix the earlier call '
+          'sites hashed (annotated_return_ctype / _pack_kwargs_dict family)')
+test('dotted-module-global-accessor',
+     [PY, 'test_dotted_module_global_accessor.py'], mem='small',
+     desc='a module global read through a dotted project import links: the '
+          'extern accessor is named after the definer\'s spelling, not the '
+          'file basename (mojoc/selfhost undefined *__mojo_global_get_*)')
+test('selfhost-sig-types-declared',
+     [PY, 'test_selfhost_sig_types_declared.py'], mem='tiny',
+     desc='every struct type a _SELFHOST_SIGS row names is declared in a '
+          'compiler-source module that does not define it (WordFacts: the '
+          'mojoc / stdlib-dylib `unknown type name` failure)')
 test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'test_runtime_diff.py'],
@@ -5159,7 +5183,9 @@ BUCKETS = {
               # without a row is dropped from the struct the next reader of
               # it makes gcc reject, so the everyday gate has to see the next
               # one (bug doc deleted with the fix, 2026-11-21).
-              'selfhost-struct-layout-map'],
+              'selfhost-struct-layout-map', 'selfhost-sig-types-declared',
+              'dotted-module-global-accessor', 'importer-param-forwarder',
+              'sys-maxsize-value', 'uncompiled-marker-alias'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus

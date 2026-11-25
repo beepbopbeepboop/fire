@@ -2507,6 +2507,7 @@ def _commit_home_def_pts(gen, node) -> list:
         local[node.name] = list(sig)
     key = _pair_key(_func_qualifier(gen, node.name), node.name)
     store[key] = list(sig)
+    gen._home_def_pts_committed.add(key)
     return sig
 
 
@@ -3153,7 +3154,87 @@ def _overload_suffix(gen, bare_name: str) -> str:
     # extern ("expected 'TuffBricks *' but argument is of type 'Tuff *'").
     # The qualifier tier already disambiguates the NAME; this gives the
     # SUFFIX the same per-module truth.
-    return gen.overload_suffix_for(_effective_param_types_hash(gen, bare_name))
+    _pts = _effective_param_types_hash(gen, bare_name)
+    _sfx = gen.overload_suffix_for(_pts)
+    _note_early_def_pts(gen, bare_name, _pts, _sfx)
+    return _sfx
+
+
+def _note_early_def_pts(gen, bare_name: str, pts, suffix: str) -> None:
+    """Remember the parameter list a call site hashed for an IMPORTED function
+    whose definition has not been emitted yet.
+
+    Inside an import cycle an importer can be compiled before its definer; it
+    hashes the definer's parameters from the snapshot (`int64_t` for a
+    parameter only the definer's call sites refine), and the definer then emits
+    its own, different suffix: an undefined symbol at link. The definer reads
+    this record in `_early_forwarders` and also defines the suffix the earlier
+    call sites named. A name this unit defines itself is the definer, not an
+    importer, and is skipped."""
+    if not pts or suffix == '':
+        return
+    if _local_def_pts(gen, bare_name) is not None:
+        return
+    _key = _pair_key(_func_qualifier(gen, bare_name), bare_name)
+    if _key in gen._home_def_pts_committed:
+        return
+    gen._early_def_pts_used[_key + '\x1f' + suffix] = list(pts)
+
+
+def _early_forwarders(gen, node, safe: str, ret_type: str, def_pts: list) -> list:
+    """C text of one forwarding definition per suffix an earlier call site
+    hashed for this function (`_note_early_def_pts`) that is not the suffix the
+    definition itself carries. Each forwarder has the parameter types that
+    call site assumed and calls the real definition, casting between the word
+    and the pointer the definer refined it to. Empty when nothing was hashed
+    early, or when a difference is not a word/pointer one (a double against a
+    word needs a boxing call, not a cast)."""
+    _key = _pair_key(_func_qualifier(gen, node.name), node.name)
+    _own = _as_str(gen.overload_suffix_for(def_pts))
+    _out: list = []
+    _eks: list = []
+    for _ek0 in gen._early_def_pts_used.keys():
+        _eks.append(_as_str(_ek0))
+    _eks.sort()
+    for _ek in _eks:
+        if not _ek.startswith(_key + '\x1f'):
+            continue
+        _sfx = _ek[len(_key) + 1:]
+        if _sfx == _own or not _own or _sfx == '' or not safe.endswith(_own):
+            continue
+        _used = gen._early_def_pts_used[_ek]
+        if len(_used) != len(def_pts):
+            continue
+        _args = []
+        _decls = []
+        _ok = True
+        for _i in range(len(_used)):
+            _u = _as_str(_used[_i])
+            _d = _as_str(def_pts[_i])
+            if _u == '...' or _d == '...' or _u[:7] == 'struct ':
+                _ok = False
+                break
+            _decls.append(f"{_u} _p{_i}")
+            if _u == _d:
+                _args.append(f"_p{_i}")
+            elif gimple_ctypes.TypeLattice.is_double(_u) or gimple_ctypes.TypeLattice.is_double(_d):
+                _ok = False
+                break
+            elif gimple_ctypes.TypeLattice.ends_in_star(_u) or gimple_ctypes.TypeLattice.ends_in_star(_d):
+                _args.append(f"({_d})(intptr_t)_p{_i}")
+            else:
+                _args.append(f"({_d})_p{_i}")
+        if not _ok:
+            continue
+        _fsym = safe[:len(safe) - len(_own)] + _sfx
+        _arg_s = ', '.join(_args)
+        _call = f"{safe} ({_arg_s})"
+        _decl_s = ', '.join(_decls) if _decls else 'void'
+        if gimple_ctypes.TypeLattice.is_void(ret_type):
+            _out.append(f"void {_fsym} ({_decl_s}) {{ {_call}; }}")
+        else:
+            _out.append(f"{ret_type} {_fsym} ({_decl_s}) {{ return {_call}; }}")
+    return _out
 
 
 def _note_own_func_home(gen, bare_name: str, module_name: str,
@@ -4642,6 +4723,11 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         # `main` returns a C `int`; `result` has the Mojo `main`'s own type.
         lines.append(f"  return (int)result;")
         lines.append(f"}}")
+
+    if node.name != 'main' and _def_pts:
+        for _fwd in _early_forwarders(gen, node, safe, ret_type, _def_pts):
+            lines.append("")
+            lines.append(_fwd)
 
     gen._pop_import_scope()
     return '\n'.join(lines)

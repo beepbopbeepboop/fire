@@ -9411,6 +9411,17 @@ def _gmp_selfhost_ast_layouts(self, _is_selfhost_file: bool) -> None:
         # _struct_method_qualifier returns 'myinterpreter' for
         # Interpreter methods at call sites that hardcode the layout.
         self._imported_struct_home['Interpreter'] = 'myinterpreter'
+        # WordFacts (mojo/middle/valueinfo.py) is named by 19 `_SELFHOST_SIGS`
+        # rows (`WordFacts_carry`, ...), so EVERY compiler-source module
+        # forward-declares `WordFacts *` parameters in its preamble. Only a TU
+        # that defines the class (the whole-closure dump) had the typedef; a
+        # per-module compile (`mojoc`'s link mode, the stdlib dylib build of
+        # `mojo/middle/__init__.py`) died with `unknown type name 'WordFacts'`.
+        # The module that really defines it replaces this layout with its own.
+        self.struct_field_types['WordFacts'] = {
+            '_values': 'MojoDict *',
+        }
+        self._imported_struct_home['WordFacts'] = 'mojo_middle_valueinfo'
         self.struct_field_types['Parser'] = {
             '_tok': 'MojoList *',
             '_pos': 'int64_t',
