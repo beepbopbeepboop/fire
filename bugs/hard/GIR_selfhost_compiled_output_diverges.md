@@ -5,27 +5,33 @@ starts and exits 0 on a program, and writes valid UTF-8; its `.ci` is still not 
 Every item below was measured with `tools/selfhost_probe.py` (build once, probe in seconds, diff each
 probe against `python3 fire.py --dump-full`) and `lldb`.
 
-## Measured divergences (HEAD after `annotated self-field`, probes in `test_selfhost.py` terms)
+## Measured divergences
 
-Probe `x = 1` / `print(x)` (TWO_LINE), 36 diff lines against the reference:
-1. `print(<int word>)` takes a different arm: the reference writes
-   `_t3 = mojo_cstr_or_int_str (_t4); mojo_print (_t3); mojo_cstr_or_int_release (_t5, _t3);`
-   and the self-hosted binary writes `_t4 = malloc (256); _t3 = (char *) _t4; sprintf (_t3, _t5, _t2);
-   mojo_print (_t3); free (_t3);` with an extra `"0"`-format string literal (`_slit_10000 = "0"`).
-   The temps' types differ too (`void * _t4` where the reference has `int64_t`). A decision that reads
-   a table the binary leaves empty or differently typed picks the printf arm.
-2. The statement lines after it are not `#line`-stamped (`mojo_print (_t6);` at column 0): the
-   `_opaque` statements printed by the printf arm carry their own text, and the `#line` stamp is
-   missing there.
+2026-11-25, first measurement (binary at `51a54776f`): 36 diff lines on `x = 1; print(x)`, 51 on `def g(a): return a + 1`,
+178 on the f-string program. ROOT CAUSE of most of it, found and fixed the same day (`codegen: mod.Class.method(args)
+through a module alias`, two commits): `gimple_ctypes.TypeLattice.<predicate>(x)` (about 2,600 call sites after the stage-4
+codemod) was lowered to the unknown-method stub, so every type predicate was false in the compiled compiler. The closure's
+stubbed calls went from 2,941 to 611.
 
-Probe `def g(a): return a + 1` / `print(g(3))`, 51 diff lines:
-3. `g` is emitted with NO return type (`" g_9f63a2 (int64_t a)"`) and the body is `return ;` instead of
-   `_t1 = 1LL; _t2 = a + _t1; return _t2;`: the function's return type and its `return` value are
-   both the empty string in the binary. Candidates: `_record_home_def_return_type` /
-   `_early_return_decision` (`getattr(gen, '_tsolve', None)` and `dict.get` on the frozen table are
-   erased words in the compiled path), or `_infer_return_type`'s result for a BinaryOp.
-
-Probe CALL_PROGRAM (`f"x={a} y={b + 1}"`), 178 diff lines: the same two, plus the f-string pieces.
+Second measurement (binary built after that fix; probes `/tmp/shb/p/*.mojo`, `tools/selfhost_probe.py probe -v`): `x = 1;
+print(x)` differs in 11 lines (the two-space indent of `mojo_print`/`mojo_cstr_or_int_release` statements, below),
+`def g(a): return a + 1` in 45, the f-string program in 135. What is left:
+1. A function header and prototype with BLANK parameter types and a zero overload hash: `int64_t g_000000 ( a)` where the reference
+   has `int64_t g_9f63a2 (int64_t a)`; the call site names the same `g_000000 (3)`. `_signature_ctypes` returns a one-element list
+   holding `''` (lldb: `mojo_list_get_str(result, 0)` is `""`), `_param_ctype` itself answers `int64_t` when asked directly, and
+   `GimpleGen__param_ctype` is never called, so the empty entry comes from another branch of `_signature_ctypes`
+   (`funcs_shared.py` ~152-300; candidates: the `_msig_ct` per-method table, `c_client_callable_ctype(ct)` whose `isinstance(ct, str)`
+   is `mojo_isinstance_p (ct, 4)` on an unannotated word).
+2. An integer literal operand of a binary operation is empty: `_t1 = ;` where the reference has `_t1 = 1LL;`, and the `a + _t1`
+   statement disappears (`def g(a): return a + 1`).
+3. Statements built from `_rt_void` / `_void_call` are `'opaque'` (printed at column 0, no `#line`) instead of modelled calls
+   with indent 2: `mojo_print (_t3);` at column 0.
+4. `print(<int word>)` takes the printf arm in some programs (`malloc (256); sprintf (_t3, "%d", ...)` and an extra `"%d"` string
+   literal): a decision that reads a table the binary leaves empty.
+5. 611 stubbed calls remain in the closure (`grep stubbed selfhost.ci`): most are real externals (`sys.exit`, `tempfile`,
+   `importlib`, `os.makedirs`), and a group is calls into compiler modules this compile had not finished
+   (`monomorphize.mangle` x26, `elaborate.extract_struct_source` x27, `module_loader.module_name_for_path` x11,
+   `gimple_ctypes.CallExpr(...)` constructor x16): the same order dependence inside the import cycle.
 
 ## Method (so the next round does not rediscover it)
 
@@ -46,9 +52,10 @@ the pattern is what to look for in the next one):
 - an annotated `self.f: T = call()` field typed from the value (erased) instead of the annotation;
 - order dependence inside the import cycle (presence bits, parameter hashes).
 
-## Next step
+## Next step (updated)
 
-Reduce item 3 first (it makes every function body empty): probe `def g(a): return a` /
+Item 1 first (every function is wrong until it is fixed), then 2 and 3.
+(Old text:) Reduce item 3 first (it makes every function body empty): probe `def g(a): return a` /
 `def g(a): return 1`, find which return expression kinds are lost, then break in `gen_func` (lldb on
 `mojo_backend_gimple_emit_funcs_gen_func_*`) and read the `ret_type` and the lowered return value.
 Then item 1. `make bootstrap`'s `bootstrap-verify` is the acceptance (stage1 == stage2 == stage3 byte for
