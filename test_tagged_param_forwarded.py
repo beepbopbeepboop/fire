@@ -1,5 +1,6 @@
 """Regression pin: a tagged `= None` parameter forwarded to another tagged
-parameter keeps its box.
+parameter keeps its box, through a plain call, a method call and a module
+attribute call (`mod.f(x)`).
 
 `_emit_call` unboxes a may-box argument for a user function (`mojo_unbox_plain`:
 None -> 0), because most parameters have no None word. A parameter declared
@@ -15,7 +16,17 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = '''def inner(x=None):
+LIB = '''def inner(x=None):
+    if x is not None:
+        return "got " + str(x)
+    return "none"
+'''
+SRC = '''import tagged_lib
+
+def via_module(x=None):
+    return tagged_lib.inner(x)
+
+def inner(x=None):
     if x is not None:
         return "got " + str(x)
     return "none"
@@ -33,14 +44,17 @@ class K:
         return self.inner(x)
 
 print(outer(), outer(0), outer(5))
+print(via_module(), via_module(0), via_module(5))
 k = K()
 print(k.outer(), k.outer(0), k.outer(5))
 '''
-WANT = 'none got 0 got 5\nnone got 0 got 5\n'
+WANT = 'none got 0 got 5\nnone got 0 got 5\nnone got 0 got 5\n'
 
 
 def main() -> int:
     d = tempfile.mkdtemp(prefix='tagged_fwd_')
+    with open(os.path.join(d, 'tagged_lib.py'), 'w') as f:
+        f.write(LIB)
     with open(os.path.join(d, 'm.py'), 'w') as f:
         f.write(SRC)
     out = os.path.join(d, 'm.out')

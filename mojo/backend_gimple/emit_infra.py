@@ -3256,6 +3256,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 and not _is_pointer_view_helper(fname)
                 and not rt_call.is_runtime_function(_as_str(fname))
                 and aval not in _tagged_args
+                and not _callee_param_is_tagged(gen, _as_str(fname), i)
                 and not _as_str(fname).startswith('__mojo_tuple_box_')):
             # A slot read out of a kind-mixed tuple/list arrives as a BOX, and a
             # `None` slot is the shared kind-'n' box. A USER function's
@@ -9381,6 +9382,26 @@ def _box_float_call_args(gen, callee: str, arg_pairs: list) -> list:
         else:
             out.append((_at, _av))
     return out
+
+
+def _callee_param_is_tagged(gen, csym: str, index: int) -> bool:
+    """Is positional parameter `index` of the free function emitted as `csym` the
+    tagged word (`def f(x=None)`, `infra_infer.param_boxed_names`)?
+
+    A call that reaches `_emit_call` without passing `_box_param_call_args`
+    (`mod.f(x)` through a module attribute, a call through a wrapper) cannot say
+    so itself, and `_emit_call`'s `mojo_unbox_plain` would turn the None box it
+    forwards into the integer 0."""
+    _bare = gen._csym_bare.get(csym)
+    if _bare is None:
+        return False
+    _names = getattr(gen, '_param_box_names', {}).get(_bare)
+    if not _names:
+        return False
+    _pn = getattr(gen, '_func_param_names', {}).get(_bare) or []
+    if index < 0 or index >= len(_pn):
+        return False
+    return _as_str(_pn[index]) in _names
 
 
 def _box_param_call_args(gen, callee: str, arg_pairs: list,

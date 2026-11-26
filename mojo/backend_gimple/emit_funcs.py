@@ -3901,6 +3901,10 @@ def _func_csym(gen, bare_name: str, def_pts: list | None = None) -> str:
         rec = {}
         gen._func_csym_record = rec
     rec.setdefault(bare_name, set()).add(sym)
+    # Not when `bare_name` is already the symbol (a call site that resolved the
+    # mangled name first asks again with it): that would erase the source name.
+    if _as_str(sym) != _as_str(bare_name):
+        gen._csym_bare[_as_str(sym)] = _as_str(bare_name)
     return sym
 
 

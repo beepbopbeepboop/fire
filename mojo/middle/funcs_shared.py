@@ -1276,6 +1276,7 @@ def module_member_function_csym(gen, module_name: str, member_name: str):
             _pts = gen._home_signature_ctypes(definer, fs)
         suffix = _as_str(gen.overload_suffix_for(_pts))
         sym = (qualifier + '_' + base if qualifier else base) + suffix
+    gen._csym_bare[_as_str(sym)] = _as_str(def_name)
     return sym, definer, def_name, fs
 
 
