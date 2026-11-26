@@ -2221,23 +2221,27 @@ def _safe_field(name: str) -> str:
 PRESENCE_WORD = '__mojo_present'
 
 
-def presence_bit(sdef, member):
+def presence_bit(sdef: StructDef, member: str):
     """(word index, bit index) of `member`'s presence bit in `sdef`, or None
-    when `member` is not a presence-tracked (minted) field of `sdef`."""
+    when `member` is not a presence-tracked (minted) field of `sdef`.
+
+    `sdef` is ANNOTATED: unannotated, the self-hosted compile read `sdef.presence_fields`
+    as a dynamic getattr on a boxed word and the compiler died on its first compile with
+    `AttributeError: presence_fields`."""
     if sdef is None or member not in sdef.presence_fields:
         return None
     k = sdef.presence_fields.index(member)
     return (k // 64, k % 64)
 
 
-def presence_word_count(sdef) -> int:
+def presence_word_count(sdef: StructDef) -> int:
     """Number of 64-bit presence words `sdef`'s C struct carries (0: none)."""
     if sdef is None:
         return 0
     return (len(sdef.presence_fields) + 63) // 64
 
 
-def presence_set_stmt(sdef, member, obj_c, op) -> str:
+def presence_set_stmt(sdef: StructDef, member: str, obj_c: str, op: str) -> str:
     """C text (not GIMPLE) that marks `member` present on `obj_c`, or '' when
     the member is not presence-tracked. For the plain-C and C++ emitters.
     `op` is '->' for a pointer receiver and '.' for a value receiver."""
