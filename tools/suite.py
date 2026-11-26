@@ -1908,6 +1908,10 @@ test('selfhost-struct-layout-map',
      desc='every field declared in fire_compiler.py has a row in the '
           'hardcoded struct_field_types map in module_gen.py, so the emitted '
           'self-host C struct defines every member the closure reads')
+test('tagged-param-forwarded',
+     [PY, 'test_tagged_param_forwarded.py'], mem='small',
+     desc='a tagged `= None` parameter forwarded to another keeps its box '
+          '(mojo_unbox_plain turned the omitted argument into 0)')
 test('method-none-default-boxed',
      [PY, 'test_method_none_default_boxed.py'], mem='small',
      desc='a method call passes a `= None` parameter (the tagged word) as the '
@@ -5197,7 +5201,7 @@ BUCKETS = {
               'dotted-module-global-accessor', 'importer-param-forwarder',
               'sys-maxsize-value', 'uncompiled-marker-alias',
               'presence-helpers-annotated', 'runtime-function-not-prefix',
-              'method-none-default-boxed'],
+              'method-none-default-boxed', 'tagged-param-forwarded'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus

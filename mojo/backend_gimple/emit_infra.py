@@ -3191,6 +3191,12 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
     # while a call is still being built, and a shared list would then write the
     # inner call's buffers back at the outer call's return.
     _pending_list_unpacks: list = []
+    # The argument values bound for a TAGGED-word parameter (recorded by
+    # `_box_param_call_args` for THIS call): they keep their box, the callee
+    # reads them with `mojo_word_is_none`. Consumed here so a nested call
+    # lowered while this one is built does not see it.
+    _tagged_args = gen._tagged_call_arg_vals
+    gen._tagged_call_arg_vals = set()
     coerced_args = []
     for i, _apair in enumerate(arg_pairs):
         # `_as_str` on every unpacked slot — a `(ctype, varname)` tuple boxes
@@ -3249,6 +3255,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         if (gimple_ctypes.TypeLattice.is_word(atype) and gen._word_may_be_box(aval)
                 and not _is_pointer_view_helper(fname)
                 and not rt_call.is_runtime_function(_as_str(fname))
+                and aval not in _tagged_args
                 and not _as_str(fname).startswith('__mojo_tuple_box_')):
             # A slot read out of a kind-mixed tuple/list arrives as a BOX, and a
             # `None` slot is the shared kind-'n' box. A USER function's
@@ -9391,6 +9398,7 @@ def _box_param_call_args(gen, callee: str, arg_pairs: list,
     local and another from a call. A callee with no boxed parameter returns
     the pairs unchanged, and a pair with no aligned AST node (a synthesized
     default or a spread expansion) is left alone rather than boxed blind."""
+    gen._tagged_call_arg_vals = set()
     _names = getattr(gen, '_param_box_names', {}).get(_as_str(callee))
     if not _names:
         return arg_pairs
@@ -9446,11 +9454,13 @@ def _box_param_call_args(gen, callee: str, arg_pairs: list,
             if _pdef is not None:
                 _bv, _bt = box_word_value(gen, _pdef, _at, _av)
                 out.append((_bt, _bv))
+                gen._tagged_call_arg_vals.add(_as_str(_bv))
                 continue
             out.append((_at, _av))
             continue
         _bv, _bt = box_word_value(gen, _node, _at, _av)
         out.append((_bt, _bv))
+        gen._tagged_call_arg_vals.add(_as_str(_bv))
     return out
 
 
