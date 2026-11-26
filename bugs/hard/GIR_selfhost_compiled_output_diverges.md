@@ -16,7 +16,15 @@ stubbed calls went from 2,941 to 611.
 Second measurement (binary built after that fix; probes `/tmp/shb/p/*.mojo`, `tools/selfhost_probe.py probe -v`): `x = 1;
 print(x)` differs in 11 lines (the two-space indent of `mojo_print`/`mojo_cstr_or_int_release` statements, below),
 `def g(a): return a + 1` in 45, the f-string program in 135. What is left:
-1. A function header and prototype with BLANK parameter types and a zero overload hash: `int64_t g_000000 ( a)` where the reference
+1. (Narrowed 2026-11-26, lldb on `/tmp/shb3/mojo_selfhost`: `_param_ctype` is called three times for `g`'s parameter `a`; the first
+   call, from `free_func_param_ctypes`, answers `"int64_t"` (the miss path: `gen._resolve_type(None)`), and the second and
+   third, from `gmp_infer_return_types` and `free_func_param_ctypes` again, answer a STATIC EMPTY STRING. The read is
+   `mojo_dict_get_int (gen->_inferred_param_types, 'g')` then `mojo_dict_subscript_str (_ipt_fn, 'a')`, both correct as
+   emitted, so `_inferred_param_types['g']['a']` was WRITTEN as `''` by a pass between the first and second call. Find the
+   writer (`grep "_inferred_param_types\[" mojo/`: `_gmi_apply_call_site_param_evidence`, `_reconcile_param_container_kinds`,
+   the Pass 1.x `_infer_param_types` loop at `module_gen.py:17230`) with an lldb watchpoint on the dict slot, or by
+   breaking `mojo_dict_set_str` with `pname == 'a'`.)
+   A function header and prototype with BLANK parameter types and a zero overload hash: `int64_t g_000000 ( a)` where the reference
    has `int64_t g_9f63a2 (int64_t a)`; the call site names the same `g_000000 (3)`. `_signature_ctypes` returns a one-element list
    holding `''` (lldb: `mojo_list_get_str(result, 0)` is `""`), `_param_ctype` itself answers `int64_t` when asked directly, and
    `GimpleGen__param_ctype` is never called, so the empty entry comes from another branch of `_signature_ctypes`
