@@ -9400,7 +9400,14 @@ def _keep_tagged_arg(gen, csym: str, index: int, aval: str) -> bool:
         return True
     if _t == 0:
         return False
-    return aval in gen._cur_default_none_params
+    # Only a parameter DECLARED `= None`: `_cur_default_none_params` also holds the
+    # parameters a call site's bool/None LITERAL tagged, and forwarding one of
+    # those (`def _listdir(dirname, dironly): ... _iterdir(dirname, dironly)`,
+    # `_listdir(p, False)`) to a generator or other plain-word slot must unbox it.
+    _fn = gen._current_func_node
+    if _fn is None or aval not in gen._cur_default_none_params:
+        return False
+    return param_default_is_none(_fn, aval)
 
 
 def _callee_param_is_tagged(gen, csym: str, index: int) -> int:
