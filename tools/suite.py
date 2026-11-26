@@ -1908,6 +1908,11 @@ test('selfhost-struct-layout-map',
      desc='every field declared in fire_compiler.py has a row in the '
           'hardcoded struct_field_types map in module_gen.py, so the emitted '
           'self-host C struct defines every member the closure reads')
+test('ctx-params-annotated',
+     [PY, 'test_ctx_params_annotated.py'], mem='tiny',
+     desc='a `ctx` parameter (the middle tier\'s generator) is annotated: '
+          'unannotated, `ctx.var_types` is a dynamic getattr in the '
+          'self-hosted compiler')
 test('tagged-param-forwarded',
      [PY, 'test_tagged_param_forwarded.py'], mem='small',
      desc='a tagged `= None` parameter forwarded to another keeps its box '
@@ -5201,7 +5206,8 @@ BUCKETS = {
               'dotted-module-global-accessor', 'importer-param-forwarder',
               'sys-maxsize-value', 'uncompiled-marker-alias',
               'presence-helpers-annotated', 'runtime-function-not-prefix',
-              'method-none-default-boxed', 'tagged-param-forwarded'],
+              'method-none-default-boxed', 'tagged-param-forwarded',
+              'ctx-params-annotated'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus
