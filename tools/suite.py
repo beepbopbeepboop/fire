@@ -1912,6 +1912,29 @@ test('selfhost-struct-layout-map',
      desc='every field declared in fire_compiler.py has a row in the '
           'hardcoded struct_field_types map in module_gen.py, so the emitted '
           'self-host C struct defines every member the closure reads')
+test('presence-store-before-mint',
+     [PY, 'test_presence_store_before_mint.py'], mem='tiny',
+     desc='a field is not minted presence-tracked after a store of it was '
+          'emitted without a bit (import-cycle order; self-hosted compiler '
+          'AttributeError on var_types)')
+test('annotated-self-field-struct',
+     [PY, 'test_annotated_self_field_struct.py'], mem='small',
+     desc='`self.f: Cls = make()` types the field Cls *, not the erased word '
+          '(the IR\'s Instr.lhs: the self-hosted compiler printed garbage)')
+test('itcursor-cursor-for',
+     [PY, 'test_itcursor_cursor_for.py'], mem='tiny',
+     desc='itcursor.cursor_for returns the record through _as_dict (a boxed '
+          '`.get` result crashed the self-hosted compiler lowering len(x))')
+test('call-node-params-annotated',
+     [PY, 'test_call_node_params_annotated.py'], mem='tiny',
+     desc='lowering helpers annotate their call-node parameter (an unannotated '
+          '`node.args` param was typed `Ex *` by field evidence and the '
+          'self-hosted compiler read a type tag as a list)')
+test('ctx-params-annotated',
+     [PY, 'test_ctx_params_annotated.py'], mem='tiny',
+     desc='a `ctx` parameter (the middle tier\'s generator) is annotated: '
+          'unannotated, `ctx.var_types` is a dynamic getattr in the '
+          'self-hosted compiler')
 test('tagged-param-forwarded',
      [PY, 'test_tagged_param_forwarded.py'], mem='small',
      desc='a tagged `= None` parameter forwarded to another keeps its box '
@@ -5205,7 +5228,10 @@ BUCKETS = {
               'dotted-module-global-accessor', 'importer-param-forwarder',
               'sys-maxsize-value', 'uncompiled-marker-alias',
               'presence-helpers-annotated', 'runtime-function-not-prefix',
-              'method-none-default-boxed', 'tagged-param-forwarded'],
+              'method-none-default-boxed', 'tagged-param-forwarded',
+              'ctx-params-annotated', 'presence-store-before-mint',
+              'call-node-params-annotated', 'itcursor-cursor-for',
+              'annotated-self-field-struct'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus

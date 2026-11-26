@@ -8908,7 +8908,7 @@ def is_typing_cast_call(gen, node) -> bool:
             and not gen._locally_binds_name('cast'))
 
 
-def lower_typing_cast_call(gen, node) -> tuple[str, str]:
+def lower_typing_cast_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """`cast(type, value)` -> `value`: lower only the value argument and
     hand its (ctype, val) back as the call's result — the object identity
     CPython's cast has, with no call and no diagnostic. The type argument

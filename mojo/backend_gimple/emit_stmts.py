@@ -132,8 +132,12 @@ def gen_stmt(gen, node):
         # mismatches.md, was removed 2026-09-26 once verified; its remaining
         # live residue is bugs/hard/CODEGEN_function_scoped_import_module_not_
         # inlined.md, which is a different mechanism and does not own this.)
-        filename = '' + (getattr(gen, '_line_src_file', '')
-                         or getattr(gen, '_current_filename', ''))
+        # Typed field reads, not `getattr(gen, name, '')`: the compiled compiler
+        # gave `getattr` with a default back as an erased word, and the
+        # directive came out `#line 2 "6171866099"` (a string's address).
+        filename = _as_str(gen._line_src_file)
+        if not filename:
+            filename = _as_str(gen._current_filename)
         gen._stmt_line_directive = (f"#line {node.line} \"{filename}\"" if filename
                                     else f"#line {node.line}")
 

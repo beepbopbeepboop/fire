@@ -3015,6 +3015,9 @@ class GimpleGen:
         self._scope_live_depth: list = []
         self._scope_live_fn: list = []
         self._current_filename: str = ""  # filename for #line directives
+        # The source file a re-emitted INHERITED method body belongs to (overrides
+        # `_current_filename` in `#line` directives); "" outside that unit.
+        self._line_src_file: str = ""
         self._stmt_line_directive: str | None = None  # `#line` for the innermost statement being emitted (see emit_stmts.gen_stmt)
         # external_call["name", Ret](args) targets → (ret_ctype, [arg_ctypes]); first use wins.
         # Shared across imported modules so the root preamble can emit one extern proto each.
@@ -3392,6 +3395,9 @@ class GimpleGen:
         # Argument values bound for a tagged-word parameter in the call being lowered
         # (`_box_param_call_args` fills it, `_emit_call` consumes it): they keep their box.
         self._tagged_call_arg_vals: set[str] = set()
+        # `<Struct>\x1f<field>` of every field store emitted with no presence bit (see
+        # `types.presence_set_emit`); `_mark_presence_field` will not mint those.
+        self._stores_without_presence: set[str] = set()
         # free-function C symbol -> its bare source name (`_func_csym` fills it)
         self._csym_bare: dict[str, str] = {}
         self._early_def_pts_used: dict[str, list] = {}
@@ -4972,7 +4978,7 @@ class GimpleGen:
     def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict: dict, call_has_spread=False):
         return ggc._pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
 
-    def _expand_sole_spread_into_fixed_slots(self, node, fname, fname_raw, arg_pairs, expected_params):
+    def _expand_sole_spread_into_fixed_slots(self, node: CallExpr, fname, fname_raw, arg_pairs, expected_params):
         return ggc._expand_sole_spread_into_fixed_slots(self, node, fname, fname_raw, arg_pairs, expected_params)
 
     def _lower_named_call(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:
@@ -5604,7 +5610,7 @@ class GimpleGen:
         return gst._gen_stmt_WithStmt(self, node)
 
     # ---- delegates via gex ----
-    def _lower_strided(self, node, store: bool):
+    def _lower_strided(self, node: CallExpr, store: bool):
         return gex._lower_strided(self, node, store)
     def lower_expr(self, node) -> tuple[str, str]:
         _lt, _lv = gex.lower_expr(self, node)
@@ -6147,9 +6153,9 @@ class GimpleGen:
         return ggc._future_done_callback_kind_tag(cb_ctype)
     def _lower_generator_next(self, av: str, api: dict) -> tuple[str, str]:
         return ggc._lower_generator_next(self, av, api)
-    def _lower_generator_send(self, node, av: str, api: dict) -> tuple[str, str]:
+    def _lower_generator_send(self, node: CallExpr, av: str, api: dict) -> tuple[str, str]:
         return ggc._lower_generator_send(self, node, av, api)
-    def _lower_generator_throw(self, node, av: str, api: dict) -> tuple[str, str]:
+    def _lower_generator_throw(self, node: CallExpr, av: str, api: dict) -> tuple[str, str]:
         return ggc._lower_generator_throw(self, node, av, api)
     def _lower_generator_close(self, node, av: str, api: dict) -> tuple[str, str]:
         return ggc._lower_generator_close(self, node, av, api)

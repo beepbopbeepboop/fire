@@ -267,7 +267,7 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
     # in `GimpleGen.__init__`, not created here: a lazy `hasattr` initialiser
     # never runs in the compiled compiler (the field exists and is NULL there).
 
-    def _scan_for_closures(ctx, outer_name: str, outer_scope: dict, body: list):
+    def _scan_for_closures(ctx: 'GimpleGen', outer_name: str, outer_scope: dict, body: list):
         """Scan a function/method body for nested FunctionDefs and register them as closures."""
         enriched_scope = dict(outer_scope)
         _saved_vt2 = dict(ctx.var_types)

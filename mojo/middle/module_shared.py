@@ -1423,6 +1423,20 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                         ft = _UNKNOWN_FIELD_CTYPE
                 else:
                     ft = _UNKNOWN_FIELD_CTYPE
+                # An EXPLICIT struct annotation on the assignment
+                # (`self.lhs: Ex = ex_none()`) is the field's type when the value
+                # told us nothing (the erased word): a call to a function defined
+                # LATER, or `self`, has no type yet, and the field came out
+                # `int64_t`, so every `self.lhs.show()` was a method call on a
+                # word -- the identity stub. The self-hosted compiler printed
+                # `\xd3\b = 4368822592;` for every statement (the IR's `Ex`/`Instr`).
+                _ann_sf = getattr(node, 'type_ann', None)
+                if (_ann_sf is not None and gimple_ctypes.TypeLattice.is_int_word(ft)
+                        and isinstance(_ann_sf, str)):
+                    _aft = self._resolve_type(_ann_sf)
+                    if (isinstance(_aft, str) and gimple_ctypes.TypeLattice.ends_in_star(_aft)
+                            and _aft[:-2].strip() in self.struct_field_types):
+                        ft = _aft
                 _updates.append((fn, ft))
                 # `self._str_pool: dict[str, str] = {}` in
                 # __init__: capture the dict VALUE type from the
