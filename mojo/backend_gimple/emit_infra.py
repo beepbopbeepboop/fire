@@ -3256,7 +3256,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 and not _is_pointer_view_helper(fname)
                 and not rt_call.is_runtime_function(_as_str(fname))
                 and aval not in _tagged_args
-                and not _callee_param_is_tagged(gen, _as_str(fname), i)
+                and not _keep_tagged_arg(gen, _as_str(fname), i, aval)
                 and not _as_str(fname).startswith('__mojo_tuple_box_')):
             # A slot read out of a kind-mixed tuple/list arrives as a BOX, and a
             # `None` slot is the shared kind-'n' box. A USER function's
@@ -9384,9 +9384,30 @@ def _box_float_call_args(gen, callee: str, arg_pairs: list) -> list:
     return out
 
 
-def _callee_param_is_tagged(gen, csym: str, index: int) -> bool:
+def _keep_tagged_arg(gen, csym: str, index: int, aval: str) -> bool:
+    """Does a may-box argument keep its box through `_emit_call`?
+
+    Yes when the callee's parameter is the tagged word. When the callee is not
+    known, yes for the caller's OWN `= None` parameter passed on unchanged
+    (`def outer(x=None): return inner(x)`): that parameter is the tagged word
+    here, and forwarding it to a function with the same default is the common
+    case. No otherwise, so a `dict.get` miss handed to a plain pointer slot
+    still becomes NULL."""
+    _t = _callee_param_is_tagged(gen, csym, index)
+    if _t == 1:
+        return True
+    if _t == 0:
+        return False
+    return aval in gen._cur_default_none_params
+
+
+def _callee_param_is_tagged(gen, csym: str, index: int) -> int:
     """Is positional parameter `index` of the free function emitted as `csym` the
     tagged word (`def f(x=None)`, `infra_infer.param_boxed_names`)?
+
+    1 yes, 0 no, -1 not known: the callee's definition has not been seen by this
+    compile yet (an import cycle compiles the importer first, and the tables are
+    built from the functions a compile has seen).
 
     A call that reaches `_emit_call` without passing `_box_param_call_args`
     (`mod.f(x)` through a module attribute, a call through a wrapper) cannot say
@@ -9394,14 +9415,16 @@ def _callee_param_is_tagged(gen, csym: str, index: int) -> bool:
     forwards into the integer 0."""
     _bare = gen._csym_bare.get(csym)
     if _bare is None:
-        return False
+        return -1
     _names = getattr(gen, '_param_box_names', {}).get(_bare)
-    if not _names:
-        return False
-    _pn = getattr(gen, '_func_param_names', {}).get(_bare) or []
+    _pn = getattr(gen, '_func_param_names', {}).get(_bare)
+    if _names is None or _pn is None:
+        return -1
     if index < 0 or index >= len(_pn):
-        return False
-    return _as_str(_pn[index]) in _names
+        return 0
+    if _as_str(_pn[index]) in _names:
+        return 1
+    return 0
 
 
 def _box_param_call_args(gen, callee: str, arg_pairs: list,
