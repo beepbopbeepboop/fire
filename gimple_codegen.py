@@ -3392,6 +3392,9 @@ class GimpleGen:
         # Argument values bound for a tagged-word parameter in the call being lowered
         # (`_box_param_call_args` fills it, `_emit_call` consumes it): they keep their box.
         self._tagged_call_arg_vals: set[str] = set()
+        # `<Struct>\x1f<field>` of every field store emitted with no presence bit (see
+        # `types.presence_set_emit`); `_mark_presence_field` will not mint those.
+        self._stores_without_presence: set[str] = set()
         # free-function C symbol -> its bare source name (`_func_csym` fills it)
         self._csym_bare: dict[str, str] = {}
         self._early_def_pts_used: dict[str, list] = {}

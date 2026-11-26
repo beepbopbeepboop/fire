@@ -2258,6 +2258,14 @@ def presence_set_emit(gen, sdef, member, obj_c, op) -> None:
     typed temps, the same way the codegen's other component stores do."""
     bit = presence_bit(sdef, member)
     if bit is None:
+        # A store emitted with no bit. If the field is minted LATER (a module
+        # compiled after this one, in an import cycle, is where the struct is
+        # defined and its phantom fields are found), reads emitted from then on
+        # would be guarded by a bit this store never sets: `AttributeError` on
+        # a field that was assigned. `_mark_presence_field` refuses to mint a
+        # field recorded here.
+        if sdef is not None:
+            gen._stores_without_presence.add(_as_str(sdef.name) + '\x1f' + _as_str(member))
         return
     cur = gen._new_temp('uint64_t')
     _ir_build.assign(gen, cur, f"{obj_c}{op}{PRESENCE_WORD}[{bit[0]}]")

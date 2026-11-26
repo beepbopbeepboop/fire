@@ -1379,7 +1379,7 @@ def _homogeneous_tuple_ann_elem(self, _ret_ann):
 
 
 
-def _mark_presence_field(sdef, fname):
+def _mark_presence_field(sdef, fname, stored_without_bit):
     """Record the compiler-MINTED field `fname` of `sdef` as presence-tracked
     (see StructDef.presence_fields), unless `sdef`'s own `__init__` assigns
     it: a constructor-assigned field is part of every instance by definition,
@@ -1394,6 +1394,12 @@ def _mark_presence_field(sdef, fname):
     if sdef.presence_fields is None:
         sdef.presence_fields = []
     if fname in sdef.presence_fields:
+        return
+    # A store of this field was already emitted with no presence bit (its
+    # module was compiled before this struct's phantom fields were found, which
+    # an import cycle makes ordinary): minting now would guard every later read
+    # on a bit that store never sets (`presence_set_emit`).
+    if (_as_str(sdef.name) + '\x1f' + fname) in stored_without_bit:
         return
     for _m in sdef.methods:
         if _m.name != '__init__':
@@ -8553,7 +8559,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         self.struct_field_types[s.name][fn] = ft
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
-                            _mark_presence_field(s, fn)
+                            _mark_presence_field(s, fn, self._stores_without_presence)
                             already.add(fn)
                             _walk_ast_invalidate(s)
             # A method that returns a `bool`-annotated FIELD hands back an
@@ -8645,7 +8651,7 @@ def _gmp_register_struct_fields(self, stmts: list, _xf_own_ctor_params: dict, al
                         self.struct_field_types[s.name][fn] = _base_ft if _base_ft is not None else ft
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
-                            _mark_presence_field(s, fn)
+                            _mark_presence_field(s, fn, self._stores_without_presence)
                             already.add(fn)
                             _walk_ast_invalidate(s)
 
@@ -8741,7 +8747,7 @@ def _gmp_order_struct_fields_base_first(self, all_struct_defs: list) -> None:
                 table[f] = _as_str(self.struct_field_types[b][f])
             if f not in _declared:
                 sdef.fields.append(VarDecl(name=f, type_ann=None, value=None))
-                _mark_presence_field(sdef, f)
+                _mark_presence_field(sdef, f, self._stores_without_presence)
                 _declared.add(f)
                 _walk_ast_invalidate(sdef)
         if desired != list(table.keys()):
@@ -16463,7 +16469,7 @@ def gen_module_impl(self, stmts: list):
                 if target_def is not None and not any(
                         isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):
                     target_def.fields.append(VarDecl(name=fn, type_ann=None, value=None))
-                    _mark_presence_field(target_def, fn)
+                    _mark_presence_field(target_def, fn, self._stores_without_presence)
                     _walk_ast_invalidate(target_def)
 
     def _scan_scopes_for_local_field_access(body, own_struct_name):
