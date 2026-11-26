@@ -11077,21 +11077,27 @@ def _gmh_element_is_scalar(self, callee, e):
 # reaches a container guess, so it keeps the int64_t box that
 # `_param_noncontainer_obs` exists to choose, and is not refused.
 def _gmh_refuse_mixed_container_params(self):
+    """A parameter passed a container at one call site and something else at another.
+
+    A NUMBER cannot be iterated, so a number beside a container is still refused at compile
+    time. A STRING iterates at run time: the loop over the kind-neutral word dispatches
+    (`mojo_iter_boxed_list`: a list its elements, a string its one-character strings), so a
+    string beside a container makes the parameter that word instead of the `MojoList *`
+    guess the body's `for x in xs` left in `_inferred_param_types` (which read the string as a
+    list header: SIGSEGV)."""
     for _mc_callee, _mc_pm in list(self._param_container_obs.items()):
         _mc_ck = _as_str(_mc_callee)
         _mc_nc = self._param_noncontainer_obs.get(_mc_ck) or set()
+        _mc_str = self._param_str_obs.get(_mc_ck) or set()
+        _mc_num = self._param_numeric_obs.get(_mc_ck) or set()
         _mc_inf = self._inferred_param_types.get(_mc_ck) or {}
         for _mc_pname, _mc_types in list(self._param_container_obs[_mc_ck].items()):
             _mc_pk = _as_str(_mc_pname)
-            if not _mc_types or _mc_pk not in _mc_nc:
+            if not _mc_types or (_mc_pk not in _mc_nc and _mc_pk not in _mc_str):
                 continue
-            # Refuse when the same parameter is observed as a container at one
-            # call site and a non-container (scalar) at another, and the body
-            # uses the parameter as a container (its inferred type is
-            # container-shaped). Str/tuple-slot variables are not counted as
-            # non-container observations (their kind is decided at run time by
-            # word dispatch), so they don't trigger refusal here.
-            if _as_str(_mc_inf.get(_mc_pk)) in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+            if _as_str(_mc_inf.get(_mc_pk)) not in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+                continue
+            if _mc_pk in _mc_num:
                 raise RuntimeError(
                     f"parameter {_mc_pk!r} of {_mc_ck!r} is passed a "
                     "container at one call site and a str or number at "
@@ -11099,6 +11105,14 @@ def _gmh_refuse_mixed_container_params(self):
                     "compiled path has no representation for that yet "
                     "(the per-kind clone pass only covers literal "
                     "arguments)")
+            # Only strings beside the container(s): the word dispatch answers both.
+            self._inferred_param_types[_mc_ck][_mc_pk] = 'int64_t'
+            _mc_kinds = self._container_param_kinds.get(_mc_ck)
+            if _mc_kinds is not None and _mc_pk in _mc_kinds:
+                _mc_kinds.pop(_mc_pk, None)
+            _mc_ct = self._param_container_types.get(_mc_ck)
+            if _mc_ct is not None:
+                _mc_ct[_mc_pk] = ''
 
 
 # The same "this untyped int64_t slot PROVABLY may hold a string"
@@ -17853,6 +17867,12 @@ def gen_module_impl(self, stmts: list):
     # (`''`) for that slot, which leaves it at the `int64_t` box the scalar
     # pass already chose for a mixed slot (see `_int64_may_hold_str`).
     self._param_noncontainer_obs: dict[str, set] = {}   # callee -> {pname}
+    # The two kinds of non-container a call site can pass beside a container, kept apart
+    # because they are answered differently: a STRING iterates at run time through the word
+    # dispatch (`mojo_iter_boxed_list`), so the parameter becomes the kind-neutral word; a
+    # NUMBER cannot be iterated and keeps the compile-time refusal.
+    self._param_str_obs: dict[str, set] = {}       # callee -> {pname} passed a str
+    self._param_numeric_obs: dict[str, set] = {}   # callee -> {pname} passed a number
     _free_params: dict = {}
     _gmp_collect_free_params(self, _free_params, all_functions)
 
@@ -18187,6 +18207,52 @@ def gen_module_impl(self, stmts: list):
                 return False
         return True
 
+    def _slot_is_str(callee, index, arity):
+        """Is slot `index` of every return of `callee` a string literal?"""
+        _cfd = _fn_by_name.get(callee)
+        if _cfd is None:
+            return False
+        _nested_ids: set = set()
+        for _n in _walk_ast(_cfd.body):
+            if isinstance(_n, gimple_ctypes.FunctionDef):
+                for _m in _walk_ast(_n.body):
+                    _nested_ids.add(id(_m))
+        _seen = 0
+        for _n in _walk_ast(_cfd.body):
+            if isinstance(_n, gimple_ctypes.ReturnStmt) and id(_n) not in _nested_ids:
+                _rv = _n.value
+                if (not isinstance(_rv, gimple_ctypes.TupleExpr)
+                        or len(_rv.elements) != arity
+                        or not isinstance(_rv.elements[index], gimple_ctypes.StringLiteral)):
+                    return False
+                _seen = _seen + 1
+        return _seen > 0
+
+    def _unpack_from_str_slot(a, caller_name):
+        """Is `a` a name whose every binding in `caller_name` is a tuple-unpack slot that
+        every return of the callee fills with a string literal?"""
+        if not isinstance(a, gimple_ctypes.IdentExpr):
+            return False
+        _bs = _caller_bindings(_as_str(caller_name)).get(_as_str(a.name))
+        if not _bs:
+            return False
+        for _b in _bs:
+            if _b is None or not _slot_is_str(_b[0], _b[1], _b[2]):
+                return False
+        return True
+
+    def _note_arg_kind(callee, pname, a, caller_name, st):
+        """Record whether a non-container call argument is a STRING or a NUMBER."""
+        if (isinstance(a, gimple_ctypes.StringLiteral)
+                or (st and gimple_ctypes.TypeLattice.is_cstr(_as_str(st)))
+                or _unpack_from_str_slot(a, caller_name)):
+            self._param_str_obs.setdefault(_as_str(callee), set()).add(_as_str(pname))
+        elif (isinstance(a, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral,
+                             gimple_ctypes.BoolLiteral))
+                or _gmh_is_noncontainer_arg(self, a, caller_name, st)
+                or _unpack_from_scalar_slot(a, caller_name)):
+            self._param_numeric_obs.setdefault(_as_str(callee), set()).add(_as_str(pname))
+
     _scalar_obs: dict[str, dict[str, set]] = {}   # callee -> {pname -> {types}}
     # Struct-pointer observations, collected in their own map (see
     # `_arg_struct_ptr_type`'s docstring for why they must not share
@@ -18337,6 +18403,8 @@ def gen_module_impl(self, stmts: list):
                     _record_param_container(callee, pnames[i], _pc)
 
                 st = _gmh_arg_scalar_type(self, caller_name, a)
+                if _pc is None and not _unpack_from_container_slot(a, caller_name):
+                    _note_arg_kind(callee, pnames[i], a, caller_name, st)
                 if (_pc is None
                         and not _unpack_from_container_slot(a, caller_name)
                         and (_gmh_is_noncontainer_arg(self, a, caller_name, st)
@@ -18484,6 +18552,9 @@ def gen_module_impl(self, stmts: list):
                                   _gmh_arg_scalar_type(self, caller_name, _kw[1]))
                                   or _unpack_from_scalar_slot(_kw[1], caller_name))):
                             _gmh_record_param_noncontainer(self, callee, _kwn)
+                        if _kwpc is None and not _unpack_from_container_slot(_kw[1], caller_name):
+                            _note_arg_kind(callee, _kwn, _kw[1], caller_name,
+                                           _gmh_arg_scalar_type(self, caller_name, _kw[1]))
                         break
 
     # A CONSTRUCTOR call is a `CallExpr` whose callee is a bare `IdentExpr`
