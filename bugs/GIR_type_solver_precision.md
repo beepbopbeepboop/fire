@@ -22,7 +22,7 @@ the closure, so its own code must compile too). The ledger (`FIRE_TSOLVE_LEDGER`
 zero `conflict`, zero `weak` and zero `undecided` lines. `weak` and the split of the old
 `conflict` line are new; section 4.5 says why. The only gcc errors allowed to remain are the
 three `invalid operands to binary + (have 'MojoList *' and 'double')`, which belong to
-`bugs/GIR_selfhost_unexplained_error_kinds.md`.
+the `MojoList * + double` lowering defect (fixed in `52e02dc2d`; the closure compiles with 0 gcc errors).
 
 ## 2. Measured state (HEAD `0753a4f1f`, 2026-11-24)
 
@@ -711,7 +711,7 @@ Closure acceptance: section 8.
     the audit of the other bare-name readers remains.
   * bugs/GATE_selfhost_and_mojoc_link_failures.md: `make gate` fails in `mojoc` and `selfhost`
     (`WordFacts`); the pre-session check on 91140cc58 is pending.
-  * bugs/GIR_selfhost_unexplained_error_kinds.md: the three `MojoList * + double` errors; reproduced by an
+  * (FIXED 52e02dc2d) the three `MojoList * + double` errors; reproduced by an
     external -Os build; the closure TU is the oracle.
 - Follow-ups not blocking acceptance: `sty.py` helper names with `_sty_` prefixes (kept; they were the
   collision fix); the request/provide loop (4.6) replaced by a loader object (recorded deviation).
