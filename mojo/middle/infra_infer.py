@@ -1544,12 +1544,20 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                                 # leaving the slot UNWRITTEN keeps it the generic
                                 # int64_t word and the runtime dispatch decides.
                                 _fallback = None
-                        _anchor = (_returned_param_containers(func)
-                                   .get(pname)
-                                   or _rebound_param_containers(gen, func)
-                                   .get(pname)
-                                   or ('char *' if _os_path_arg else None))
-                        if _anchor is not None or _fallback is not None:
+                        # Three statements, not one `a.get(k) or b.get(k) or (x if c else
+                        # None)` chain: a `.get` with no default on an unnamed value domain is
+                        # the boxed read (a miss is the None BOX), while the ternary's `None`
+                        # arm is the NULL word, so the merged local held a box on one path and
+                        # a bare 0 on the other and `is not None` answered true for the 0. The
+                        # self-hosted compiler then wrote `''` as every unannotated
+                        # parameter's type. Both helpers return `dict[str, str]` so a miss is
+                        # NULL, the same word the `None` arm is.
+                        _anchor: str = _returned_param_containers(func).get(pname)
+                        if not _anchor:
+                            _anchor = _rebound_param_containers(gen, func).get(pname)
+                        if not _anchor and _os_path_arg:
+                            _anchor = 'char *'
+                        if _anchor or _fallback is not None:
                             inferred[pname] = _anchor or _fallback
 
             # If not subscripted, try to infer from function calls
@@ -3067,7 +3075,7 @@ def _bare_returned_params(body: list, names: set, out: set) -> None:
             _bare_returned_params(node.body, names, out)
 
 
-def _returned_param_containers(func) -> dict:
+def _returned_param_containers(func) -> dict[str, str]:
     """`{param name: ctype}` for every parameter of `func` that a DECLARED
     container return annotation pins, because the body hands it straight back.
 
@@ -3135,7 +3143,7 @@ def _returned_param_containers(func) -> dict:
     return out
 
 
-def _rebound_param_containers(gen, func) -> dict:
+def _rebound_param_containers(gen, func) -> dict[str, str]:
     """`{param name: ctype}` for every UNANNOTATED parameter of `func` that the
     body REBINDS to a container of one definite kind, read from the first
     binding `_prebound_local_ctypes` already decides for every local.
