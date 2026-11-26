@@ -479,8 +479,10 @@ def _reset_func(gen, body: list = None, params: list = None,
     # into a container/pointer local unwraps it (see emit_stmts). Temp names
     # restart per function, so the set does too.
     gen._dict_get_boxed_temps: set = set()
-    # Parameters declared `= None` (tagged words; see `_reset_func`).
-    gen._cur_default_none_params: set = set()
+    # Parameters declared `= None` (tagged words) are recorded at the top of this
+    # function (`gen._cur_default_none_params = set(default_none_params ...)`). They
+    # were RESET to the empty set here, below that assignment, so every reader
+    # (`_cur_boxed_params`, `_keep_tagged_arg`) saw none.
     # Temp/var name -> (dict_temp, key_temp, key_ctype) for a `d[k]` read
     # whose value kind is only known on the slot at runtime. Repr/stringify
     # can ask the runtime (`mojo_dict_repr_slot`) instead of printing the raw
