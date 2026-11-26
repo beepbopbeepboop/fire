@@ -322,11 +322,3 @@ def kind_join(kind: str, old: STy, val: STy) -> STy:
         k = DYN
         v = DYN
     return cap(dict_of(join(old_k, k), join(old_v, v)))
-
-
-def _join_all(types: list) -> STy:
-    out = BOT
-    for t in types:
-        out = join(out, t)
-    return out
-
