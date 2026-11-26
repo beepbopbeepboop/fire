@@ -4941,6 +4941,35 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _ctor_cname_via_module(gen, func.obj.name, func.member),
             node.args, node.kwargs)
 
+    # `mod.Class.method(args)` -- a classmethod / staticmethod reached through a
+    # module alias (`gimple_ctypes.TypeLattice.is_word(t)`). The receiver
+    # `mod.Class` is a class reference, which lowers to the zero placeholder, and
+    # `.method` on that word was the unknown-method stub: every call returned 0.
+    # The compiler itself calls `TypeLattice.<predicate>` through `gimple_ctypes`
+    # about 2600 times, so the self-hosted compiler's type tests were all false
+    # and every function came out with no return type. Resolve the class through
+    # its module exactly as the qualified constructor above does, and lower the
+    # call as `Class.method(args)`, the shape that already works in one module.
+    _qrecv = func.obj
+    if (isinstance(_qrecv, gimple_ctypes.MemberExpr)
+            and isinstance(_qrecv.obj, gimple_ctypes.IdentExpr)
+            and _qrecv.obj.name in gen.imported_symbols
+            and _qrecv.obj.name in getattr(gen, '_module_alias_names', ())
+            and _qrecv.obj.name not in gen.struct_field_types
+            and _qrecv.obj.name not in gen.var_types
+            and _qrecv.member in gen.struct_field_types
+            and _qrecv.member not in gen.var_types
+            and module_member_is_struct(gen, _qrecv.obj.name, _qrecv.member)):
+        _qcls = _as_str(_ctor_cname_via_module(gen, _qrecv.obj.name, _qrecv.member))
+        if _qcls in gen.struct_field_types:
+            _qfunc = gimple_ctypes.MemberExpr(
+                obj=gimple_ctypes.IdentExpr(name=_qcls, line=_qrecv.line, col=_qrecv.col),
+                member=func.member, line=func.line, col=func.col)
+            _qnode = gimple_ctypes.CallExpr(
+                func=_qfunc, args=node.args, kwargs=node.kwargs,
+                line=node.line, col=node.col)
+            return _lower_method_call(gen, _qnode)
+
     # `g.send(v)` — resuming a compiled generator with a value for the
     # `yield` it is suspended on: the rest of Python's generator protocol
     # alongside `next(g)` (see _lower_call). Checked FIRST, before any of
