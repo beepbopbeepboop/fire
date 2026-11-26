@@ -3018,6 +3018,10 @@ class GimpleGen:
         # The source file a re-emitted INHERITED method body belongs to (overrides
         # `_current_filename` in `#line` directives); "" outside that unit.
         self._line_src_file: str = ""
+        # The FunctionDef being lowered (None at module level / outside a function). Declared
+        # here: it was only assigned inside `gen_func`, so a read before the first function
+        # (`_keep_tagged_arg`) raised AttributeError.
+        self._current_func_node: FunctionDef = None
         self._stmt_line_directive: str | None = None  # `#line` for the innermost statement being emitted (see emit_stmts.gen_stmt)
         # external_call["name", Ret](args) targets → (ret_ctype, [arg_ctypes]); first use wins.
         # Shared across imported modules so the root preamble can emit one extern proto each.
