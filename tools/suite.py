@@ -1913,6 +1913,10 @@ test('presence-store-before-mint',
      desc='a field is not minted presence-tracked after a store of it was '
           'emitted without a bit (import-cycle order; self-hosted compiler '
           'AttributeError on var_types)')
+test('itcursor-cursor-for',
+     [PY, 'test_itcursor_cursor_for.py'], mem='tiny',
+     desc='itcursor.cursor_for returns the record through _as_dict (a boxed '
+          '`.get` result crashed the self-hosted compiler lowering len(x))')
 test('call-node-params-annotated',
      [PY, 'test_call_node_params_annotated.py'], mem='tiny',
      desc='lowering helpers annotate their call-node parameter (an unannotated '
@@ -5218,7 +5222,7 @@ BUCKETS = {
               'presence-helpers-annotated', 'runtime-function-not-prefix',
               'method-none-default-boxed', 'tagged-param-forwarded',
               'ctx-params-annotated', 'presence-store-before-mint',
-              'call-node-params-annotated'],
+              'call-node-params-annotated', 'itcursor-cursor-for'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus
