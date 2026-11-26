@@ -1838,9 +1838,13 @@ def _uncompiled_module_marker(gen, node) -> str:
     # MODULE is what says whether its code was emitted. Without this the call in
     # `module_gen` raised `module 'mojo.middle.import_ambiguity' is not compiled
     # into this binary` in the self-hosted compiler on its first compile.
+    # Only a PYTHON module: a `.mojo` module answers the caller's "has no
+    # declaration" check (`_lower_module_marker_call`), which needs the marker.
     if _mod and _mod in (getattr(gen, '_compiled_modules', None) or ()):
-        cache[name] = ''
-        return ''
+        _src_path = gen._submodule_source_path(_mod)
+        if not (_src_path and _src_path.endswith('.mojo')):
+            cache[name] = ''
+            return ''
     _resolvable = True
     if _mod:
         try:

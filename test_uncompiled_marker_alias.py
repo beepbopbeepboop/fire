@@ -22,6 +22,9 @@ class _Gen:
         self.imported_symbols = {'_ia': {'module': 'zz_no_such_pkg.mod'}}
         self._compiled_modules = compiled
 
+    def _submodule_source_path(self, module):
+        return None
+
 
 def _call():
     return N.CallExpr(N.MemberExpr(N.IdentExpr('_ia'), 'f'), [], [])

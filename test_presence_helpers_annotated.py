@@ -16,7 +16,7 @@ def main() -> int:
     bad = []
     for fn in (T.presence_bit, T.presence_word_count, T.presence_set_stmt):
         ann = fn.__annotations__.get('sdef')
-        if ann is not N.StructDef:
+        if ann is not N.StructDef and ann != 'StructDef':
             bad.append('%s: sdef annotated %r' % (fn.__name__, ann))
     if bad:
         print('FAIL: ' + '; '.join(bad))
