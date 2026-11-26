@@ -3015,6 +3015,9 @@ class GimpleGen:
         self._scope_live_depth: list = []
         self._scope_live_fn: list = []
         self._current_filename: str = ""  # filename for #line directives
+        # The source file a re-emitted INHERITED method body belongs to (overrides
+        # `_current_filename` in `#line` directives); "" outside that unit.
+        self._line_src_file: str = ""
         self._stmt_line_directive: str | None = None  # `#line` for the innermost statement being emitted (see emit_stmts.gen_stmt)
         # external_call["name", Ret](args) targets → (ret_ctype, [arg_ctypes]); first use wins.
         # Shared across imported modules so the root preamble can emit one extern proto each.

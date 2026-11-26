@@ -1913,6 +1913,10 @@ test('presence-store-before-mint',
      desc='a field is not minted presence-tracked after a store of it was '
           'emitted without a bit (import-cycle order; self-hosted compiler '
           'AttributeError on var_types)')
+test('annotated-self-field-struct',
+     [PY, 'test_annotated_self_field_struct.py'], mem='small',
+     desc='`self.f: Cls = make()` types the field Cls *, not the erased word '
+          '(the IR\'s Instr.lhs: the self-hosted compiler printed garbage)')
 test('itcursor-cursor-for',
      [PY, 'test_itcursor_cursor_for.py'], mem='tiny',
      desc='itcursor.cursor_for returns the record through _as_dict (a boxed '
@@ -5222,7 +5226,8 @@ BUCKETS = {
               'presence-helpers-annotated', 'runtime-function-not-prefix',
               'method-none-default-boxed', 'tagged-param-forwarded',
               'ctx-params-annotated', 'presence-store-before-mint',
-              'call-node-params-annotated', 'itcursor-cursor-for'],
+              'call-node-params-annotated', 'itcursor-cursor-for',
+              'annotated-self-field-struct'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus
