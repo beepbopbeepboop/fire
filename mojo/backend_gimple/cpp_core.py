@@ -590,7 +590,7 @@ def _cpp_try_kwargs_forward_call(gen, e):
     call_args.append(dict_var)
     _kwl = Ex('lambda')
     _kwl.text = ret_ctype
-    _kwl.body = ([_cpp_opaque(ln) for ln in lines[:-1]]
+    _kwl.body = ([_cpp_opaque(ln) for ln in lines]
                  + [_cpp_instr('return', _cpp_call_ex(fsym, call_args))])
     return _kwl
 
