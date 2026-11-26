@@ -3389,6 +3389,11 @@ class GimpleGen:
         # cycle hashes the definer's parameters without the definer's call-site
         # refinement; the definer emits a forwarder under each such suffix.
         self._home_def_pts_committed: set[str] = set()
+        # Argument values bound for a tagged-word parameter in the call being lowered
+        # (`_box_param_call_args` fills it, `_emit_call` consumes it): they keep their box.
+        self._tagged_call_arg_vals: set[str] = set()
+        # free-function C symbol -> its bare source name (`_func_csym` fills it)
+        self._csym_bare: dict[str, str] = {}
         self._early_def_pts_used: dict[str, list] = {}
         # _pair_key(sanitized home-module qualifier, fn name) -> return ctype —
         # the RETURN-type twin of the store just added, and written for the same

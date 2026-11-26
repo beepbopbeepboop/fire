@@ -1912,6 +1912,24 @@ test('selfhost-struct-layout-map',
      desc='every field declared in fire_compiler.py has a row in the '
           'hardcoded struct_field_types map in module_gen.py, so the emitted '
           'self-host C struct defines every member the closure reads')
+test('tagged-param-forwarded',
+     [PY, 'test_tagged_param_forwarded.py'], mem='small',
+     desc='a tagged `= None` parameter forwarded to another keeps its box '
+          '(mojo_unbox_plain turned the omitted argument into 0)')
+test('method-none-default-boxed',
+     [PY, 'test_method_none_default_boxed.py'], mem='small',
+     desc='a method call passes a `= None` parameter (the tagged word) as the '
+          'None box, not the integer 0 (self-hosted compiler crash)')
+test('runtime-function-not-prefix',
+     [PY, 'test_runtime_function_not_prefix.py'], mem='tiny',
+     desc='"runtime helper" is an rt_sigs lookup, not a `mojo_` prefix: the '
+          'compiler\'s own mojo_middle_* symbols were handed an unconverted '
+          'None box (self-hosted compiler crash under ASLR)')
+test('presence-helpers-annotated',
+     [PY, 'test_presence_helpers_annotated.py'], mem='tiny',
+     desc='the presence-bit helpers take an annotated StructDef (an '
+          'unannotated one was a dynamic getattr that killed the '
+          'self-hosted compiler on its first compile)')
 test('uncompiled-marker-alias',
      [PY, 'test_uncompiled_marker_alias.py'], mem='tiny',
      desc='a call through `import a.b as alias` of a COMPILED module is not '
@@ -5185,7 +5203,9 @@ BUCKETS = {
               # one (bug doc deleted with the fix, 2026-11-21).
               'selfhost-struct-layout-map', 'selfhost-sig-types-declared',
               'dotted-module-global-accessor', 'importer-param-forwarder',
-              'sys-maxsize-value', 'uncompiled-marker-alias'],
+              'sys-maxsize-value', 'uncompiled-marker-alias',
+              'presence-helpers-annotated', 'runtime-function-not-prefix',
+              'method-none-default-boxed', 'tagged-param-forwarded'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus

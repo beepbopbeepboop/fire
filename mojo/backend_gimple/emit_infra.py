@@ -479,8 +479,10 @@ def _reset_func(gen, body: list = None, params: list = None,
     # into a container/pointer local unwraps it (see emit_stmts). Temp names
     # restart per function, so the set does too.
     gen._dict_get_boxed_temps: set = set()
-    # Parameters declared `= None` (tagged words; see `_reset_func`).
-    gen._cur_default_none_params: set = set()
+    # Parameters declared `= None` (tagged words) are recorded at the top of this
+    # function (`gen._cur_default_none_params = set(default_none_params ...)`). They
+    # were RESET to the empty set here, below that assignment, so every reader
+    # (`_cur_boxed_params`, `_keep_tagged_arg`) saw none.
     # Temp/var name -> (dict_temp, key_temp, key_ctype) for a `d[k]` read
     # whose value kind is only known on the slot at runtime. Repr/stringify
     # can ask the runtime (`mojo_dict_repr_slot`) instead of printing the raw
@@ -3191,6 +3193,12 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
     # while a call is still being built, and a shared list would then write the
     # inner call's buffers back at the outer call's return.
     _pending_list_unpacks: list = []
+    # The argument values bound for a TAGGED-word parameter (recorded by
+    # `_box_param_call_args` for THIS call): they keep their box, the callee
+    # reads them with `mojo_word_is_none`. Consumed here so a nested call
+    # lowered while this one is built does not see it.
+    _tagged_args = gen._tagged_call_arg_vals
+    gen._tagged_call_arg_vals = set()
     coerced_args = []
     for i, _apair in enumerate(arg_pairs):
         # `_as_str` on every unpacked slot — a `(ctype, varname)` tuple boxes
@@ -3248,7 +3256,10 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             aval = _ub
         if (gimple_ctypes.TypeLattice.is_word(atype) and gen._word_may_be_box(aval)
                 and not _is_pointer_view_helper(fname)
-                and not _as_str(fname).startswith(('mojo_', '__mojo_tuple_box_'))):
+                and not rt_call.is_runtime_function(_as_str(fname))
+                and aval not in _tagged_args
+                and not _keep_tagged_arg(gen, _as_str(fname), i, aval)
+                and not _as_str(fname).startswith('__mojo_tuple_box_')):
             # A slot read out of a kind-mixed tuple/list arrives as a BOX, and a
             # `None` slot is the shared kind-'n' box. A USER function's
             # parameter has no None word: it is `0` (the same word a `None`
@@ -9375,9 +9386,53 @@ def _box_float_call_args(gen, callee: str, arg_pairs: list) -> list:
     return out
 
 
+def _keep_tagged_arg(gen, csym: str, index: int, aval: str) -> bool:
+    """Does a may-box argument keep its box through `_emit_call`?
+
+    Yes when the callee's parameter is the tagged word. When the callee is not
+    known, yes for the caller's OWN `= None` parameter passed on unchanged
+    (`def outer(x=None): return inner(x)`): that parameter is the tagged word
+    here, and forwarding it to a function with the same default is the common
+    case. No otherwise, so a `dict.get` miss handed to a plain pointer slot
+    still becomes NULL."""
+    _t = _callee_param_is_tagged(gen, csym, index)
+    if _t == 1:
+        return True
+    if _t == 0:
+        return False
+    return aval in gen._cur_default_none_params
+
+
+def _callee_param_is_tagged(gen, csym: str, index: int) -> int:
+    """Is positional parameter `index` of the free function emitted as `csym` the
+    tagged word (`def f(x=None)`, `infra_infer.param_boxed_names`)?
+
+    1 yes, 0 no, -1 not known: the callee's definition has not been seen by this
+    compile yet (an import cycle compiles the importer first, and the tables are
+    built from the functions a compile has seen).
+
+    A call that reaches `_emit_call` without passing `_box_param_call_args`
+    (`mod.f(x)` through a module attribute, a call through a wrapper) cannot say
+    so itself, and `_emit_call`'s `mojo_unbox_plain` would turn the None box it
+    forwards into the integer 0."""
+    _bare = gen._csym_bare.get(csym)
+    if _bare is None:
+        return -1
+    _names = getattr(gen, '_param_box_names', {}).get(_bare)
+    _pn = getattr(gen, '_func_param_names', {}).get(_bare)
+    if _names is None or _pn is None:
+        return -1
+    if index < 0 or index >= len(_pn):
+        return 0
+    if _as_str(_pn[index]) in _names:
+        return 1
+    return 0
+
+
 def _box_param_call_args(gen, callee: str, arg_pairs: list,
                          arg_nodes: list = None,
-                         kwargs: list = None) -> list:
+                         kwargs: list = None,
+                         pnames: list = None) -> list:
     """Box each argument bound for a PARAMETER whose annotation its body
     contradicts (`infra_infer.param_boxed_names`), so the `int64_t` slot
     receives a tagged word that still says what kind the value is.
@@ -9389,10 +9444,12 @@ def _box_param_call_args(gen, callee: str, arg_pairs: list,
     local and another from a call. A callee with no boxed parameter returns
     the pairs unchanged, and a pair with no aligned AST node (a synthesized
     default or a spread expansion) is left alone rather than boxed blind."""
+    gen._tagged_call_arg_vals = set()
     _names = getattr(gen, '_param_box_names', {}).get(_as_str(callee))
     if not _names:
         return arg_pairs
-    _pnames = getattr(gen, '_func_param_names', {}).get(_as_str(callee)) or []
+    _pnames = (pnames if pnames is not None
+               else getattr(gen, '_func_param_names', {}).get(_as_str(callee)) or [])
     # Positional alignment is the precondition for choosing a parameter by
     # index. A spread has no one node per slot, so it is left alone rather
     # than boxing the wrong argument; a keyword argument is placed at its
@@ -9443,11 +9500,13 @@ def _box_param_call_args(gen, callee: str, arg_pairs: list,
             if _pdef is not None:
                 _bv, _bt = box_word_value(gen, _pdef, _at, _av)
                 out.append((_bt, _bv))
+                gen._tagged_call_arg_vals.add(_as_str(_bv))
                 continue
             out.append((_at, _av))
             continue
         _bv, _bt = box_word_value(gen, _node, _at, _av)
         out.append((_bt, _bv))
+        gen._tagged_call_arg_vals.add(_as_str(_bv))
     return out
 
 

@@ -10290,6 +10290,7 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
     are pre-signature and either may be the first to see a function."""
     import mojo.middle.infra_infer as ginf
     self._param_box_names: dict[str, set] = {}
+    self._method_param_names: dict[str, list] = {}
     # Whole-module call-site evidence for the tagged word (a bool or None
     # LITERAL passed for an unannotated parameter); read by
     # `infra_infer.param_default_none_names` from both the call-site record
@@ -10319,6 +10320,22 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
                 _pbk = f"{_as_str(_sd_pb.name)}_{_as_str(_pm_pb.name)}"
                 self._param_box_names[_pbk] = ginf.param_boxed_names(
                     self, _pm_pb, _pbk)
+                # The positional parameter names a CALL of this method binds
+                # (the receiver excluded), for `_box_param_call_args`. A method
+                # call has no `_func_param_names` row: that table is the free
+                # functions'.
+                _mpn: list = []
+                _mfirst = True
+                for _mp in (_pm_pb.params or []):
+                    _mpname = _as_str(_mp[0])
+                    if _mpname.startswith('*'):
+                        continue
+                    if _mfirst and (_mpname == 'self' or _mpname == 'cls'):
+                        _mfirst = False
+                        continue
+                    _mfirst = False
+                    _mpn.append(_mpname)
+                self._method_param_names[_pbk] = _mpn
                 self._param_box_defaults[_pbk] = ginf.param_tagged_defaults(
                     _pm_pb, ginf.param_default_none_names(self, _pm_pb, _pbk))
     # The DECLARATION half of the same rule, applied to the table every

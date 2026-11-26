@@ -9516,6 +9516,19 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # self-hosted trap (element/element-type erasure; here it produced the
     # garbage non-list 1, which `_call_expr` then iterated -> `mojo_list_len
     # (0x1)` SIGSEGV compiling std/collections/dict.mojo).
+    # A parameter that is the TAGGED word (`def m(self, x=None)`, or one the body
+    # contradicts) is passed boxed by kind, an omitted `= None` argument as the
+    # None box: the callee reads it with `mojo_word_is_none`, and the bare 0 the
+    # padding supplies is the integer, not None. The free-function call lowerings
+    # do this (`_lower_named_call`); a method call did not, so the self-hosted
+    # compiler's `self._infer_return_type(body)` handed `func_def=None` to its
+    # callee as 0 and the callee dereferenced it.
+    _mkey = f"{struct_name}_{_as_str(method)}"
+    _mnames = (getattr(gen, '_method_param_names', None) or {}).get(_mkey)
+    if _mnames is not None:
+        arg_pairs = ginf._box_param_call_args(
+            gen, _mkey, arg_pairs, getattr(node, 'args', None),
+            getattr(node, 'kwargs', None), _mnames)
     all_arg_pairs = []
     if _prepend_recv:
         all_arg_pairs.append(_recv_pair)
