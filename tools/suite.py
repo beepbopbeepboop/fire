@@ -1913,6 +1913,11 @@ test('presence-store-before-mint',
      desc='a field is not minted presence-tracked after a store of it was '
           'emitted without a bit (import-cycle order; self-hosted compiler '
           'AttributeError on var_types)')
+test('call-node-params-annotated',
+     [PY, 'test_call_node_params_annotated.py'], mem='tiny',
+     desc='lowering helpers annotate their call-node parameter (an unannotated '
+          '`node.args` param was typed `Ex *` by field evidence and the '
+          'self-hosted compiler read a type tag as a list)')
 test('ctx-params-annotated',
      [PY, 'test_ctx_params_annotated.py'], mem='tiny',
      desc='a `ctx` parameter (the middle tier\'s generator) is annotated: '
@@ -5212,7 +5217,8 @@ BUCKETS = {
               'sys-maxsize-value', 'uncompiled-marker-alias',
               'presence-helpers-annotated', 'runtime-function-not-prefix',
               'method-none-default-boxed', 'tagged-param-forwarded',
-              'ctx-params-annotated', 'presence-store-before-mint'],
+              'ctx-params-annotated', 'presence-store-before-mint',
+              'call-node-params-annotated'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus

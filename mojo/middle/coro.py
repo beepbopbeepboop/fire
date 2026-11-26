@@ -3778,7 +3778,7 @@ def _rewrite_native_future_refs(stmts: list) -> list:
             if not (isinstance(s, N.StructDef) and s.name in _NATIVE_FUTURE_CLASSES)]
 
 
-def _resolve_call_args(name: str, node, cvar: str) -> list:
+def _resolve_call_args(name: str, node: gimple_ctypes.CallExpr, cvar: str) -> list:
     """Positional args, in order, for a call to `name(...)` -- resolving
     any keyword arguments via _PARAM_NAMES when known. Falls back to
     positional-only (kwargs dropped) if `name` wasn't seen -- the emitted
@@ -8489,7 +8489,7 @@ def _append_box_args(call, cap_map: dict) -> None:
         _append_box_arg(call, _hidden_box_name(n))
 
 
-def _append_box_arg(call, argname: str) -> None:
+def _append_box_arg(call: gimple_ctypes.CallExpr, argname: str) -> None:
     """Append `argname` as a trailing IdentExpr argument, unless the call
     already carries it. Two nested `async def`s capturing the same
     enclosing local both thread the SAME box handle into a shared sibling

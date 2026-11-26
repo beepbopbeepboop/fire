@@ -1298,7 +1298,7 @@ def _struct_missing_required(sig, slots, npos):
             f"'{sig['pos'][first_empty]}' (pos {first_empty + 1})")
 
 
-def _struct_bind_args(node, key):
+def _struct_bind_args(node: gimple_ctypes.CallExpr, key):
     """Bind a `struct` call's arguments into CPython's positional order.
 
     Returns `(slots, err)`: `slots[i]` is the expression node bound to
@@ -1366,7 +1366,7 @@ def _struct_bind_args(node, key):
     return slots, err
 
 
-def _struct_bind_or_raise(gen, node, key, rtype):
+def _struct_bind_or_raise(gen, node: gimple_ctypes.CallExpr, key, rtype):
     """`_struct_bind_args`, with a rejected call turned into the CPython
     exception at RUNTIME.
 
@@ -1633,7 +1633,7 @@ def _struct_attr_format(gen, member_node):
     return gen._struct_attr_formats.get(attr)
 
 
-def _lower_struct_attr_call(gen, method, node):
+def _lower_struct_attr_call(gen, method, node: gimple_ctypes.CallExpr):
     for a in node.args:
         gen.lower_expr(a)
     for _, kv in (getattr(node, 'kwargs', None) or []):
@@ -1899,7 +1899,7 @@ def _re_result_elem(subj_t):
     return 'MojoBytes *' if gimple_ctypes.TypeLattice.is_bytes(subj_t) else 'char *'
 
 
-def _lower_re_dynamic_call(gen, node, recv, method):
+def _lower_re_dynamic_call(gen, node: gimple_ctypes.CallExpr, recv, method):
     """`obj.method(*args, **kw)` on a word of unknown kind: the run time decides
     whether it is a pattern / match (`mojo_re_call`)."""
     if method == 'split' and len(node.args) <= 1 and not getattr(node, 'kwargs', None):
@@ -1961,7 +1961,7 @@ def _lower_re_dynamic_call(gen, node, recv, method):
     return 'int64_t', r
 
 
-def _lower_re_module_call(gen, node, method):
+def _lower_re_module_call(gen, node: gimple_ctypes.CallExpr, method):
     """`re.compile(p, flags)` / `re.match|search|fullmatch(p, s, flags)` /
     `re.findall(p, s)` with a pattern known only at run time: a compiled pattern
     handle, or the match."""

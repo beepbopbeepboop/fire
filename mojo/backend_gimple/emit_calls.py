@@ -731,7 +731,7 @@ def _gen_slot_box(gen, st: str, sv: str, vct: str) -> str:
     return gen._to_int64(st, sv)
 
 
-def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
+def _lower_generator_send(gen, node: gimple_ctypes.CallExpr, av: str, api: dict) -> tuple[str, str]:
     """`g.send(v)` — resume the generator, handing it `v` as the value of
     the `yield` expression it is suspended on. Real Python's semantics,
     including the StopIteration on exhaustion (the generator protocol's
@@ -791,7 +791,7 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     return vct, result
 
 
-def _lower_generator_throw(gen, node, av: str, api: dict) -> tuple[str, str]:
+def _lower_generator_throw(gen, node: gimple_ctypes.CallExpr, av: str, api: dict) -> tuple[str, str]:
     """`g.throw(Exc[, exc[, tb]])` — raise `Exc` inside the generator at its
     suspend point, exactly as if its body had raised it there. If the body
     catches it and yields again, that value is returned; if the exception
@@ -1858,7 +1858,7 @@ def _class_struct_of_arg(gen, a) -> str:
     return None
 
 
-def _lower_class_attr_builtin(gen, node, fn):
+def _lower_class_attr_builtin(gen, node: gimple_ctypes.CallExpr, fn):
     """The four attribute builtins on a class. A name the class body declares (a class-level
     attribute, a method) keeps its static meaning; anything else is the run-time class table."""
     struct = _class_struct_of_arg(gen, node.args[0])
@@ -10522,7 +10522,7 @@ def _emit_asyncio_run_drive(gen, base: str, vct: str, arg_pairs: list) -> tuple[
     return vct, result
 
 
-def _lower_inlined_lambda_call(gen, lam, node) -> tuple[str, str]:
+def _lower_inlined_lambda_call(gen, lam, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower `f(args)` where `f` is a beta-reducible capturing lambda, by
     binding the lambda's parameters to the arguments as ordinary locals of
     the CURRENT scope and lowering its body expression right there.
@@ -11039,7 +11039,7 @@ def lower_call_args(gen, args: list) -> list:
     return out
 
 
-def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
+def _expand_sole_spread_into_fixed_slots(gen, node: gimple_ctypes.CallExpr, fname, fname_raw,
                                           arg_pairs, expected_params):
     """`f(*iterable)` against a callee with KNOWN, FIXED positional params
     (no `*args`/`**kwargs` of its own — those forwarding shapes are

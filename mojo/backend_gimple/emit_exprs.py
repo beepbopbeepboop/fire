@@ -68,7 +68,7 @@ from mojo.middle.calls_shared import _py_box_expr
 from mojo.middle.calls_shared import _struct_operator_receiver, _STRUCT_OP_DUNDER
 from mojo.middle.calls_shared import FRAME_SETTABLE_IDS
 
-def _lower_strided(gen, node, store: bool):
+def _lower_strided(gen, node: gimple_ctypes.CallExpr, store: bool):
     """Scalar (SIMD-width-1) lowering of the strided_load/strided_store
     intrinsics: a plain load/store of the pointer's scalar element. Consistent
     with the codegen's existing SIMD-to-scalar erasure."""
