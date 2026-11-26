@@ -9378,7 +9378,8 @@ def _box_float_call_args(gen, callee: str, arg_pairs: list) -> list:
 
 def _box_param_call_args(gen, callee: str, arg_pairs: list,
                          arg_nodes: list = None,
-                         kwargs: list = None) -> list:
+                         kwargs: list = None,
+                         pnames: list = None) -> list:
     """Box each argument bound for a PARAMETER whose annotation its body
     contradicts (`infra_infer.param_boxed_names`), so the `int64_t` slot
     receives a tagged word that still says what kind the value is.
@@ -9393,7 +9394,8 @@ def _box_param_call_args(gen, callee: str, arg_pairs: list,
     _names = getattr(gen, '_param_box_names', {}).get(_as_str(callee))
     if not _names:
         return arg_pairs
-    _pnames = getattr(gen, '_func_param_names', {}).get(_as_str(callee)) or []
+    _pnames = (pnames if pnames is not None
+               else getattr(gen, '_func_param_names', {}).get(_as_str(callee)) or [])
     # Positional alignment is the precondition for choosing a parameter by
     # index. A spread has no one node per slot, so it is left alone rather
     # than boxing the wrong argument; a keyword argument is placed at its
