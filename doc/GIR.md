@@ -809,41 +809,36 @@ master and verified. T3 to T6 are done since (see their entries). Status (2026-1
 This file is the only GIR document; the dated history of
 the stage 7 work is in git history (the stage 6 and 7 bug log, deleted 2026-11-23).
 
-## Selfhost closure: remaining errors (2026-11-24)
+## Selfhost closure and the gate (2026-11-25)
 
-`python3 test_selfhost.py` compiles the whole compiler closure into one C translation unit and
-runs gcc on it. On master it failed with 67 gcc `error:` lines at `8f244354d`. The state after
-the fixes merged on 2026-11-24:
+State at `ec1c68c09`-plus: the whole-closure translation unit compiles with **0 gcc errors**, the `mojoc` and
+`selfhost` gate jobs PASS, and `make gate` is down to the jobs that need the self-hosted compiler's OUTPUT to be
+the reference's.
 
-Fixed (merged; each is a real fix, not a workaround):
-- `expected expression before '('` (13): `_ensure_local` materialises a literal cast into a
-  register (`92e4e806a`, coro for-loop family).
-- `invalid operands to binary` on doubles (13): a may-box operand of a bitwise operator is read
-  as its integer (`65454bf70`, float8 family).
-- `'_FLOAT'/'_SIGNED'/'_UNSIGNED' undeclared` (3) and `makes integer from pointer` for
-  `MojoDict *` in `emit_funcs.py` (2): an imported container global keeps its real C type, and a
-  global_var export is not a function's return type (`77abd738a`, `fa8f13afa`, funcptr family).
-- The `_mj_w` and struct-constructor `Ex` reprs in generated C++ (`ead016231`, `9ba501e2b`), which
-  broke `test_gimple_generator_runner.py` (520/0 on master).
+What the `mojoc` / `selfhost` failures were, each a landed fix with a pin test (`bugs/GATE_selfhost_and_mojoc_link_failures.md`
+has the order they were peeled in):
+- `unknown type name 'WordFacts'` in every per-module compile of a compiler source file (`_SELFHOST_SIGS` names it,
+  only the closure TU defined it): a struct layout beside `Interpreter`'s.
+- `ld: undefined` module-global accessors (`types__mojo_global_get_PRESENCE_WORD`): the importer named the accessor after
+  the file basename, the definer after its spelling.
+- `ld: undefined` for five functions an importer hashed with `int64_t` parameters before the definer refined them
+  (`annotated_return_ctype` ...): the definer also defines each suffix an earlier call site hashed, as a forwarder.
+  The proper fix is parameter types from the solver (stage S4, `bugs/GIR_type_solver.md`).
+- the three `MojoList * + double` errors (`52e02dc2d`).
+- the built binary's startup: `sys.maxsize` as a value, the solver's `vars()` walk, an aliased import of a compiled
+  module, an unannotated `sdef`/`ctx`/`node`, `mojo_`-prefix "runtime helper" test, tagged `= None` parameters (method
+  calls, forwarding, a `_cur_default_none_params` erased right after it was set), presence bits minted after a bit-less
+  store, `dict.get` boxed results, an annotated `self.f: T = call()` field typed from the value.
 
-Open, with bug docs. Re-measured 2026-11-24 on master `91140cc58`: 40 gcc errors, counted with
-`tools/selfhost_ci.py` (the method is in the second doc).
-- The import-cycle back-edge family (37 errors, 13 functions) is FIXED: the solver's early
-  decision freezes each back-edge definer's return type and the definer obeys it (the WIP placeholder
-  `e9e4ea4a9` was reverted at `2812a27c0`). The decision is in `emit_funcs._early_return_decision`;
-  the solver is `mojo/tsolve/` (`bugs/GIR_type_solver.md` S1, precision in
-  `bugs/GIR_type_solver_precision.md`). Measured at `0faf3141a`-plus: the closure has 3 gcc errors,
-  all the `MojoList * + double` family below; the ledger has zero conflict, weak and undecided lines.
-  The early-decision doc was deleted with this change; its acceptance is recorded in the
-  precision doc's Status.
-- `bugs/GIR_selfhost_unexplained_error_kinds.md`: 3 errors, `MojoList * + double`. It is a
-  `+`-lowering defect in `emit_exprs._lower_binary_tail` (a may-box word beside a list operand
-  is promoted to double, and `list + int64_t` was a silent no-op). The old has-no-member and
-  `component_ref` rows no longer reproduce.
+What is still red in `python3 tools/suite.py gate` (run 2026-11-25, 165 passed, 5 failed of 182 tests; four of the five
+were fixed since): `ab-native` and `native-dumpfull` (the native `mojoc` writes a `.ci` that differs from the reference's:
+`bugs/hard/GIR_selfhost_compiled_output_diverges.md`) and the bootstrap chain behind them (`bootstrap-stage2-*`,
+`-stage3-*`, `-verify`, `-validate`: skipped; `bootstrap-stage1-transitive` and `bootstrap-stage2-cc` are disabled by their
+bug docs). The bootstrap was last green on 2026-10-25; the changes since that touch what the compiled compiler does are the
+presence bits (11-01), the IR (11-13..11-21), stage 5c tagged parameters (11-20..) and the solver (11-24).
 
-The type solver (`bugs/GIR_type_solver.md`) is the long-term direction for every signature,
-field and local type (stages S1-S6). S1 is the first consumer. S4 takes over the overload hash's
-parameter types, and S6 is the unboxing stage.
+`tools/selfhost_probe.py` is how the compiled compiler is debugged: build the binary once, diff its `.ci` against the
+reference's per probe in seconds, and run `lldb` with ASLR ON.
 
-The self-host gate (`bootstrap-stage1-transitive`, disabled, `bugs/gate-bootstrap-stage1-transitive.md`)
-stays disabled until the closure compiles with zero gcc errors and the stage 2/3 chain runs.
+The type solver (`bugs/GIR_type_solver.md`) is the long-term direction for every signature, field and local type
+(stages S1-S6). S1 is the first consumer. S4 takes over the overload hash's parameter types, and S6 is the unboxing stage.

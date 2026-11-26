@@ -1917,6 +1917,11 @@ test('presence-store-before-mint',
      desc='a field is not minted presence-tracked after a store of it was '
           'emitted without a bit (import-cycle order; self-hosted compiler '
           'AttributeError on var_types)')
+test('module-alias-class-method',
+     [PY, 'test_module_alias_class_method.py'], mem='small',
+     desc='`mod.Class.method(args)` through a module alias calls the method '
+          '(it was the unknown-method stub: ~2600 TypeLattice predicates in the '
+          'self-hosted compiler were all false)')
 test('annotated-self-field-struct',
      [PY, 'test_annotated_self_field_struct.py'], mem='small',
      desc='`self.f: Cls = make()` types the field Cls *, not the erased word '
@@ -5231,7 +5236,7 @@ BUCKETS = {
               'method-none-default-boxed', 'tagged-param-forwarded',
               'ctx-params-annotated', 'presence-store-before-mint',
               'call-node-params-annotated', 'itcursor-cursor-for',
-              'annotated-self-field-struct'],
+              'annotated-self-field-struct', 'module-alias-class-method'],
 
     # The orchestrator's own tests (the swarm, the registry, reclass, landing).
     # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus

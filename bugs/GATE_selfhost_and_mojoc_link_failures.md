@@ -38,11 +38,14 @@ main tree with `python3 tools/suite.py -j1 mojoc selfhost` (no clean export need
 
 ## Status
 
-- 2026-11-25 (later): after fixes 1-3, `python3 tools/suite.py -j1 selfhost mojoc`: `mojoc` PASSES
-  (peak 7.7 GB, inside its 20-minute limit once the link succeeds, so no limit change is needed).
-  `selfhost` now compiles AND links (945 s), and fails at its last check: the produced self-hosted
-  binary exits 1 on `--dump-full` of a two-line program (`exit=1 ci_bytes=0`). That is the next
-  defect; see the entry below.
-
-- 2026-11-25: items 1 and 2 fixed and verified (c_oracle identical on 286 + 35, compile_stdlib 610/0,
-  test_suite 482/0). Re-run of `selfhost mojoc` after both fixes: see the next entry.
+- 2026-11-25: FIXED, `mojoc` and `selfhost` both PASS (`python3 tools/suite.py -j1 selfhost mojoc`; `mojoc` 14 min, peak 7.7 GB,
+  inside its 20-minute limit; `selfhost` 16 min, the produced compiler exits 0 on both probes and writes valid text). The fixes
+  are items 1-3 above plus the startup/lowering defects listed in `doc/GIR.md`, "Selfhost closure and the gate", each with a pin test
+  registered in `check`.
+- The full `python3 tools/suite.py gate` (2026-11-25, 4622 s wall): 165 passed, 5 failed, 6 skipped, 6 disabled. Four of the five
+  were fixed in the same session (`qualified-member-no-leak`: the alias exemption now covers Python modules only;
+  `gimplegenerators`: forwarding keeps a box only for a parameter DECLARED `= None`; `presence-helpers-annotated`: the test
+  accepted only the class, not the string annotation; `test/builtin/test_variadic.mojo`: `_current_func_node` declared).
+  The fifth class remains: `ab-native` and `native-dumpfull` fail because the native compiler's output differs from the reference's,
+  and the bootstrap chain behind them is skipped. That is `bugs/hard/GIR_selfhost_compiled_output_diverges.md`, not a link failure.
+  This doc stays open until the gate is green.

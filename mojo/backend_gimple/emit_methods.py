@@ -27,7 +27,7 @@ from fire_compiler import (
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    _sms_key, _pair_key, _as_str,
+    _sms_key, _pair_key, _as_str, _as_structdef_node, _as_funcdef_node,
 )
 import regex_compile
 import mlir
@@ -1838,9 +1838,13 @@ def _uncompiled_module_marker(gen, node) -> str:
     # MODULE is what says whether its code was emitted. Without this the call in
     # `module_gen` raised `module 'mojo.middle.import_ambiguity' is not compiled
     # into this binary` in the self-hosted compiler on its first compile.
+    # Only a PYTHON module: a `.mojo` module answers the caller's "has no
+    # declaration" check (`_lower_module_marker_call`), which needs the marker.
     if _mod and _mod in (getattr(gen, '_compiled_modules', None) or ()):
-        cache[name] = ''
-        return ''
+        _src_path = gen._submodule_source_path(_mod)
+        if not (_src_path and _src_path.endswith('.mojo')):
+            cache[name] = ''
+            return ''
     _resolvable = True
     if _mod:
         try:
@@ -3006,6 +3010,24 @@ def _lmc_copy(gen, node: gimple_ctypes.CallExpr, ot: str, ov) -> tuple[str, str]
     return ot, ov
 
 
+def _declared_method_return(gen, struct_name: str, method: str):
+    """The C return type of `Class.method` from its ANNOTATION, or None.
+
+    Needed when the class belongs to a module this compile has not finished yet
+    (an import cycle compiles the caller first): the method is registered, but its
+    return type is not in `func_return_types` until its own module is compiled. An
+    annotation is a fact that needs no inference, so the call can be lowered
+    now and not stubbed."""
+    sdef = gen._struct_name_owner.get(struct_name)
+    if sdef is None:
+        return None
+    for m in _as_structdef_node(sdef).methods:
+        fm = _as_funcdef_node(m)
+        if _as_str(fm.name) == method and fm.return_type is not None:
+            return gen._resolve_type(fm.return_type)
+    return None
+
+
 def _lmc_unbound_class_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, ot: str, ov) -> tuple[str, str]:
     """`Class.method(...)` where `Class` is not a variable or a compiled module.
 
@@ -3018,6 +3040,10 @@ def _lmc_unbound_class_receiver(gen, node: gimple_ctypes.CallExpr, func, method:
     bare_mangled = f"{struct_name}_{gimple_ctypes._safe_name(method)}"
     mangled = _gmm_as_str(_ggf._struct_method_csym(gen, struct_name, method, ''))
     ret_type = gen.func_return_types.get(f"{struct_name}_{method}", 'char *')
+    if f"{struct_name}_{method}" not in gen.func_return_types:
+        _decl_ret = _declared_method_return(gen, struct_name, method)
+        if _decl_ret is not None:
+            ret_type = _as_str(_decl_ret)
     actual_args = [gen.lower_expr(a) for a in node.args]
     # Keyword arguments (e.g. TestReport.skipped(name=...)) are real
     # parameters — append their values after the positional ones so the
@@ -4937,6 +4963,35 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _ctor_cname_via_module(gen, func.obj.name, func.member),
             node.args, node.kwargs)
 
+    # `mod.Class.method(args)` -- a classmethod / staticmethod reached through a
+    # module alias (`gimple_ctypes.TypeLattice.is_word(t)`). The receiver
+    # `mod.Class` is a class reference, which lowers to the zero placeholder, and
+    # `.method` on that word was the unknown-method stub: every call returned 0.
+    # The compiler itself calls `TypeLattice.<predicate>` through `gimple_ctypes`
+    # about 2600 times, so the self-hosted compiler's type tests were all false
+    # and every function came out with no return type. Resolve the class through
+    # its module exactly as the qualified constructor above does, and lower the
+    # call as `Class.method(args)`, the shape that already works in one module.
+    _qrecv = func.obj
+    if (isinstance(_qrecv, gimple_ctypes.MemberExpr)
+            and isinstance(_qrecv.obj, gimple_ctypes.IdentExpr)
+            and _qrecv.obj.name in gen.imported_symbols
+            and _qrecv.obj.name in getattr(gen, '_module_alias_names', ())
+            and _qrecv.obj.name not in gen.struct_field_types
+            and _qrecv.obj.name not in gen.var_types
+            and _qrecv.member in gen.struct_field_types
+            and _qrecv.member not in gen.var_types
+            and module_member_is_struct(gen, _qrecv.obj.name, _qrecv.member)):
+        _qcls = _as_str(_ctor_cname_via_module(gen, _qrecv.obj.name, _qrecv.member))
+        if _qcls in gen.struct_field_types:
+            _qfunc = gimple_ctypes.MemberExpr(
+                obj=gimple_ctypes.IdentExpr(name=_qcls, line=_qrecv.line, col=_qrecv.col),
+                member=func.member, line=func.line, col=func.col)
+            _qnode = gimple_ctypes.CallExpr(
+                func=_qfunc, args=node.args, kwargs=node.kwargs,
+                line=node.line, col=node.col)
+            return _lower_method_call(gen, _qnode)
+
     # `g.send(v)` — resuming a compiled generator with a value for the
     # `yield` it is suspended on: the rest of Python's generator protocol
     # alongside `next(g)` (see _lower_call). Checked FIRST, before any of
@@ -5818,7 +5873,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (isinstance(func.obj, gimple_ctypes.IdentExpr)
             and func.obj.name not in gen.var_types
             and func.obj.name not in gen._compiled_modules
-            and f"{func.obj.name}_{gimple_ctypes._safe_name(method)}" in gen.func_return_types
+            and (f"{func.obj.name}_{gimple_ctypes._safe_name(method)}" in gen.func_return_types
+                 or (func.obj.name in gen.struct_field_types
+                     and _declared_method_return(gen, func.obj.name, method) is not None))
             and gimple_ctypes.TypeLattice.is_int_word(ot)):
         return _lmc_unbound_class_receiver(gen, node, func, method, ot, ov)
 

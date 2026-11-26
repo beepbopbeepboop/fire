@@ -285,7 +285,7 @@ Each stage is shippable on its own and has its own acceptance test.
 - **S5: class layouts.** Field types come from `ClassSummary.fields`. That deletes
   the field inference in `_gmp_register_struct_fields` and the hand-written
   self-host tables in `_gmp_selfhost_ast_layouts` (see
-  `bugs/GIR_selfhost_unexplained_error_kinds.md`).
+  the `MojoList * + double` lowering fix `52e02dc2d`).
 - **S6: locals and unboxing.** Expose `local_sty(fn, name)`. A local whose solved
   type is a scalar or a concrete container is declared with that C type; only `dyn`
   stays a boxed word. This is the performance stage. It replaces the name-keyed
