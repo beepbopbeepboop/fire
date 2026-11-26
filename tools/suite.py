@@ -2174,8 +2174,7 @@ test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=Tru
 # a dict comprehension's key and value live in, which formal/model.py reads.
 test('doc-refs-stale-verdicts', [PY, 'test_dangling_doc_refs.py'], cache=True,
      mem='tiny', extra=['test_dangling_doc_refs.py', 'tools/dangling_doc_refs.py'],
-     desc='the stale-verdict report flags a wrong row and passes a right one',
-     disabled='bugs/gate-doc-refs-stale-verdicts.md')
+     desc='the stale-verdict report flags a wrong row and passes a right one')
 test('comprehension-parse-shape', [PY, 'test_comprehension_parse_shape.py'],
      cache=True, mem='tiny', extra=['test_comprehension_parse_shape.py', 'fire_compiler.py'],
      desc='Comprehension stores a dict comprehension\'s key in .element, value in .value')
@@ -2541,8 +2540,7 @@ test('suite-self-test', [PY, 'test_suite.py'], cache=True, mem='tiny',
             # `SHARED_BUDGET_HELPERS`), so it is an input to this job.
             'tools/pydiff.py'],
      extraglob=['**/test_*.py', '**/*_test.py'],
-     desc='the runner: drivers, deps, exclusivity, fanout, tally, log split',
-     disabled='bugs/gate-suite-self-test.md')
+     desc='the runner: drivers, deps, exclusivity, fanout, tally, log split')
 
 # The ledger every job above reserves out of, tested on its own. In `smoke`
 # rather than nowhere, which is where it was for a commit: `test_memslot.py`

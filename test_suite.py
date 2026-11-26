@@ -3005,8 +3005,6 @@ def test_a_disabled_test_is_registered_but_never_runs():
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
-        'doc-refs-stale-verdicts',
-        'suite-self-test',
     ]
     check('disabled: the real registry has no job that is not run',
           sorted(real) == sorted(expected_disabled),
@@ -3219,8 +3217,6 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     expected_disabled = [
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
-        'doc-refs-stale-verdicts',
-        'suite-self-test',
     ]
     check('disabled markers: the state the section is written for is stated, '
           'not assumed',
