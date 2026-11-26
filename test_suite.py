@@ -3006,7 +3006,6 @@ def test_a_disabled_test_is_registered_but_never_runs():
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
         'doc-refs-stale-verdicts',
-        'gimplerunner',
         'suite-self-test',
     ]
     check('disabled: the real registry has no job that is not run',
@@ -3221,7 +3220,6 @@ def test_the_disabled_markers_in_the_registry_are_honest():
         'bootstrap-stage1-transitive',
         'bootstrap-stage2-cc',
         'doc-refs-stale-verdicts',
-        'gimplerunner',
         'suite-self-test',
     ]
     check('disabled markers: the state the section is written for is stated, '
