@@ -24,6 +24,11 @@ print(x)` differs in 11 lines (the two-space indent of `mojo_print`/`mojo_cstr_o
    writer (`grep "_inferred_param_types\[" mojo/`: `_gmi_apply_call_site_param_evidence`, `_reconcile_param_container_kinds`,
    the Pass 1.x `_infer_param_types` loop at `module_gen.py:17230`) with an lldb watchpoint on the dict slot, or by
    breaking `mojo_dict_set_str` with `pname == 'a'`.)
+   Lead: the first `_param_ctype` call's `param_aug_rebinding_ctype` returns a non-NULL HEAP pointer (lldb `finish` on
+   `mojo_middle_funcs_shared_param_aug_rebinding_ctype_48f492.part.0`: x0 = 0x...504b0) for a parameter with no rebinding,
+   where the reference returns None; `_param_ctype` then does `if _aug_wide is not None: ctype = _aug_wide`. A function
+   returning `None` beside a string in a `str | None` signature is the shape stage 5c's rule 1 says is NULL; check what
+   it returns (the None box, or a stale string).
    A function header and prototype with BLANK parameter types and a zero overload hash: `int64_t g_000000 ( a)` where the reference
    has `int64_t g_9f63a2 (int64_t a)`; the call site names the same `g_000000 (3)`. `_signature_ctypes` returns a one-element list
    holding `''` (lldb: `mojo_list_get_str(result, 0)` is `""`), `_param_ctype` itself answers `int64_t` when asked directly, and
