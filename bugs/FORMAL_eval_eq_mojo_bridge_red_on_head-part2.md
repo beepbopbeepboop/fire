@@ -27,3 +27,120 @@ New method added to `TestBridgeSimpset`:
 ## Notes
 
 - Touches `formal/arm64_proof_gen.py::_gen_universal_e2e_cfg` only; uses existing `Rec1GlueGenAdvances`, `go_exit_cbz_taken`/`fall`, `hprior` machinery.
+
+## Status 2026-11-27: design guide (planning round, no generator change landed)
+
+Measured by reading `emit_block` (`formal/arm64_proof_gen.py` ~10850-12290) and
+generating a two-`if` fixture (`def two(n)`, 6 707 lines) and `bigbody`.
+
+**What is already generic.** Every per-block `…_bN_runs` / `…_bN_mid` is
+quantified over the entry state (`∀ st, st.pc = start → …`), and `rec1_glue_gen`,
+`go_exit_cbz_taken/fall`, `go_exit_step` take the state as an argument. So the
+control walk has no need to be re-derived per path. What is per path is the
+emitter's recursion, which instantiates them at a path-specific state term.
+
+**Shape that composes (control half).** For an acyclic, call-free walk, per block
+`k` in reverse topological order emit
+`def R_k (s) : State` (the block's `qS` run, then `if cond then R_taken … else R_fall …`;
+`R` of a `RET` block is its run state), `def c_k (s) : Nat` (instructions consumed on
+that path), and one theorem
+`T_k : ∀ s f, s.pc = start_k → need_k ≤ f → arm64_go_exit s C EXIT f = arm64_go_exit (R_k s) C EXIT (f - c_k s)`
+plus `c_k s ≤ need_k` (one `split <;> omega`). `T_k` is `rec1_glue_gen` +
+`go_exit_cbz_*` + the IH `T_taken`/`T_fall`; a join block's `T_join` is used by both
+arms, so the declaration count is linear in blocks. Fuel is `∀ f ≥ need_k`, not an
+exact literal, because path costs differ at a join.
+
+**Why that alone does not close the bug (the wall).** The walk also carries VALUE
+facts the generic-state form cannot see:
+1. the `RET`'s `x30 = EXIT` (`hx30_k`) comes from the prologue's stack slot
+   surviving every block on the path;
+2. the stack-floor guard's dead trap arm (`_dead_edges`, `hguard_k`) is closed from
+   the concrete `Arm64State.init` memory;
+3. `hcond_k`/`hprior_k` tie each branch to the SOURCE condition on `n` and need the
+   path's `s_k` chain unfolded.
+These need a join invariant `Inv_k s` (slot holds EXIT, `s.sp`, locals' registers
+relate to `n`), stated per block, preserved by each block's `qS` chain, and used as
+premises of `T_k`. That is the "contract-shaped" proof in the part1 doc's step 2,
+and it is the real work: designing `Inv_k` per block from `_frame_read_addrs` /
+`_var_regs`, then re-deriving `_emit_terminal_flow` over `R_0 init` instead of over
+a path's `hsid` chain (64 leaves of terminal value flow remain for `bigbody`, now
+without the 894 advances).
+
+**Ordering constraint measured in earlier rounds.** `bigbody` dies at
+`bigbody_b40_self1` in the block-theorem PREFIX, before the universal theorem is
+read (third-round table). A compositional universal theorem cannot turn the named
+command green until the prefix is under the ceiling (part1 / parent doc's item 1,
+hoisting the `qS_k` chain facts). Do that first, then this.
+
+**Plan, files and tests.**
+1. Hoist per-block `qS_k` simplifications (`_gen_block_run`-side, parent doc item 1),
+   Lean-free pin + `bigbody` prefix measured under 6 GB.
+2. New `_gen_universal_walk_compositional` beside `_gen_universal_e2e_cfg` (not
+   inlined into its 3 200 lines), selected only for acyclic, call-free, non-contract
+   walks; `_gen_universal_e2e_cfg` keeps the DFS as fallback.
+3. Prototype in Lean by hand on `two` first (check with `lean`, ~minutes), then
+   `ifonly`/`condassign`/`elif3`, then `bigbody`.
+4. Add `TestBridgeSimpset.test_the_universal_proof_walks_blocks_once_not_per_leaf`
+   only together with the emitter, asserting per-block `T_k` count == block count
+   and that no `hsid_` chain is duplicated; the Lean half (`TestBridgeTypechecks`)
+   is what proves soundness, the text test alone would not.
+
+### Measurement 2026-11-27: the prefix alone fits; it is the universal theorem that breaks the budget
+
+`bigbody`'s generated proof cut at line 15 126 (everything before
+`theorem bigbody_compiles_correctly_universal`, i.e. all 41 block certificates,
+`bigbody_prog`; the universal theorem's 38 000 lines dropped) checks CLEAN under
+`lean -j 4 -M 6144 -T 200000` with `lib/ProofLib.olean`: **0 errors, peak 4.7 GB
+(memcap), exit 0**. So the earlier "wall is in the block-theorem prefix" reading
+was the prefix's 4.7 GB baseline plus the universal theorem's growth hitting the
+ceiling at the first declaration after the baseline, not the prefix failing by
+itself. Consequence for the order above: step 1 (prefix hoist) is headroom, not a
+precondition; the compositional universal walk (step 2) is the fix, and it has
+~1.4 GB to live in at the current prefix cost. (Use the elan toolchain `lean`,
+`formal.lean.find_lean`, not `~/bin/lean`: the latter reports an incompatible
+`ProofLib.olean` header.)
+
+## Status 2026-11-27 (later): compositional walk LANDED DISABLED; control half proven, value flow open
+
+**Landed in `formal/arm64_proof_gen.py`** (`_gen_wp_walk`, wired into
+`_gen_universal_e2e_cfg` before the theorem header; off by default,
+`_WP_MIN_PATHS = 10**9`; enable with `_WP_MIN_PATHS = 5`). Per reachable block `k`:
+`def …_wp_k n s : Prop` (weakest precondition = the control structure), and
+`theorem …_T_k : ∀ s f, s.pc = start_k → need_k ≤ f → wp_k n s → match go_exit …`.
+A conditional whose two arms are straight (`seq`/`b`) chains to a common join is a
+DIAMOND: `wp_k n s := wp_join n (M_k (run_exit s))` with `def M_k t := if cond then
+armA t else armB t`, and each arm block gets `…_R_q` (a go_exit transport lemma);
+so a join's `T_j` is proved once. Dead guard edges become a conjunct, dead `cbz`
+arms `False`, the trap `BL` arm `True` (`none` arm), halt blocks use their halts
+certificate. Declined (falls back to the per-path walk): loops, calls, contracts,
+short-circuit conds, `svc` assumptions, multi-arg entries, frame/fuel variants.
+`lib/ProofLib.lean` gained `arm64_ite_<field>` (44), `arm64_ite_mem`,
+`mem_read_u64_ite`, `mem_write_u64_ite` (not `@[simp]`; the olean was rebuilt).
+
+**Measured (elan `lean`, `-M 6144`, olean built; harness: generate with
+`G._WP_MIN_PATHS=1`):**
+* `two` (2 `if`s): whole file checks, 0 sorry, 19 s, 3.5 GB peak.
+* `bigbody` (6 `if`s): file 53 534 -> ~15 950 lines; the prefix + every `T_k`/`R_k`
+  check (50 s, 4.9 GB peak). Only the terminal `hw : wp_0 n init` fails.
+* 3 `if`s: fully proved, 30 s. 4 `if`s: terminal `simp` exceeds the step budget;
+  at 6 `if`s with `maxSteps := 2e7` it exceeds 12 GB.
+
+**What is open (the next step, in order):**
+1. The terminal tactic. With ONE merged state the goal reduces to exactly the
+   source values (`(if n &&& 1 = 1 then 1 else 0) + … = mojo n`), so the value
+   flow IS compositional, but normalizing it in one `simp` blows up with the
+   number of diamonds. The last edit (uncommitted-untested at commit time) unfolds
+   ONE layer at a time (`repeat' first | apply And.intro | (rw [wp_k]; simp [...,
+   defs of block k, M_k, arm defs])`) so each `simp` sees a small normalized
+   state; check it on `ifs4`/`bigbody` first (`ifs$k` = k independent
+   `if (n & 2**i)` bodies, see the scratch `mk.py` recipe: `b_i = 1/0` locals,
+   `return b1 + … + bk`). If a layer still blows up, factor the merge's memory
+   (`mem_write_u64_ite` exists; the read side may need a `mem_read_u64` over
+   `mem_write_u64 (ite …)` lemma) or normalize the merged state with a named
+   lemma per block instead of `simp`.
+2. Then set `_WP_MIN_PATHS = 5`, add the Lean-free pin
+   `test_the_universal_proof_walks_blocks_once_not_per_leaf` (count of `_T_` theorems
+   == reachable blocks, no `hsid_` chain duplicated) and run
+   `test_formal_eval_eq_mojo_bridge.py` (Lean half) for the four fixtures.
+3. Corpus: every program with >= 5 CFG paths switches to this emission, so run the
+   arm64 formal sweep (`formal_sweep`, the integrator's) before leaving it on.
