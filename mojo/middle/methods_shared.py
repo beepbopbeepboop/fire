@@ -252,7 +252,7 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
         _vts = getattr(gen, 'var_types', {})
         if module_name in _vts:
             _is_marker = (module_name in getattr(gen, '_module_alias_names', ())
-                          and _vts[module_name] == 'int64_t')
+                          and gimple_ctypes.TypeLattice.is_word(_vts[module_name]))
             if not _is_marker:
                 return False
         if module_name in (getattr(gen, '_cur_func_params', None) or ()):
