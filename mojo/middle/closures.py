@@ -389,7 +389,7 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                     _crt = 'int64_t'
                     if _crn in enriched_scope:
                         _crt = _as_str(enriched_scope[_crn])
-                    if _crt in ('', 'None', 'void', 'unknown'):
+                    if (TypeLattice.is_no_type(_crt) or TypeLattice.is_void(_crt) or TypeLattice.is_none_type(_crt) or TypeLattice.is_unsolved(_crt)):
                         _crt = 'int64_t'
                     _typed[_crn] = _crt
                 _class_locals[outer_name] = _typed

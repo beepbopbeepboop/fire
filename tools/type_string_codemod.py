@@ -31,6 +31,15 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # side and was rewritten into `et is_int_word(not)`.
 LHS = (r"(?P<lhs>_as_str\([^()]*\)|(?!(?:not|and|or|in|is|if|else|return|lambda)\b)"
        r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\[[^\[\]]*\])*)")
+# The `==`/`!=` left side accepts one level of CALL too: the stage-4 tail's
+# remaining sites are `decl.get(name) == 'MojoDict *'`,
+# `gen._quick_type(node.right) == ...`, `_cpp_receiver_ctype(gen, x) == ...`.
+# A `.strip()` after the call (`_as_str(x).strip() == 'bool'`) is part of the
+# left side, not a new expression.
+LHS_EQ = (r"(?P<lhs>_as_str\([^()]*\)(?:\.\w+\([^()]*\))?"
+          r"|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\([^()]*\)(?:\.\w+\([^()]*\))?"
+          r"|(?!(?:not|and|or|in|is|if|else|return|lambda)\b)"
+          r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\[[^\[\]]*\])*)")
 # A membership test may also ask about the value of a single-level call
 # (`decl.get(name) in ('int64_t', '_char *')`). The call alternative comes
 # first so `f(x)` is preferred over the bare `f` it starts with.
@@ -45,12 +54,30 @@ EQ = {"char *": "is_cstr", "MojoList *": "is_list", "_Bool": "is_bool",
       # `== 'int'` test is a separate change.
       "MojoDict *": "is_dict", "MojoBytes *": "is_bytes", "void": "is_void",
       "MojoSet *": "is_set", "void *": "is_voidp", "char": "is_char",
-      "MojoStr *": "is_str"}
+      "MojoStr *": "is_str",
+      "Span *": "is_span",
+      # Stage 4 tail (2026-11-27): every remaining single-spelling equality.
+      # Each predicate is an exact `t == '<spelling>'`, so a rewrite cannot
+      # change which values match. `int`/`float` are now mapped: their exact
+      # predicates (`is_c_int`/`is_c_float`) exist and the old note above is
+      # discharged.
+      "int": "is_c_int", "float": "is_c_float", "bool": "is_cpp_bool",
+      "uint64_t": "is_uword", "uint8_t": "is_u8", "uint16_t": "is_u16",
+      "uint32_t": "is_u32", "int8_t": "is_i8", "int16_t": "is_i16",
+      "int32_t": "is_i32", "short": "is_short",
+      "unsigned short": "is_ushort", "unsigned int": "is_unsigned_int",
+      "__fp16": "is_fp16", "None": "is_none_type",
+      "int64_t *": "is_word_ptr", "const char *": "is_const_cstr",
+      "MojoGenerator *": "is_generator", "MojoAsync *": "is_async",
+      "MojoBoundMethod *": "is_bound_method",
+      "MojoMemoryView *": "is_memoryview",
+      "MojoStructFmt *": "is_struct_fmt", "_SIterBytes *": "is_siter_bytes",
+      "ModuleLoader *": "is_module_loader"}
 # What may precede the left side. `=`/`,`/`:` are included so a test in a
 # keyword argument or a container literal is reached
 # (`force=gen.var_types.get(x) not in (None, 'int64_t')`).
 PRE = r"(?:^|[\s(={,:])"
-EQ_PATS = [(re.compile(r"(?P<pre>" + PRE + r"(?:not\s+)?)" + LHS
+EQ_PATS = [(re.compile(r"(?P<pre>" + PRE + r"(?:not\s+)?)" + LHS_EQ
                        + r" (?P<op>[=!]=) '" + re.escape(lit)
                        + r"'(?P<post>(?![\w\[(.]))"), fn)
            for lit, fn in EQ.items()]
@@ -157,6 +184,58 @@ TUPLES = {
         ('is_int_word', 'is_cstr', 'is_c_long'),
     # The C++ emitter's bool spelling (see is_cpp_bool).
     frozenset(["'int'", "'int64_t'", "'_Bool'", "'bool'"]): ('is_cpp_int_scalar',),
+    # Stage 4 tail (2026-11-27): the tuples the widened census found, each
+    # emitted as the exact `or` of its members' single-spelling predicates.
+    frozenset(["'MojoDict *'", "'MojoList *'", "'MojoSet *'"]): ('is_set', 'is_dict', 'is_list'),
+    frozenset(["'MojoBytes *'", "'MojoDict *'", "'MojoList *'", "'MojoSet *'", "'char *'", "'void *'"]): ('is_bytes', 'is_voidp', 'is_list', 'is_cstr', 'is_dict', 'is_set'),
+    frozenset(["'double'"]): ('is_double',),
+    frozenset(["'char *'", "'double'"]): ('is_cstr', 'is_double'),
+    frozenset(["'MojoDict *'", "'MojoList *'"]): ('is_dict', 'is_list'),
+    frozenset(["'MojoDict *'", "'MojoList *'", "'MojoSet *'", "'char *'", "'double'"]): ('is_list', 'is_cstr', 'is_dict', 'is_set', 'is_double'),
+    frozenset(["'MojoDict *'", "'MojoList *'", "'MojoSet *'", "'char *'"]): ('is_set', 'is_dict', 'is_cstr', 'is_list'),
+    frozenset(["'MojoList *'", "'MojoStr *'", "'char *'"]): ('is_str', 'is_cstr', 'is_list'),
+    frozenset(["'double'", "'float'"]): ('is_double', 'is_c_float'),
+    frozenset(["'_Bool'", "'bool'"]): ('is_bool', 'is_cpp_bool'),
+    frozenset(["'char *'", "'const char *'"]): ('is_const_cstr', 'is_cstr'),
+    frozenset(["'char'", "'int'"]): ('is_c_int', 'is_char'),
+    frozenset(["'MojoStr *'", "'char *'"]): ('is_str', 'is_cstr'),
+    frozenset(["'MojoDict *'", "'MojoList *'", "'MojoSet *'", "'void *'"]): ('is_voidp', 'is_set', 'is_dict', 'is_list'),
+    frozenset(["'__fp16'", "'double'", "'float'"]): ('is_fp16', 'is_double', 'is_c_float'),
+    frozenset(["'MojoList *'", "'MojoSet *'"]): ('is_set', 'is_list'),
+    frozenset(["'char *'", "'void *'"]): ('is_voidp', 'is_cstr'),
+    frozenset(["'MojoDict *'", "'MojoList *'", "'MojoSet *'", "'char *'", "'void *'"]): ('is_voidp', 'is_list', 'is_cstr', 'is_dict', 'is_set'),
+    frozenset(["'_Bool'", "'__fp16'", "'double'", "'float'"]): ('is_fp16', 'is_bool', 'is_double', 'is_c_float'),
+    frozenset(["'MojoDict *'", "'MojoGenerator *'", "'MojoList *'", "'MojoSet *'", "'char *'", "'void *'"]): ('is_voidp', 'is_list', 'is_cstr', 'is_dict', 'is_generator', 'is_set'),
+    frozenset(["'_Bool'", "'int'"]): ('is_c_int', 'is_bool'),
+    frozenset(["'void *'"]): ('is_voidp',),
+    frozenset(["'MojoBytes *'", "'MojoDict *'", "'MojoList *'", "'MojoMemoryView *'", "'MojoSet *'"]): ('is_bytes', 'is_memoryview', 'is_list', 'is_dict', 'is_set'),
+    frozenset(["'MojoDict *'", "'MojoList *'", "'MojoSet *'", "'MojoStr *'"]): ('is_set', 'is_dict', 'is_str', 'is_list'),
+    frozenset(["'bool'", "'int'"]): ('is_c_int', 'is_cpp_bool'),
+    frozenset(["'MojoBytes *'", "'MojoMemoryView *'"]): ('is_bytes', 'is_memoryview'),
+    frozenset(["'_Bool'"]): ('is_bool',),
+    frozenset(["'_Bool'", "'char *'", "'int'", "'void *'"]): ('is_c_int', 'is_cstr', 'is_bool', 'is_voidp'),
+    frozenset(["'_Bool'", "'double'", "'float'"]): ('is_bool', 'is_double', 'is_c_float'),
+    frozenset(["'MojoDict *'", "'MojoList *'", "'MojoSet *'", "'char *'", "'double'", "'float'"]): ('is_list', 'is_cstr', 'is_dict', 'is_c_float', 'is_set', 'is_double'),
+    frozenset(["''", "'None'", "'unknown'", "'void'"]): ('is_no_type', 'is_void', 'is_none_type', 'is_unsolved'),
+    frozenset(["'MojoBytes *'", "'MojoDict *'", "'MojoList *'", "'MojoSet *'"]): ('is_bytes', 'is_set', 'is_dict', 'is_list'),
+    frozenset(["'MojoBytes *'", "'MojoDict *'", "'MojoList *'", "'MojoSet *'", "'char *'"]): ('is_bytes', 'is_list', 'is_cstr', 'is_dict', 'is_set'),
+    frozenset(["'MojoBytes *'", "'char *'"]): ('is_bytes', 'is_cstr'),
+    frozenset(["'int16_t'", "'short'", "'uint16_t'", "'unsigned short'"]): ('is_short', 'is_i16', 'is_u16', 'is_ushort'),
+    frozenset(["'int'", "'int32_t'", "'uint32_t'", "'unsigned int'"]): ('is_c_int', 'is_u32', 'is_unsigned_int', 'is_i32'),
+    frozenset(["'MojoAsync *'", "'MojoGenerator *'"]): ('is_async', 'is_generator'),
+    frozenset(["'_Bool'", "'char *'", "'double'", "'float'", "'int'", "'int16_t'", "'int32_t'", "'int8_t'", "'uint16_t'", "'uint32_t'", "'uint64_t'", "'uint8_t'"]): ('is_u8', 'is_i8', 'is_uword', 'is_i16', 'is_u32', 'is_cstr', 'is_c_int', 'is_bool', 'is_u16', 'is_c_float', 'is_double', 'is_i32'),
+    frozenset(["'_Bool'", "'char *'", "'double'"]): ('is_bool', 'is_cstr', 'is_double'),
+    frozenset(["'_Bool'", "'double'"]): ('is_bool', 'is_double'),
+    frozenset(["'char *'"]): ('is_cstr',),
+    frozenset(["'void *'", "'void'"]): ('is_voidp', 'is_void'),
+    frozenset(["'MojoDict *'", "'MojoList *'", "'MojoSet *'", "'Span *'"]): ('is_set', 'is_dict', 'is_span', 'is_list'),
+    frozenset(["'MojoBytes *'", "'char *'", "'double'"]): ('is_bytes', 'is_cstr', 'is_double'),
+    frozenset(["'float'", "'int'"]): ('is_c_int', 'is_c_float'),
+    frozenset(["''", "'void'"]): ('is_no_type', 'is_void'),
+    frozenset(["'MojoDict *'", "'MojoGenerator *'", "'MojoList *'", "'MojoSet *'"]): ('is_generator', 'is_set', 'is_dict', 'is_list'),
+    frozenset(["'MojoDict *'", "'MojoList *'", "'MojoSet *'", "'MojoStr *'", "'char *'", "'void *'"]): ('is_voidp', 'is_list', 'is_cstr', 'is_dict', 'is_str', 'is_set'),
+    frozenset(["'MojoBytes *'", "'MojoDict *'", "'MojoList *'", "'MojoSet *'", "'char *'", "'double'"]): ('is_bytes', 'is_list', 'is_cstr', 'is_dict', 'is_set', 'is_double'),
+    frozenset(["'uint16_t'", "'uint32_t'", "'uint8_t'", "'unsigned int'"]): ('is_u32', 'is_u16', 'is_unsigned_int', 'is_u8'),
 }
 
 TUPLE_PAT = re.compile(r"(?P<pre>" + PRE + r")" + LHS_TUPLE + r"\s+(?P<neg>not )?in "
@@ -183,6 +262,10 @@ def _tuple(m, prefix):
 
 
 ENDS = re.compile(r"(?<![\w.])" + LHS + r"\.endswith\(' \*'\)")
+# The same pointer test written without the space (`char*`, a spelling the C++
+# emitter's own text can produce). `ends_with_star` is the predicate that
+# answers it; `ends_in_star` stays the canonical `... *` question.
+ENDS_BARE = re.compile(r"(?<![\w.])" + LHS + r"\.endswith\('\*'\)")
 
 
 def rewrite_line(line: str, prefix: str) -> str:
@@ -192,6 +275,10 @@ def rewrite_line(line: str, prefix: str) -> str:
     def ends(m):
         return '%sends_in_star(%s)' % (prefix, m.group('lhs'))
     line = ENDS.sub(ends, line)
+
+    def ends_bare(m):
+        return '%sends_with_star(%s)' % (prefix, m.group('lhs'))
+    line = ENDS_BARE.sub(ends_bare, line)
     for pat, fn in EQ_PATS:
         def eq(m, fn=fn):
             call = '%s%s(%s)' % (prefix, fn, m.group('lhs'))

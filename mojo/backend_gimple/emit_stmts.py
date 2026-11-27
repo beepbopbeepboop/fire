@@ -372,7 +372,8 @@ def _maybe_narrow_genexp_local(gen, name, value) -> bool:
     if not (isinstance(name, str) and name in gen._genexp_narrow_names
             and _is_genexp(value)):
         return False
-    if gen.var_types.get(name) in (None, 'MojoList *'):
+    if (gen.var_types.get(name) is None
+            or gimple_ctypes.TypeLattice.is_list(gen.var_types.get(name))):
         return False
     # Lower the genexp AS a list comprehension.
     _saved_kind = value.kind
@@ -437,7 +438,7 @@ def _gen_stmt_VarDecl(gen, node):
                     _is_none_assign = True
             except Exception:
                 pass
-            if not _is_none_assign and isinstance(_val, gimple_ctypes.IdentExpr) and getattr(_val, 'name', None) == 'None':
+            if not _is_none_assign and isinstance(_val, gimple_ctypes.IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(getattr(_val, 'name', None)):
                 _is_none_assign = True
             if _is_none_assign:
                 _fs[_as_str(node.name)] = True
@@ -552,7 +553,7 @@ def _gen_stmt_VarDecl(gen, node):
             # `int` an int32-range literal lowers to: the pre-pass
             # (`_infer_local_var_types`) already widened it, so honour
             # that hint exactly as the plain-assignment path does.
-            if (ctype == 'int' and isinstance(node.name, str)
+            if (gimple_ctypes.TypeLattice.is_c_int(ctype) and isinstance(node.name, str)
                     and node.name not in gen.var_types):
                 _hint = gen._inferred_var_types.get(
                     gen.current_func_name, {}).get(node.name)
@@ -593,7 +594,7 @@ def _gen_stmt_VarDecl(gen, node):
                 and node.name in gen._global_var_types):
             actual_dst = gen._global_dst_ctype(node.name)
         _record_bool_valued(gen, node.name, node.value)
-        if ctype in ('MojoList *', 'MojoSet *') and v in gen._elem_types:
+        if (gimple_ctypes.TypeLattice.is_set(ctype) or gimple_ctypes.TypeLattice.is_list(ctype)) and v in gen._elem_types:
             gen._elem_types[node.name] = gen._elem_types[v]
             if v in gen._nested_elem_types:
                 gen._nested_elem_types[node.name] = gen._nested_elem_types[v]
@@ -645,14 +646,14 @@ def _gen_stmt_VarDecl(gen, node):
         # for `task` and fell through to a bogus generic method-
         # dispatch fallback instead of the real _lower_method_call
         # `.wait()` handling.
-        if actual_dst == 'MojoGenerator *' and v in gen._generator_var_api:
+        if gimple_ctypes.TypeLattice.is_generator(actual_dst) and v in gen._generator_var_api:
             gen._generator_var_api[node.name] = gen._generator_var_api[v]
             # A named local now holds the handle and may be read again
             # (another consumption, or simply falling out of scope): the
             # drains of this value must not destroy it (see
             # _generator_value_owned).
             gen._generator_value_owned[node.name] = False
-        if actual_dst == 'MojoAsync *' and v in gen._async_var_api:
+        if gimple_ctypes.TypeLattice.is_async(actual_dst) and v in gen._async_var_api:
             gen._async_var_api[node.name] = gen._async_var_api[v]
         # `var f = <closure value>` / `var f = lambda: False` (see
         # _lower_IdentExpr's closure-value materialization and
@@ -783,7 +784,7 @@ def _gen_stmt_VarDecl(gen, node):
         # field fix's per-class global). Module-level globals take the
         # same branch via `_in_toplevel_gen` and are handled by the
         # `actual_dst` global coercion below.
-        if ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+        if (gimple_ctypes.TypeLattice.is_set(ctype) or gimple_ctypes.TypeLattice.is_dict(ctype) or gimple_ctypes.TypeLattice.is_list(ctype)):
             _alloc = {'MojoList *': 'mojo_list_new ()',
                       'MojoDict *': 'mojo_dict_new ()',
                       'MojoSet *': 'mojo_set_new ()'}.get(ctype)
@@ -970,7 +971,7 @@ def _join_dict_store(gen, key: str, value_node, vtype: str):
     (`exprtypes.dict_kind_join`).
     """
     _kind = gimple_exprtypes.dict_value_kind(gen, value_node)
-    if _kind is None and (vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
+    if _kind is None and ((gimple_ctypes.TypeLattice.is_list(vtype) or gimple_ctypes.TypeLattice.is_cstr(vtype) or gimple_ctypes.TypeLattice.is_dict(vtype) or gimple_ctypes.TypeLattice.is_set(vtype) or gimple_ctypes.TypeLattice.is_double(vtype))
                           or gimple_ctypes.TypeLattice.ends_in_star(vtype)):
         _kind = vtype
     _prev_vt = gen._dict_val_types.get(key)
@@ -1060,7 +1061,7 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     #
     # `setdefault`, because an earlier pass's own conclusion for this name (a
     # parameter usage guess, say) is not something a store site may overturn.
-    if vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+    if (gimple_ctypes.TypeLattice.is_set(vtype) or gimple_ctypes.TypeLattice.is_dict(vtype) or gimple_ctypes.TypeLattice.is_list(vtype)):
         gen._actual_types.setdefault(tname, vtype)
     elif (isinstance(vtype, str) and gimple_ctypes.TypeLattice.ends_in_star(vtype)
             and vtype[:-2] in getattr(gen, '_intu_prereg_structs', ())):
@@ -1115,7 +1116,7 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     # exactly the bug class this table's own comment warns about. Harmless
     # when the field really is a `MojoBoundMethod *`, because `_get_actual_type`
     # only consults `_actual_types` for an `int64_t`-declared slot.
-    if vtype == 'MojoBoundMethod *' and tname in gen._bound_method_ret_types:
+    if gimple_ctypes.TypeLattice.is_bound_method(vtype) and tname in gen._bound_method_ret_types:
         gen._actual_types[tname] = 'MojoBoundMethod *'
     # …and the WHOLE-PROGRAM half of the same fact. `carry_callable_ret_types`
     # writes the per-function tables, which are keyed by the lowered VALUE, and
@@ -1188,7 +1189,7 @@ def _note_global_generator_store(gen, tname: str, vtype: str, v: str) -> None:
         gen._global_generator_api_poisoned.add(key)
         return
     api = None
-    if vtype == 'MojoGenerator *' and v in gen._generator_var_api:
+    if gimple_ctypes.TypeLattice.is_generator(vtype) and v in gen._generator_var_api:
         api = gen._generator_var_api[v]
         # The handle is about to live in a module global: whatever drains
         # it later does so through a fresh read-back temp (marked False at
@@ -1237,7 +1238,7 @@ def _tagged_opt_is_some_expr(gen, value_node, target_node, ot, ov, op,
     v = value_node
     if isinstance(v, NoneLiteral):
         return '0'
-    if isinstance(v, IdentExpr) and v.name == 'None':
+    if isinstance(v, IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(v.name):
         return '0'
     if isinstance(v, CallExpr):
         _fn = v.func
@@ -1590,7 +1591,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                     _is_none_assign = True
             except Exception:
                 pass
-            if not _is_none_assign and isinstance(_val, gimple_ctypes.IdentExpr) and getattr(_val, 'name', None) == 'None':
+            if not _is_none_assign and isinstance(_val, gimple_ctypes.IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(getattr(_val, 'name', None)):
                 _is_none_assign = True
             if _is_none_assign:
                 _fs[_as_str(tname)] = True
@@ -1611,15 +1612,15 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # then `for d in dirs`): the run time has to be told which generator it is
         # for the `for` over the word to drain it.
         _tdecl = gen.var_types.get(tname)
-        if _tdecl is None and vtype == 'MojoGenerator *':
+        if _tdecl is None and gimple_ctypes.TypeLattice.is_generator(vtype):
             # first assignment: the slot is declared from the pre-pass verdict
             if tname in ginf.mixed_container_locals(gen):
                 _tdecl = 'int64_t'
             else:
                 _fk = gen.current_func_name
                 _tdecl = (getattr(gen, '_inferred_var_types', {}).get(_fk, {}) or {}).get(tname)
-        if (vtype == 'MojoGenerator *' and v in gen._generator_var_api
-                and _tdecl is not None and _tdecl != 'MojoGenerator *'):
+        if (gimple_ctypes.TypeLattice.is_generator(vtype) and v in gen._generator_var_api
+                and _tdecl is not None and not gimple_ctypes.TypeLattice.is_generator(_tdecl)):
             _gapi2 = gen._generator_var_api[v]
             if _as_str(_gapi2.get('base') or '').startswith('__mgco_'):
                 _vk2 = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(
@@ -1712,7 +1713,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         _declared_t = _as_str(gen.var_types.get(_as_str(tname)) or '')
         _boxed_get_into_container = (
             gimple_ctypes.TypeLattice.ends_in_star(_declared_t)
-            and _declared_t not in ('char *', 'const char *')
+            and not (gimple_ctypes.TypeLattice.is_const_cstr(_declared_t) or gimple_ctypes.TypeLattice.is_cstr(_declared_t))
             and _as_str(v) in getattr(gen, '_dict_get_boxed_temps', ()))
         # BIND side again (`bind_tagged`, not `is_tagged`): a tagged word that
         # reached this store through a copy (an `or` merge's temp, a coercion)
@@ -1732,7 +1733,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # double to a pointer, which gcc rejects. Refuse the function at the
         # store that brings the second kind. A box-holding name is the
         # exception: it is the int64_t box, and stores are boxed by kind.
-        if vtype in ('double', 'char *') and not _mixed_box:
+        if (gimple_ctypes.TypeLattice.is_cstr(vtype) or gimple_ctypes.TypeLattice.is_double(vtype)) and not _mixed_box:
 
             _sk_key = (_as_str(gen.current_func_name), _as_str(tname))
             _sk_prev = gen._stored_kinds.get(_sk_key)
@@ -1757,11 +1758,11 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         _unboxable_ptr = (
             _decl_t_before is not None
             and gimple_ctypes.TypeLattice.ends_in_star(str(_decl_t_before))
-            and _decl_t_before not in ('char *', 'const char *'))
+            and not (gimple_ctypes.TypeLattice.is_const_cstr(_decl_t_before) or gimple_ctypes.TypeLattice.is_cstr(_decl_t_before)))
         _unboxable_store = (
             _orig_vtype is not None
             and gimple_ctypes.TypeLattice.ends_in_star(str(_orig_vtype))
-            and _orig_vtype not in ('char *', 'const char *'))
+            and not (gimple_ctypes.TypeLattice.is_const_cstr(_orig_vtype) or gimple_ctypes.TypeLattice.is_cstr(_orig_vtype)))
         if _tagged_bind and _unboxable_ptr:
             raise RuntimeError(
                 f"{tname!r}: a name bound to a container or pointer value "
@@ -2062,7 +2063,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             # value is actually a container pointer (e.g. a dict read whose value
             # type is a dict/list/set), trust ground truth so a later
             # .get()/subscript dispatches on the right container.
-            if _pin_to_ground_truth and ctype == 'int' and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+            if _pin_to_ground_truth and gimple_ctypes.TypeLattice.is_c_int(ctype) and (gimple_ctypes.TypeLattice.is_set(vtype) or gimple_ctypes.TypeLattice.is_dict(vtype) or gimple_ctypes.TypeLattice.is_list(vtype)):
                 ctype = vtype
             # Same rule, one step further: the pre-pass hint is a POINTER
             # that disagrees with a container value. `int` is the
@@ -2096,7 +2097,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             # names on evidence the other never had; the gate above is the one
             # that must win, because it is the one whose false positives the
             # `len(set(...))` fix in `_infer_local_var_types` removed.
-            if _pin_to_ground_truth and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *') \
+            if _pin_to_ground_truth and (gimple_ctypes.TypeLattice.is_set(vtype) or gimple_ctypes.TypeLattice.is_dict(vtype) or gimple_ctypes.TypeLattice.is_list(vtype)) \
                     and ctype != vtype:
                 ctype = vtype
             # Same "trust ground truth" principle, generalized to ANY pointer
@@ -2112,7 +2113,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             # it as an integer at the coercion below. See
             # CODEGEN_untyped_param_string_passthrough_wrong.
             if _pin_to_ground_truth and gimple_ctypes.TypeLattice.is_int_word(ctype) \
-                    and not gimple_ctypes.TypeLattice.is_int_word(vtype) and vtype.endswith('*'):
+                    and not gimple_ctypes.TypeLattice.is_int_word(vtype) and gimple_ctypes.TypeLattice.ends_with_star(vtype):
                 ctype = vtype
             # `s: Set[Int] = {}` — an ANNOTATED assignment declares a
             # container kind, and an empty `{}` is a dict DISPLAY: evidence
@@ -2141,10 +2142,10 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             # self-hosted compile of a function with a `return <container
             # local>` died there. None is the null WORD, so it takes the word
             # type.
-            if ctype == 'int' and (
+            if gimple_ctypes.TypeLattice.is_c_int(ctype) and (
                     isinstance(node.value, gimple_ctypes.NoneLiteral)
                     or (isinstance(node.value, gimple_ctypes.IdentExpr)
-                        and node.value.name == 'None')):
+                        and gimple_ctypes.TypeLattice.is_none_type(node.value.name))):
                 ctype = 'int64_t'
             # `ptype: str = None` ANNOTATES the variable as a string-or-None,
             # so its slot is a `char *` whatever the pre-pass hinted for the
@@ -2163,7 +2164,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                     or (_ann_s and gimple_ctypes.TypeLattice.is_cstr(gimple_ctypes._mojo_type(_ann_s))))
                     and (isinstance(node.value, gimple_ctypes.NoneLiteral)
                          or (isinstance(node.value, gimple_ctypes.IdentExpr)
-                             and node.value.name == 'None'))):
+                             and gimple_ctypes.TypeLattice.is_none_type(node.value.name)))):
                 ctype = 'char *'
             gen._declare_var(tname, ctype)
             # BUG-2026-023 residual (box.3d/game FileSystem.current_dir_path):
@@ -2197,7 +2198,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         if _reified is not None:
             vtype, v = dst, _reified
 
-        if dst in ('MojoList *', 'MojoSet *') and v in gen._elem_types:
+        if (gimple_ctypes.TypeLattice.is_set(dst) or gimple_ctypes.TypeLattice.is_list(dst)) and v in gen._elem_types:
             gen._elem_types[tname] = gen._elem_types[v]
             if v in gen._nested_elem_types:
                 gen._nested_elem_types[tname] = gen._nested_elem_types[v]
@@ -2250,7 +2251,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # type rides along on the shared carry immediately above, which covers
         # the `_Bool` a `lambda: 42`-vs-`self.tell` join would otherwise
         # narrow to `int64_t`.
-        if vtype == 'MojoBoundMethod *' and dst != 'MojoBoundMethod *':
+        if gimple_ctypes.TypeLattice.is_bound_method(vtype) and not gimple_ctypes.TypeLattice.is_bound_method(dst):
             gen._bm_tainted_locals.add(tname)
         # `append = l.append` (a builtin-container method bound as a
         # value, see _lower_builtin_method_value): carry the recorded
@@ -2272,7 +2273,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # after this assignment finds no entry for `g` and falls back to
         # the honest "no known API" refusal — see bugs/CODEGEN_compiled_
         # generator_not_first_class_value.md.
-        if dst == 'MojoGenerator *' and v in gen._generator_var_api:
+        if gimple_ctypes.TypeLattice.is_generator(dst) and v in gen._generator_var_api:
             gen._generator_var_api[tname] = gen._generator_var_api[v]
             # A named local now holds the handle and may be read again
             # (another consumption, or simply falling out of scope): the
@@ -2284,7 +2285,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # self._async_var_api's own docstring for the identical "value
         # -> api" side-table rationale, just for `MojoAsync *` instead
         # of `MojoGenerator *`).
-        if dst == 'MojoAsync *' and v in gen._async_var_api:
+        if gimple_ctypes.TypeLattice.is_async(dst) and v in gen._async_var_api:
             gen._async_var_api[tname] = gen._async_var_api[v]
         # The per-slot-KIND side tables, carried from the RHS temp onto the
         # assigned name — the exact mirror of the three same-shaped blocks in
@@ -2749,10 +2750,10 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 # inside its `isinstance(val, list)` branch, which only
                 # became reachable once isinstance stopped truncating
                 # pointers (see mojo_isinstance).
-                _idx_is_str = (it in ('char *', 'MojoStr *')
+                _idx_is_str = ((gimple_ctypes.TypeLattice.is_str(it) or gimple_ctypes.TypeLattice.is_cstr(it))
                                or gimple_ctypes.TypeLattice.is_cstr(gen._get_actual_type(it, idx_v)))
                 _is_dict = (gimple_ctypes.TypeLattice.is_dict(actual_type)
-                            or (_idx_is_str and actual_type not in ('MojoList *', 'MojoSet *')))
+                            or (_idx_is_str and not (gimple_ctypes.TypeLattice.is_set(actual_type) or gimple_ctypes.TypeLattice.is_list(actual_type))))
                 if not _is_dict:
                     # It's a list - cast to MojoList* and set element
                     ip = gen._new_temp('int64_t')
@@ -3142,7 +3143,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
     if base_op in ('//', '**', '+', '-', '*', '/', '%', '|', '&', '^', '<<', '>>', '@'):
         if (base_op == '|'
                 and isinstance(node.target, gimple_ctypes.IdentExpr)
-                and gen._type_of(node.target.name) == 'MojoDict *'):
+                and gimple_ctypes.TypeLattice.is_dict(gen._type_of(node.target.name))):
             gen._rt_void('mojo_frozendict_check_no_mut_method',
                          [f"{gen._cname(node.target.name)}", '"__ior__"'])
         fake  = gimple_ctypes.BinaryOp(op=base_op, left=node.target, right=node.value)
@@ -3386,9 +3387,9 @@ def _gen_stmt_AugAssignStmt(gen, node):
             # `stats` is a stubbed Counter and which segfaulted as a
             # minimal 6-line repro before erroring there).
             actual_type = gen._get_actual_type(ot, obj_v)
-            idx_is_str = (it in ('char *', 'MojoStr *')
+            idx_is_str = ((gimple_ctypes.TypeLattice.is_str(it) or gimple_ctypes.TypeLattice.is_cstr(it))
                           or gimple_ctypes.TypeLattice.is_cstr(gen._get_actual_type(it, idx_v)))
-            if gimple_ctypes.TypeLattice.is_dict(actual_type) or (idx_is_str and actual_type not in ('MojoList *', 'MojoSet *')):
+            if gimple_ctypes.TypeLattice.is_dict(actual_type) or (idx_is_str and not (gimple_ctypes.TypeLattice.is_set(actual_type) or gimple_ctypes.TypeLattice.is_list(actual_type))):
                 ip = gen._new_temp('int64_t')
                 gen._cast_into(ip, 'int64_t', f"{obj_v}")
                 dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
@@ -3630,7 +3631,7 @@ def _box_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
         return 'int64_t', gen._call_expr(
             'int64_t', 'mojo_box_from_bool',
             [('int64_t', gen._to_int64('_Bool', v))])
-    if vt in ('double', 'float'):
+    if (gimple_ctypes.TypeLattice.is_double(vt) or gimple_ctypes.TypeLattice.is_c_float(vt)):
         dv = v if gimple_ctypes.TypeLattice.is_double(vt) else gen._cast('double', v)
         return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_double',
                                          [('double', dv)])
@@ -3718,7 +3719,7 @@ def _check_float_arm_into_annotated_pointer(gen, vtype, node=None) -> None:
     _vt = _as_str(vtype)
     if not gimple_ctypes.TypeLattice.ends_in_star(_rt):
         return
-    if _vt in ('double', 'float'):
+    if (gimple_ctypes.TypeLattice.is_double(_vt) or gimple_ctypes.TypeLattice.is_c_float(_vt)):
         raise TypeError(
             f"function {_as_str(getattr(gen, 'current_func_name', '') or '?')!r} "
             f"is annotated to return {_rt!r} but has a return arm of type "
@@ -3796,7 +3797,7 @@ def _gen_stmt_ReturnStmt(gen, node):
             # returning `self._color(...)`'s real int64_t-typed value —
             # the function's own inferred return type is int64_t, so the
             # bare-return path's naked `return 0;` mismatched.
-            if ret == 'int' or gimple_ctypes.TypeLattice.ends_in_star(ret):
+            if gimple_ctypes.TypeLattice.is_c_int(ret) or gimple_ctypes.TypeLattice.ends_in_star(ret):
                 gen._ret('0')
             else:
                 tmp = gen._new_temp(ret)
@@ -3855,7 +3856,7 @@ def _gen_stmt_ReturnStmt(gen, node):
         #     instead of leaving the double's BIT PATTERN in the loop target
         #     (`print(x)` showed 4602678819172646912 for 0.5). The note's
         #     side effect is all this shape wants, so `v` stays the handle.
-        if vtype == 'MojoGenerator *' and v in gen._generator_var_api:
+        if gimple_ctypes.TypeLattice.is_generator(vtype) and v in gen._generator_var_api:
             _gapi = gen._generator_var_api[v]
             if _as_str(_gapi.get('base') or '').startswith('__mgco_'):
                 _vk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(
@@ -3865,7 +3866,7 @@ def _gen_stmt_ReturnStmt(gen, node):
                     _kv = gen._new_val('int64_t', str(_vk))
                     _vout = gen._call_expr('int64_t', 'mojo_gen_note_a3',
                                            [('int64_t', _hw), ('int64_t', _kv)])
-                    if _as_str(gen.func_ret_type) != 'MojoGenerator *':
+                    if not gimple_ctypes.TypeLattice.is_generator(_as_str(gen.func_ret_type)):
                         v = _vout
                         vtype = 'int64_t'
         # A function that is used as a VALUE (passed or stored, never only
@@ -3941,7 +3942,7 @@ def _gen_stmt_ReturnStmt(gen, node):
         # runtime registries instead of guessing one kind and reading another
         # one's memory — see `gen._multi_kind_return_funcs`.
         _fk = gen.current_func_name
-        if (_fk and vtype in ('MojoList *', 'MojoDict *', 'MojoSet *')
+        if (_fk and (gimple_ctypes.TypeLattice.is_set(vtype) or gimple_ctypes.TypeLattice.is_dict(vtype) or gimple_ctypes.TypeLattice.is_list(vtype))
                 and gimple_ctypes.TypeLattice.is_word(gen.func_ret_type)):
             _seen = gen._multi_kind_return_kinds.setdefault(_fk, [])
             if vtype not in _seen:
@@ -4022,7 +4023,7 @@ def _gen_stmt_ReturnStmt(gen, node):
         if _is_mixed_return(gen):
             if isinstance(node.value, gimple_ctypes.NoneLiteral) or (
                     isinstance(node.value, gimple_ctypes.IdentExpr)
-                    and _as_str(node.value.name) == 'None'):
+                    and gimple_ctypes.TypeLattice.is_none_type(_as_str(node.value.name))):
                 # `return None` lowers as the word 0, which is an int slot's
                 # value, not the shared None box the kind reader looks for.
                 # The parser spells it as either a NoneLiteral or the bare
@@ -4120,18 +4121,18 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         b = gen._new_temp('_Bool')
         gen._binop_into(b, n, '!=', '0')
         return b
-    if ctype in ('double', 'float'):
+    if (gimple_ctypes.TypeLattice.is_double(ctype) or gimple_ctypes.TypeLattice.is_c_float(ctype)):
         # Python's truthiness for a float is `x != 0.0`, NOT "its integer
         # part is nonzero": the int64_t fallback below casts the value to
         # int64_t first, so every float with |x| < 1 (`0.5`, `0.0001`) read
         # as falsy — a real `if 0.0001:` took the else arm. Compare in the
         # value's own type; gcc -fgimple accepts a double comparison (only
         # inline float DIVISION has the expmed_mode_index ICE).
-        zero = gen._new_val(ctype, '0.0f' if ctype == 'float' else '0.0')
+        zero = gen._new_val(ctype, '0.0f' if gimple_ctypes.TypeLattice.is_c_float(ctype) else '0.0')
         b = gen._new_temp('_Bool')
         gen._binop_into(b, val, '!=', zero)
         return b
-    if ctype in ('void *',) or (gimple_ctypes.TypeLattice.ends_in_star(ctype) and not gimple_ctypes.TypeLattice.is_bool(ctype)):
+    if gimple_ctypes.TypeLattice.is_voidp(ctype) or (gimple_ctypes.TypeLattice.ends_in_star(ctype) and not gimple_ctypes.TypeLattice.is_bool(ctype)):
         ip   = gen._new_temp('int64_t')
         zero = gen._new_temp('int64_t')
         b    = gen._new_temp('_Bool')
@@ -4173,7 +4174,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         gen._binop_into(b, f"{val}", '!=', zero)
         return b
     # int and other integer types: avoid GIMPLE type-mismatch by going through int64_t
-    if ctype not in ('_Bool',):
+    if not gimple_ctypes.TypeLattice.is_bool(ctype):
         b = gen._new_temp('_Bool')
         v64 = gen._new_temp('int64_t')
         z64 = gen._new_temp('int64_t')
@@ -4599,7 +4600,7 @@ def _gen_stmt_IfStmt(gen, node):
                 if v is not True or k in merged:
                     continue
                 _ct = _vt.get(k)
-                if isinstance(_ct, str) and _ct.endswith('*'):
+                if isinstance(_ct, str) and gimple_ctypes.TypeLattice.ends_with_star(_ct):
                     if all(st.get(k) is True for st in _branch_end_states):
                         merged[k] = True
                 else:
@@ -4607,7 +4608,7 @@ def _gen_stmt_IfStmt(gen, node):
         for k, v in _flow_saved.items():
             if v is True and k not in merged:
                 _ct = _vt.get(k)
-                if not (isinstance(_ct, str) and _ct.endswith('*')):
+                if not (isinstance(_ct, str) and gimple_ctypes.TypeLattice.ends_with_star(_ct)):
                     merged[k] = True
         gen._flow_none_state = merged
     else:
@@ -5597,10 +5598,10 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 # an opaque container is a dict only when its resolved type
                 # says so or the KEY is string-shaped, never merely because
                 # the container's type is unknown.
-                _idx_is_str2 = (it2 in ('char *', 'MojoStr *')
+                _idx_is_str2 = ((gimple_ctypes.TypeLattice.is_str(it2) or gimple_ctypes.TypeLattice.is_cstr(it2))
                                 or gimple_ctypes.TypeLattice.is_cstr(gen._get_actual_type(it2, idx_v)))
                 if not (gimple_ctypes.TypeLattice.is_dict(actual_type)
-                        or (_idx_is_str2 and actual_type not in ('MojoList *', 'MojoSet *'))):
+                        or (_idx_is_str2 and not (gimple_ctypes.TypeLattice.is_set(actual_type) or gimple_ctypes.TypeLattice.is_list(actual_type)))):
                     ip = gen._new_temp('int64_t')
                     gen._cast_into(ip, 'int64_t', obj_v)
                     lp = gen._coerce_to_type('int64_t', 'MojoList *', ip)
@@ -6139,7 +6140,7 @@ def _gen_stmt_ExprStmt(gen, node):
         if raw_name in gen._builtin_method_values:
             gen._lower_builtin_bound_method_call(raw_name, node.value)
             return
-        if gen._get_actual_type(_var_ctype, raw_name) == 'MojoBoundMethod *':
+        if gimple_ctypes.TypeLattice.is_bound_method(gen._get_actual_type(_var_ctype, raw_name)):
             # A closure/bound-method VALUE stored in a local and called
             # as a bare statement — mirrors _lower_call's identical
             # guard, so `add5(37)` (value discarded) re-supplies the
@@ -7411,7 +7412,7 @@ def _gen_stmt_WithStmt(gen, node):
         # code at all, so normal-path correctness is strictly better and
         # no previously-working behavior changes.
         gen_api = (gen._generator_var_api.get(ctx_v)
-                   if ctx_t == 'MojoGenerator *' else None)
+                   if gimple_ctypes.TypeLattice.is_generator(ctx_t) else None)
         if gen_api is not None:
             base = gen_api['base']
             resume_t = gen._new_temp('_Bool')
@@ -7433,7 +7434,7 @@ def _gen_stmt_WithStmt(gen, node):
         # in _generator_var_api (e.g. stored in a container and retrieved). If
         # it is a registered generator handle, drive it via the runtime's
         # generic generator-context-manager helpers.
-        if ctx_t == 'MojoGenerator *' and gen_api is None:
+        if gimple_ctypes.TypeLattice.is_generator(ctx_t) and gen_api is None:
             _hw = gen._new_temp('int64_t')
             gen._safe_coerce_emit('MojoGenerator *', 'int64_t', ctx_v, _hw)
             if item.alias is not None:

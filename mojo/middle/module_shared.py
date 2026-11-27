@@ -1454,7 +1454,7 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                 # dict-value seed just above. Without it a later
                 # `for x in sorted(self._x):` / `for x in self._x:`
                 # left `x` boxed int64_t.
-                if (ft in ('MojoList *', 'MojoSet *')
+                if ((gimple_ctypes.TypeLattice.is_set(ft) or gimple_ctypes.TypeLattice.is_list(ft))
                         and getattr(node, 'type_ann', None)
                         and '[' in str(node.type_ann)):
                     _li_sa = gimple_ctypes._split_top_level_commas(

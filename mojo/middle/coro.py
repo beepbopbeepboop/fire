@@ -2110,7 +2110,7 @@ NONE_YIELD_CPP_REFUSAL = ("a None yield (bare `yield` / `yield None`) has no val
 
 def _is_none_slot(e) -> bool:
     """A tuple element that is the literal None (the parser spells it as an IdentExpr)."""
-    return isinstance(e, N.NoneLiteral) or (isinstance(e, N.IdentExpr) and e.name == 'None')
+    return isinstance(e, N.NoneLiteral) or (isinstance(e, N.IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(e.name))
 
 
 def _is_none_yield(y) -> bool:
@@ -2122,7 +2122,7 @@ def _is_none_yield(y) -> bool:
     # so the NoneLiteral arm is for any producer that builds the literal node.
     return isinstance(y, N.YieldExpr) and (
         y.value is None or isinstance(y.value, N.NoneLiteral)
-        or (isinstance(y.value, N.IdentExpr) and y.value.name == 'None'))
+        or (isinstance(y.value, N.IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(y.value.name)))
 
 
 def _generator_value_kind(fn: N.FunctionDef,
@@ -5252,7 +5252,7 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env, extra_containers=None
         _ecpn = _local_param_name(_cm_as_str(_ecn))
         _epair = extra_containers[_ecn]
         _ect = _cm_as_str(_epair[0])
-        if _ect in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+        if (gimple_ctypes.TypeLattice.is_set(_ect) or gimple_ctypes.TypeLattice.is_dict(_ect) or gimple_ctypes.TypeLattice.is_list(_ect)):
             containers[_ecpn] = _ect
         if _epair[1] is not None:
             dict_vals[_ecpn] = _cm_as_str(_epair[1])
@@ -5695,7 +5695,7 @@ def _box_tag(e, env) -> int:
         return 2
     if isinstance(e, N.NoneLiteral):
         return 4
-    if isinstance(e, N.IdentExpr) and e.name == 'None':
+    if isinstance(e, N.IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(e.name):
         return 4
     if isinstance(e, (N.TupleExpr, N.ListExpr, N.DictExpr, N.SetExpr)):
         return 3

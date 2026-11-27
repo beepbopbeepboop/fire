@@ -2624,7 +2624,7 @@ def _widen_operand(gen, want: str, v: str) -> str:
         return v
     if rt_call.arg_needs_repr_cast(want, dts):
         return gen._cast(want, v)
-    if rt_call._SCALAR_CLASS.get(want) == 'int' and rt_call._SCALAR_CLASS.get(dts) == 'bool':
+    if gimple_ctypes.TypeLattice.is_c_int(rt_call._SCALAR_CLASS.get(want)) and gimple_ctypes.TypeLattice.is_cpp_bool(rt_call._SCALAR_CLASS.get(dts)):
         return gen._cast(want, v)
     return v
 
@@ -2652,12 +2652,12 @@ def _binop_operands(gen, ctype: str, a: str, op: str, b: str) -> list:
                 ac = rt_call._SCALAR_CLASS.get(ats)
                 bc = rt_call._SCALAR_CLASS.get(bts)
                 if ac is not None and bc is not None:
-                    a_up = (bc == 'float' and ac != 'float') or (
+                    a_up = (gimple_ctypes.TypeLattice.is_c_float(bc) and not gimple_ctypes.TypeLattice.is_c_float(ac)) or (
                         ac == bc and rt_call._SCALAR_BITS[ats] < rt_call._SCALAR_BITS[bts]) or (
-                        ac == 'bool' and bc == 'int')
-                    b_up = (ac == 'float' and bc != 'float') or (
+                        gimple_ctypes.TypeLattice.is_cpp_bool(ac) and gimple_ctypes.TypeLattice.is_c_int(bc))
+                    b_up = (gimple_ctypes.TypeLattice.is_c_float(ac) and not gimple_ctypes.TypeLattice.is_c_float(bc)) or (
                         ac == bc and rt_call._SCALAR_BITS[bts] < rt_call._SCALAR_BITS[ats]) or (
-                        bc == 'bool' and ac == 'int')
+                        gimple_ctypes.TypeLattice.is_cpp_bool(bc) and gimple_ctypes.TypeLattice.is_c_int(ac))
                     if a_up:
                         a = gen._cast(bts, a)
                     elif b_up:
@@ -2820,7 +2820,7 @@ def _strided_data_ptr(gen, pt: str, pv: str) -> str:
         addr = gen._new_val('int64_t', f"{pv}->address")
         vp = gen._cast('void *', addr)
         return gen._cast('int64_t *', vp)
-    if pt == 'int64_t *':
+    if gimple_ctypes.TypeLattice.is_word_ptr(pt):
         return gen._ensure_local(pt, pv)
     if gimple_ctypes.TypeLattice.ends_in_star(pt):
         return gen._cast('int64_t *', gen._ensure_local(pt, pv))
@@ -3016,9 +3016,9 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             _i = int(_fn[1:])
             _fc = _tf[_fn]
             _idx = gen._cast('int64_t', f"{_i}")
-            if _fc in ('double', 'float'):
+            if (gimple_ctypes.TypeLattice.is_double(_fc) or gimple_ctypes.TypeLattice.is_c_float(_fc)):
                 _rv = gen._rt_call('double', 'mojo_list_get_double', [f"{_lp}", _idx])
-                if _fc == 'float':
+                if gimple_ctypes.TypeLattice.is_c_float(_fc):
                     _rv = gen._cast('float', _rv)
             elif gimple_ctypes.TypeLattice.is_cstr(_fc):
                 _rv = gen._rt_call('char *', 'mojo_list_get_str', [f"{_lp}", _idx])
@@ -3034,19 +3034,19 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
     if True:
         literal = v.lstrip('-').isdigit()
         if literal and s in gimple_ctypes._SCALAR_INT_TYPES and d in gimple_ctypes._SCALAR_INT_TYPES:
-            if d == 'uint8_t':
+            if gimple_ctypes.TypeLattice.is_u8(d):
                 gen._rt_into(dest, 'mojo_uint8_from_int64', [f"{v}LL"])
-            elif d == 'uint16_t':
+            elif gimple_ctypes.TypeLattice.is_u16(d):
                 gen._rt_into(dest, 'mojo_uint16_from_int64', [f"{v}LL"])
-            elif d == 'uint32_t':
+            elif gimple_ctypes.TypeLattice.is_u32(d):
                 gen._rt_into(dest, 'mojo_uint32_from_int64', [f"{v}LL"])
-            elif d == 'uint64_t':
+            elif gimple_ctypes.TypeLattice.is_uword(d):
                 build.assign(gen, dest, f'{v}ULL')
-            elif d == 'int8_t':
+            elif gimple_ctypes.TypeLattice.is_i8(d):
                 gen._rt_into(dest, 'mojo_int8_from_int64', [f"{v}LL"])
-            elif d == 'int16_t':
+            elif gimple_ctypes.TypeLattice.is_i16(d):
                 gen._rt_into(dest, 'mojo_int16_from_int64', [f"{v}LL"])
-            elif d == 'int32_t':
+            elif gimple_ctypes.TypeLattice.is_i32(d):
                 gen._rt_into(dest, 'mojo_int32_from_int64', [f"{v}LL"])
             elif gimple_ctypes.TypeLattice.is_word(d):
                 build.assign(gen, dest, f'{v}LL')
@@ -3113,7 +3113,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             v = gen._ensure_local(s, v)
             ip = gen._cast('int64_t', f"{v}")
             gen._cast_into(dest, d, ip)
-        elif gimple_ctypes.TypeLattice.ends_in_star(d) and s in ('double', 'float'):
+        elif gimple_ctypes.TypeLattice.ends_in_star(d) and (gimple_ctypes.TypeLattice.is_double(s) or gimple_ctypes.TypeLattice.is_c_float(s)):
             # A FLOAT returned from a function whose inferred return type is a
             # pointer. `comptime.py`'s `eval_const` is the live case: it
             # genuinely returns bool/int/float/str/tuple, so its return-type
@@ -3130,7 +3130,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             v = gen._ensure_local(s, v)
             ip = gen._cast('int64_t', f"{v}")
             gen._cast_into(dest, d, ip)
-        elif d in ('double', 'float') and gimple_ctypes.TypeLattice.ends_in_star(s):
+        elif (gimple_ctypes.TypeLattice.is_double(d) or gimple_ctypes.TypeLattice.is_c_float(d)) and gimple_ctypes.TypeLattice.ends_in_star(s):
             # The mirror of the branch above, and the same C rule: a pointer
             # converts only to an INTEGER type. `(double)<ptr>` is rejected
             # outright ("pointer value used where a floating-point was
@@ -3312,7 +3312,7 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     # The container arms below are the same ones `_stringify_value` uses.
     if gimple_ctypes.TypeLattice.is_int_word_or_voidp(rat):
         _real = gen._get_actual_type(rat, rav)
-        if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
+        if (gimple_ctypes.TypeLattice.is_set(_real) or gimple_ctypes.TypeLattice.is_dict(_real) or gimple_ctypes.TypeLattice.is_list(_real)):
             rat = _real
             rav = gen._cast(_real, rav)
     # A `d[k]` read whose value type was unknown at compile time: the slot's
@@ -3350,7 +3350,7 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         return gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', rav)])
     if gimple_ctypes.TypeLattice.is_bytes(rat):
         return gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', rav)])
-    if rat == 'MojoMemoryView *':
+    if gimple_ctypes.TypeLattice.is_memoryview(rat):
         return gen._call_expr('char *', 'mojo_memoryview_repr', [('MojoMemoryView *', rav)])
     if gimple_ctypes.TypeLattice.ends_in_star(rat) or gimple_ctypes.TypeLattice.is_voidp(rat):
         rav_local = gen._ensure_local(rat, rav)
@@ -3391,7 +3391,7 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         # since only mojo_repr_obj (no field-metadata table) existed.
         vp = gen._cast('void *', rav_local)
         return gen._call_expr('char *', '_mojo_dispatch_repr', [('void *', vp)])
-    if rat in ('double', 'float'):
+    if (gimple_ctypes.TypeLattice.is_double(rat) or gimple_ctypes.TypeLattice.is_c_float(rat)):
         rav_d = rav if gimple_ctypes.TypeLattice.is_double(rat) else gen._cast('double', rav)
         return gen._call_expr('char *', 'mojo_repr_float', [('double', rav_d)])
     rav64 = rav if gimple_ctypes.TypeLattice.is_word(rat) else gen._cast('int64_t', rav)
@@ -3504,7 +3504,7 @@ def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
 
 def _cast_for_list(gen, elem_type: str, val: str, suf: str) -> str:
     """Coerce a value to the API's expected type; always returns an lvalue (temp if cast needed)."""
-    if suf == 'int':
+    if gimple_ctypes.TypeLattice.is_c_int(suf):
         return gen._to_int64(elem_type, val)
     if gimple_ctypes.TypeLattice.is_double(suf):
         if gimple_ctypes.TypeLattice.is_double(elem_type):
@@ -3590,7 +3590,7 @@ def _static_generic_return_ctype(gen, func_name: str) -> str | None:
     if not rm:
         return None
     ctype = gimple_ctypes._mojo_type(rm.group(1).strip())
-    return ctype if ctype in ('MojoList *', 'MojoDict *', 'MojoSet *', 'Span *') else None
+    return ctype if (gimple_ctypes.TypeLattice.is_set(ctype) or gimple_ctypes.TypeLattice.is_dict(ctype) or gimple_ctypes.TypeLattice.is_span(ctype) or gimple_ctypes.TypeLattice.is_list(ctype)) else None
 
 
 def _literal_mojo_type(arg):
@@ -3634,14 +3634,14 @@ def _proven_arg_mojo_type(gen, arg, ctype):
         ann = _param_ann_mojo_type(gen, arg)
         if ann is not None:
             return ann
-        if ctype == 'Span *':
+        if gimple_ctypes.TypeLattice.is_span(ctype):
             return _proven_span_arg_mojo_type(gen, arg)
         return _list_arg_mojo_type(gen, arg, ctype)
     if gimple_ctypes.TypeLattice.is_list(ctype):
         lst = _list_arg_mojo_type(gen, arg, ctype)
         if lst is not None:
             return lst
-    if ctype == 'Span *':
+    if gimple_ctypes.TypeLattice.is_span(ctype):
         return _proven_span_arg_mojo_type(gen, arg)
     return _constructed_struct_type(gen, arg, ctype)
 
@@ -4827,7 +4827,7 @@ def _coerce_span_args(gen, params, arg_pairs, span_proofs=None):
     (elaborate's erased view), so the check is on the parameter, not the
     annotation text."""
     for i, (ctype, val) in enumerate(arg_pairs):
-        if i >= len(params) or params[i] != 'Span *':
+        if i >= len(params) or not gimple_ctypes.TypeLattice.is_span(params[i]):
             continue
         if gimple_ctypes.TypeLattice.is_list(ctype):
             gen._struct_allocs_needed.add('Span')

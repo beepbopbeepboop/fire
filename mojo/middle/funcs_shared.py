@@ -347,7 +347,7 @@ def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
     """
     _bound = (getattr(gen, '_inferred_var_types', None) or {}).get(
         func_name, {}).get(pname)
-    if _bound in ('MojoDict *', 'MojoList *', 'MojoSet *') and _bound != ctype:
+    if (gimple_ctypes.TypeLattice.is_set(_bound) or gimple_ctypes.TypeLattice.is_dict(_bound) or gimple_ctypes.TypeLattice.is_list(_bound)) and _bound != ctype:
         return _bound
     # ...and the third estimator: what every call site of this function
     # actually PASSES. `_infer_param_types` sees the body and nothing else, and
@@ -372,14 +372,14 @@ def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
     _xcf = _pct.get(func_name)
     if _xcf is not None:
         _xc = _xcf.get(pname)
-    if _xc in ('MojoDict *', 'MojoList *', 'MojoSet *') and _xc != ctype:
+    if (gimple_ctypes.TypeLattice.is_set(_xc) or gimple_ctypes.TypeLattice.is_dict(_xc) or gimple_ctypes.TypeLattice.is_list(_xc)) and _xc != ctype:
         # Apply unanimous container evidence when usage left the slot at the
         # int64_t default, but preserve scalar (char* / double) or struct
         # conclusions.
         if (gimple_ctypes.TypeLattice.is_int_word(ctype) or gimple_ctypes.TypeLattice.is_no_type(ctype)):
             return _xc
         return _xc
-    if ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+    if not (gimple_ctypes.TypeLattice.is_set(ctype) or gimple_ctypes.TypeLattice.is_dict(ctype) or gimple_ctypes.TypeLattice.is_list(ctype)):
         return ctype
     return ctype
 

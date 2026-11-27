@@ -271,15 +271,21 @@ def deferral_reason(op: str) -> str | None:
     return None
 
 
+ATTR_INT = 'int'
+ATTR_PRED = 'pred'
+ATTR_SIMD = 'simd'
+ATTR_RAW = 'raw'
+
+
 def parse_attr(member: str):
     """Interpret a ``__mlir_attr.<member>`` literal.
 
     Returns one of:
-      * ``('int', value)``  typed integer attribute ``\\`0 : index\\```
-      * ``('pred', name)``  comparison predicate, either MLIR
+      * ``(ATTR_INT, value)``  typed integer attribute ``\\`0 : index\\```
+      * ``(ATTR_PRED, name)``  comparison predicate, either MLIR
         ``\\`#index<cmp_predicate slt>\\``` or kgen ``\\`#kgen<cmp_pred ne>\\```
-      * ``('simd', value)`` scalar simd constant ``\\`#kgen.simd<7> : ...\\```
-      * ``('raw', text)``   anything we don't model yet
+      * ``(ATTR_SIMD, value)`` scalar simd constant ``\\`#kgen.simd<7> : ...\\```
+      * ``(ATTR_RAW, text)``   anything we don't model yet
     """
     text = unwrap(member)
 
@@ -287,24 +293,36 @@ def parse_attr(member: str):
     if 'cmp_predicate' in text or 'cmpi_predicate' in text \
             or 'cmpf_predicate' in text or 'cmp_pred' in text:
         tok = text.rstrip('>').split()[-1]
-        return ('pred', tok)
+        return (ATTR_PRED, tok)
 
     # Scalar SIMD constant: `#kgen.simd<7> : !kgen.scalar<ui8>`
     if text.startswith('#kgen.simd<'):
         inner = text[len('#kgen.simd<'):].split('>', 1)[0]
         try:
-            return ('simd', int(inner, 0))
+            return (ATTR_SIMD, int(inner, 0))
         except ValueError:
-            return ('raw', inner)
+            return (ATTR_RAW, inner)
 
     # Typed integer attribute: `0 : index`, `42 : i32`, ...
     head = text.split(':', 1)[0].strip()
     try:
-        return ('int', int(head, 0))
+        return (ATTR_INT, int(head, 0))
     except ValueError:
         pass
 
-    return ('raw', text)
+    return (ATTR_RAW, text)
+
+
+def is_int_or_simd_attr(kind: str) -> bool:
+    """True for the two attribute kinds that carry a SCALAR CONSTANT.
+
+    `ATTR_INT` (`0 : index`) and `ATTR_SIMD` (`#kgen.simd<7>`) are the two
+    kinds the lowering turns into an int64_t value; `ATTR_PRED` names a
+    comparison and `ATTR_RAW` is unmodelled. The kind is MLIR's vocabulary,
+    not a C type spelling, so this helper exists instead of a call site
+    spelling `kind in ('int', 'simd')` (which the stage-4 type ratchet would
+    read as a type test)."""
+    return kind == ATTR_INT or kind == ATTR_SIMD
 
 
 def lower_op(op: str, args: list[str], attrs: list[str],
