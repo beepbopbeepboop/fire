@@ -10546,7 +10546,10 @@ def _gen_wp_walk(*, thm, name, C, sr_name, blocks, words, base, code, run_info,
     # against an already-normal, small state.
     layers = []
     for bi in order:
-        layers.append(f"      | (rw [{W(bi)}]; simp (disch := decide) "
+        # `simp only [W]`, not `rw [W]`: `rw` tries each of the walk's defs in
+        # turn, and a failed match unfolds both heads' bodies (the whole state)
+        # in `whnf` until the heartbeat budget is gone.
+        layers.append(f"      | (simp only [{W(bi)}]; try simp (disch := decide) "
                       f"[{common}, {', '.join(layer_defs(bi))}])")
     body = [f"  have hw : {W(0)} n {init} := by",
             "    repeat' first",
@@ -10555,7 +10558,7 @@ def _gen_wp_walk(*, thm, name, C, sr_name, blocks, words, base, code, run_info,
             # merged values: the model's own `if`s.
             f"    all_goals (try intro _hov)",
             f"    all_goals (first | (simp [mem_read_u64]; done) | decide | "
-            f"(simp only [mojo, {name}_go]; repeat' split))",
+            f"(simp only [mojo, {name}_go]; repeat' split) | skip)",
             f"    all_goals (try simp_all [arm64_adds_flags, "
             f"arm64_matches_condition])"]
     return helpers, body
