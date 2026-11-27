@@ -144,3 +144,20 @@ short-circuit conds, `svc` assumptions, multi-arg entries, frame/fuel variants.
    `test_formal_eval_eq_mojo_bridge.py` (Lean half) for the four fixtures.
 3. Corpus: every program with >= 5 CFG paths switches to this emission, so run the
    arm64 formal sweep (`formal_sweep`, the integrator's) before leaving it on.
+
+### Update 2026-11-27 (last measurement of the session): layer-at-a-time unfold, 4 `if`s
+
+The terminal tactic now unfolds ONE layer per step (`repeat' first | apply And.intro
+| (simp only [wp_k]; try simp (disch := decide) [..., defs of block k, M_k, arms])`;
+`simp only`, not `rw`, because `rw`'s failed matches unfold both heads' bodies and
+hit the heartbeat budget). On the 4-`if` program this ELABORATES (no tactic error,
+~75 s) but the kernel then reports `(kernel) excessive memory consumption` on the
+universal theorem (6.0 GB peak): the `simp` proof terms over the growing merged
+state are too big to re-check. 3 `if`s still fits (4.3 GB total, prefix included).
+So the elaboration wall is gone and the remaining wall is KERNEL proof-term size.
+Next candidates, cheapest first: (a) make each layer its own top-level theorem
+`…_V_k : wp_k n s → (stated about the NORMALIZED state)` so the kernel checks one
+small term per layer instead of one big one; (b) state the merged state's
+field values as named lemmas per block (the invariant), proved once by `simp`, and
+rewrite with them; (c) replace `simp` by `rfl`/`decide` where the layer is closed
+arithmetic. Test on `ifs4` then `bigbody` (`_WP_MIN_PATHS` is still disabled).
