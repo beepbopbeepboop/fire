@@ -409,6 +409,126 @@ class TypeLattice:
             return False
         return gir_types.spelled(t).is_uword()
 
+    # The handle and pointer spellings the backend names directly. Each is a
+    # plain equality (like `is_c_int`), so it answers EXACTLY its own spelling:
+    # `is_generator` does not take a subclass, an erased word, or a missing
+    # type. They exist so the stage-4 ratchet's remaining `== '<Handle> *'`
+    # tests have one spelling to ask instead of re-spelling the handle.
+    @classmethod
+    def is_generator(cls, t: str) -> bool:
+        """`t` is exactly `MojoGenerator *`."""
+        if not t:
+            return False
+        return t == 'MojoGenerator *'
+
+    @classmethod
+    def is_async(cls, t: str) -> bool:
+        """`t` is exactly `MojoAsync *` (the coroutine handle, distinct from
+        `MojoGenerator *`: a generator yields, an async runs)."""
+        if not t:
+            return False
+        return t == 'MojoAsync *'
+
+    @classmethod
+    def is_bound_method(cls, t: str) -> bool:
+        """`t` is exactly `MojoBoundMethod *`."""
+        if not t:
+            return False
+        return t == 'MojoBoundMethod *'
+
+    @classmethod
+    def is_memoryview(cls, t: str) -> bool:
+        """`t` is exactly `MojoMemoryView *`."""
+        if not t:
+            return False
+        return t == 'MojoMemoryView *'
+
+    @classmethod
+    def is_struct_fmt(cls, t: str) -> bool:
+        """`t` is exactly `MojoStructFmt *` (the `struct` module's handle)."""
+        if not t:
+            return False
+        return t == 'MojoStructFmt *'
+
+    @classmethod
+    def is_siter_bytes(cls, t: str) -> bool:
+        """`t` is exactly `_SIterBytes *` (the bytes iterator handle)."""
+        if not t:
+            return False
+        return t == '_SIterBytes *'
+
+    @classmethod
+    def is_module_loader(cls, t: str) -> bool:
+        """`t` is exactly `ModuleLoader *`."""
+        if not t:
+            return False
+        return t == 'ModuleLoader *'
+
+    @classmethod
+    def is_word_ptr(cls, t: str) -> bool:
+        """`t` is exactly `int64_t *` — a POINTER TO a word, not the word
+        itself (`is_word`) and not any other pointer (`is_pointer`)."""
+        if not t:
+            return False
+        return t == 'int64_t *'
+
+    @classmethod
+    def is_const_cstr(cls, t: str) -> bool:
+        """`t` is exactly `const char *`, the read-only C string a runtime
+        signature declares. Distinct from `is_cstr`'s mutable `char *`."""
+        if not t:
+            return False
+        return t == 'const char *'
+
+    @classmethod
+    def is_short(cls, t: str) -> bool:
+        """`t` is exactly `short` (the C short spelling, not `int16_t`)."""
+        if not t:
+            return False
+        return t == 'short'
+
+    @classmethod
+    def is_ushort(cls, t: str) -> bool:
+        """`t` is exactly `unsigned short` (not `uint16_t`)."""
+        if not t:
+            return False
+        return t == 'unsigned short'
+
+    @classmethod
+    def is_unsigned_int(cls, t: str) -> bool:
+        """`t` is exactly `unsigned int` (not `uint32_t`)."""
+        if not t:
+            return False
+        return t == 'unsigned int'
+
+    @classmethod
+    def is_fp16(cls, t: str) -> bool:
+        """`t` is exactly `__fp16`, the half-precision C spelling. `is_float`
+        is the whole float class (`double`, `float`, `__fp16`)."""
+        if not t:
+            return False
+        return t == '__fp16'
+
+    @classmethod
+    def is_none_type(cls, t: str) -> bool:
+        """`t` is exactly `None` — the Mojo `None` TYPE annotation as it
+        reaches the backend's string vocabulary. Distinct from the absent
+        table entry (`None` itself) and from `is_void`."""
+        if not t:
+            return False
+        return t == 'None'
+
+    @classmethod
+    def ends_with_star(cls, t: str) -> bool:
+        """`t` ends in a `*` with or without the space (`char *`, `char*`).
+        Narrower than `is_pointer` (which accepts a `*` anywhere, including a
+        function-pointer spelling) and wider than `ends_in_star` (which
+        requires the canonical `... *` spelling). Safe on a non-string: the
+        call sites this replaced were guarded by `isinstance(t, str)`."""
+        if not isinstance(t, str):
+            return False
+        return t.endswith('*')
+
     @classmethod
     def is_char(cls, t: str) -> bool:
         """`t` is the single-byte character scalar (`char`, not `char *`).
@@ -546,17 +666,17 @@ class TypeLattice:
         """LUB for binary arithmetic result type."""
         if t1 == t2:
             return t1
-        if t1 == '_Bool':
+        if cls.is_bool(t1):
             t1 = 'int'
-        if t2 == '_Bool':
+        if cls.is_bool(t2):
             t2 = 'int'
         if t1 == t2:
             return t1
         if cls.is_pointer(t1) or cls.is_pointer(t2):
             if cls.is_pointer(t1) and cls.is_pointer(t2):
-                if t1 == 'void *' or t2 == 'void *':
+                if cls.is_voidp(t1) or cls.is_voidp(t2):
                     return 'void *'
-                if t1 == 'char *' or t2 == 'char *':
+                if cls.is_cstr(t1) or cls.is_cstr(t2):
                     return 'char *'
                 return 'int64_t'
             return t1 if cls.is_pointer(t1) else t2
@@ -589,9 +709,9 @@ class TypeLattice:
             return 'void'
         result = types[0]
         for t in types[1:]:
-            if result == 'void':
+            if cls.is_void(result):
                 result = t
-            elif t != 'void':
+            elif not cls.is_void(t):
                 result = cls.join(result, t)
         return result
 
@@ -604,22 +724,23 @@ class TypeLattice:
         """
         if src == dst:
             return val
-        if src in ('int', 'int64_t', '_Bool') and dst in ('int', 'int64_t', '_Bool'):
+        if ((cls.is_int_word(src) or cls.is_bool(src))
+                and (cls.is_int_word(dst) or cls.is_bool(dst))):
             if src == dst:
                 return val
             return f'({dst}){val}'
-        if src == '_Bool':
-            if dst == 'int':
+        if cls.is_bool(src):
+            if cls.is_c_int(dst):
                 return f'(int){val}'
             return f'({dst}){val}'
-        if dst == '_Bool':
+        if cls.is_bool(dst):
             return f'(_Bool){val}'
-        if src.endswith(' *') and dst == 'int64_t':
-            if src == 'void *':
+        if cls.ends_in_star(src) and cls.is_word(dst):
+            if cls.is_voidp(src):
                 return f'(int64_t){val}'
             return f'(int64_t)(void *){val}'
-        if src == 'int64_t' and dst.endswith(' *'):
-            if dst == 'void *':
+        if cls.is_word(src) and cls.ends_in_star(dst):
+            if cls.is_voidp(dst):
                 return f'(void *){val}'
             raise TypeError(f'UNSAFE CAST: int64_t → {dst} requires type validation in _actual_types. Call must verify via _actual_types[{val}] before casting. Use (void *){val} as intermediate if truly generic.')
         return f'({dst}){val}'
@@ -629,7 +750,7 @@ class TypeLattice:
         """Select 'int'/'double'/'str' API suffix based on element C type."""
         if elem in _TYPE_FLOAT:
             return 'double'
-        if elem == 'char *':
+        if cls.is_cstr(elem):
             return 'str'
         return 'int'
 
@@ -650,11 +771,11 @@ class TypeLattice:
         literal) detects it there, as _list_literal_slot_kind does."""
         if elem in _TYPE_FLOAT:
             return 'd'
-        if elem in ('char *', 'MojoStr *'):
+        if cls.is_cstr(elem) or cls.is_str(elem):
             return 'p'
-        if elem == 'MojoBytes *':
+        if cls.is_bytes(elem):
             return 's'
-        if elem in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+        if cls.is_list(elem) or cls.is_dict(elem) or cls.is_set(elem):
             return 'l'
         return 'i'
 
@@ -677,17 +798,18 @@ class TypeLattice:
 
     @classmethod
     def printf_fmt(cls, ctype: str) -> str:
-        if ctype in ('double', 'float', '__fp16'):
+        if cls.is_double(ctype) or cls.is_c_float(ctype) or cls.is_fp16(ctype):
             return '%g'
-        if ctype == 'char *':
+        if cls.is_cstr(ctype):
             return '%s'
-        if ctype == 'char':
+        if cls.is_char(ctype):
             return '%c'
-        if ctype == 'int64_t':
+        if cls.is_word(ctype):
             return '%ld'
-        if ctype == 'uint64_t':
+        if cls.is_uword(ctype):
             return '%lu'
-        if ctype in ('unsigned int', 'uint32_t', 'uint16_t', 'uint8_t'):
+        if (cls.is_unsigned_int(ctype) or cls.is_u32(ctype)
+                or cls.is_u16(ctype) or cls.is_u8(ctype)):
             return '%u'
         return '%d'
 _TYPE_MAP: dict[str | None, str] = {'Int': 'int64_t', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt': 'uint64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Float16': '__fp16', 'Float32': 'float', 'Float64': 'double', 'float': 'double', 'Bool': '_Bool', 'bool': '_Bool', 'String': 'char *', 'str': 'char *', 'List': 'MojoList *', 'list': 'MojoList *', 'Dict': 'MojoDict *', 'dict': 'MojoDict *', 'Set': 'MojoSet *', 'set': 'MojoSet *', 'Str': 'MojoStr *', 'bytes': 'MojoBytes *', 'bytearray': 'MojoBytes *', 'memoryview': 'MojoMemoryView *', 'None': 'void', 'object': 'int64_t'}
@@ -876,7 +998,7 @@ def _seedable_local_ctype(t) -> bool:
     `module_gen` imports `emit_funcs` (either of those as a home would be a
     circular import)."""
     _ts = _as_str(t)
-    return bool(_ts) and _ts.endswith(' *')
+    return TypeLattice.ends_in_star(_ts)
 
 
 def container_kind(ctype: str) -> str | None:
@@ -1922,11 +2044,11 @@ def is_scalar_annotation(ann: str) -> bool:
     if ann not in _TYPE_MAP:
         return False
     _ct = _as_str(_TYPE_MAP[ann])
-    return _ct in _PTR_OUT_PARAM_SCALAR_ELEMS or _ct == 'char'
+    return _ct in _PTR_OUT_PARAM_SCALAR_ELEMS or TypeLattice.is_char(_ct)
 
 def _elem_type(ptr_type: str) -> str:
     """Strip one level of pointer to get element type."""
-    if ptr_type.endswith(' *'):
+    if TypeLattice.ends_in_star(ptr_type):
         return ptr_type[:-2]
     if '*' in ptr_type:
         return ptr_type.replace('*', '').strip()
@@ -3170,7 +3292,7 @@ def _declared_vars_body(stmts: list) -> set[str]:
 def _c_type_to_cpp(t: str) -> str:
     """Normalize a pythonic ctype name for C++ emission: the bare `'int'`
     and a missing (None) type both mean `int64_t`."""
-    if t == 'int':
+    if TypeLattice.is_c_int(t):
         t = 'int64_t'
     if t is None:
         return 'int64_t'
@@ -3187,7 +3309,7 @@ def callable_ctype(params, ret='int64_t', ret_ctype=None, param_ctypes=None):
     `param_ctypes` supplies precomputed ctypes when `params` is an empty
     list (both call conventions the closure factory and the foreign
     callable table use)."""
-    if ret_ctype is not None and ret == 'int64_t':
+    if ret_ctype is not None and TypeLattice.is_word(ret):
         ret = ret_ctype
     # Support both calling conventions for flexibility
     if param_ctypes is not None and params == []:

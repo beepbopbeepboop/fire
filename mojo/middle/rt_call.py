@@ -14,6 +14,15 @@ int64_t-erased values: those are semantic conversions and belong to
 `_emit_call`'s own ladder.
 """
 from mojo.middle.rt_sigs import RT_SIGS
+from mojo.middle.types import TypeLattice
+
+# The three CLASS labels `_SCALAR_CLASS` stores. They are not C type
+# spellings: `'int'` here means "the integer class", and `_Bool`, `char`,
+# `int8_t`, `int64_t` and `long` all map to it. Naming them keeps a class
+# comparison from reading as a type test (the stage-4 ratchet counts the
+# latter, and `is_c_int` would answer for the C spelling, not the class).
+_CLASS_BOOL = 'bool'
+_CLASS_INT = 'int'
 
 # C scalar spelling -> width in bits.
 _SCALAR_BITS: dict[str, int] = {
@@ -74,13 +83,13 @@ def arg_needs_repr_cast(param: str, declared: str) -> bool:
     dc = _SCALAR_CLASS.get(declared)
     if pc is None or dc is None:
         return False
-    if pc == 'bool':
+    if pc == _CLASS_BOOL:
         # Never convert TO `_Bool` by a cast: in C `(_Bool) 2` is 1, but GCC
         # reads a GIMPLE cast by the left side's type and a conversion to a
         # 1-bit type keeps the low bit, so `(_Bool) 2` would be 0.  Truthiness
         # is a comparison (`x != 0`), and that is the caller's to emit.
         return False
-    if pc == 'int' and dc == 'bool':
+    if pc == _CLASS_INT and dc == _CLASS_BOOL:
         # A `_Bool` variable holds 0 or 1 in a full register, so passing it
         # to an integer parameter is already the right bits.  Left alone on
         # purpose: tests pin `mojo_repr_bool (b)` with the `_Bool` itself.
@@ -97,9 +106,9 @@ def arg_needs_word_cast(param: str, declared: str) -> bool:
     what it does, so GIR's verifier (and a reader) can see it."""
     if param == declared:
         return False
-    if param.endswith('*') and declared == 'int64_t':
+    if TypeLattice.ends_with_star(param) and TypeLattice.is_word(declared):
         return True
-    if param == 'int64_t' and declared.endswith('*'):
+    if TypeLattice.is_word(param) and TypeLattice.ends_with_star(declared):
         return True
     return False
 
@@ -117,4 +126,4 @@ def copy_needs_cast(dst: str, src: str) -> bool:
         return False
     if arg_needs_repr_cast(dst, src) or arg_needs_word_cast(dst, src):
         return True
-    return _SCALAR_CLASS.get(dst) == 'int' and _SCALAR_CLASS.get(src) == 'bool'
+    return _SCALAR_CLASS.get(dst) == _CLASS_INT and _SCALAR_CLASS.get(src) == _CLASS_BOOL

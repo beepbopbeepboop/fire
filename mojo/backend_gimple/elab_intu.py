@@ -260,7 +260,7 @@ def _literal_type(node) -> str:
         if isinstance(node, cls):
             return name
     if isinstance(node, IdentExpr):
-        if node.name == 'None':
+        if gimple_ctypes.TypeLattice.is_none_type(node.name):
             return 'NoneType'
         if node.name in ('True', 'False'):
             return 'Bool'

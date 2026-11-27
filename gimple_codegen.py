@@ -5226,13 +5226,13 @@ class GimpleGen:
             return None
         cdecl = self._global_c_decl_types.get(name)
         if (cdecl is not None and TypeLattice.ends_in_star(cdecl)
-                and cdecl in ('MojoDict *', 'MojoList *', 'MojoSet *')):
+                and (TypeLattice.is_set(cdecl) or TypeLattice.is_dict(cdecl) or TypeLattice.is_list(cdecl))):
             return cdecl
         if TypeLattice.is_py_scalar(own):
             return own
-        if (own in ('MojoDict *', 'MojoList *', 'MojoSet *')
+        if ((TypeLattice.is_set(own) or TypeLattice.is_dict(own) or TypeLattice.is_list(own))
                 and not (cdecl is not None
-                         and cdecl in ('MojoDict *', 'MojoList *', 'MojoSet *'))
+                         and (TypeLattice.is_set(cdecl) or TypeLattice.is_dict(cdecl) or TypeLattice.is_list(cdecl)))
                 and dispatch_table_global_ctype(name) is None):
             # A NON-dispatch CONTAINER own-conclusion whose shared cdecl is
             # absent OR non-container: the module-global C struct-field

@@ -743,7 +743,7 @@ def record_bool_params(gen, node) -> None:
         _pn = _as_str(_p[0])
         if not _pn or _pn.startswith('*'):
             continue
-        if _p[1] is not None and _as_str(_p[1]).strip() == 'bool':
+        if _p[1] is not None and TypeLattice.is_cpp_bool(_as_str(_p[1]).strip()):
             _names.add(_pn)
 
 
@@ -1227,12 +1227,12 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
     if isinstance(e, SliceExpr):
         return 'char *'
     if isinstance(e, SubscriptExpr):
-        if known is not None and isinstance(e.obj, IdentExpr) and (known.get(e.obj.name) in ('MojoList *', 'MojoDict *')):
+        if known is not None and isinstance(e.obj, IdentExpr) and ((TypeLattice.is_dict(known.get(e.obj.name)) or TypeLattice.is_list(known.get(e.obj.name)))):
             # A dict whose stored VALUE type the caller knows (a struct
             # pointer, `dict_val_types[name]`) reads back as that type, not the
             # boxed int64 word the dict stores it as. Only a dict is consulted:
             # a list's element type is not in this registry.
-            if known.get(e.obj.name) == 'MojoDict *' and dict_val_types is not None:
+            if TypeLattice.is_dict(known.get(e.obj.name)) and dict_val_types is not None:
                 _vt = dict_val_types.get(e.obj.name)
                 if _vt is not None:
                     return _vt
@@ -1288,7 +1288,8 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
                                                   nested_generator_api=nested_generator_api,
                                                   outer_fn_name=outer_fn_name,
                                                   known=known)
-        return _inner_ctype if _inner_ctype not in (None, 'char *') else 'int64_t'
+        return (_inner_ctype if _inner_ctype is not None
+            and not TypeLattice.is_cstr(_inner_ctype) else 'int64_t')
     # `yield from cls.<generator>(...)` -- a @classmethod generator
     # delegating to a SIBLING generator method of the same class. Resolved
     # from the same `generator_method_api` the body-emission side reads
@@ -1355,15 +1356,15 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
                 return _mapi.get('value_ctype')
         et = (field_elem_types or {}).get(_mname)
         if et is not None:
-            return et if et in ('char *', 'double') else 'int64_t'
+            return et if (TypeLattice.is_cstr(et) or TypeLattice.is_double(et)) else 'int64_t'
     elif isinstance(call, MemberExpr) and isinstance(call.obj, IdentExpr) and (call.obj.name == 'self'):
         et = (field_elem_types or {}).get(call.member)
         if et is not None:
-            return et if et in ('char *', 'double') else 'int64_t'
+            return et if (TypeLattice.is_cstr(et) or TypeLattice.is_double(et)) else 'int64_t'
     elif isinstance(call, IdentExpr):
         et = (local_elem_types or {}).get(call.name)
         if et is not None:
-            return et if et in ('char *', 'double') else 'int64_t'
+            return et if (TypeLattice.is_cstr(et) or TypeLattice.is_double(et)) else 'int64_t'
         # `yield from <opaque word local>` — a local/param this unit holds as
         # a bare `int64_t` word: `items = iter(...)` passed into an escaped
         # nested generator, a tuple-unpacked element of an unknown-kind call
@@ -2641,7 +2642,7 @@ def _cpp_word_of_kind(ctype: str, expr: str) -> str:
     `mojo_box_from_str`, None as `mojo_box_none()`, and an int as itself. The
     single mapping both a tagged yield slot (`_cpp_tag_yield_sites`) and a
     tagged operand of `and`/`or` (`cpp_core._cpp_tagged_operand_word`) use."""
-    if ctype == 'None':
+    if TypeLattice.is_none_type(ctype):
         return "mojo_box_none()"
     if TypeLattice.is_double(ctype):
         return f"mojo_box_from_double((double)({expr}))"

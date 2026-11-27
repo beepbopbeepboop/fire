@@ -169,7 +169,8 @@ def _operand_is_dict(gen, node, t: str, v=None) -> bool:
         if _nm not in names:
             names.append(_nm)
     for _n in names:
-        if (getattr(gen, '_actual_types', None) or {}).get(_n) == 'MojoDict *':
+        if gimple_ctypes.TypeLattice.is_dict(
+                (getattr(gen, '_actual_types', None) or {}).get(_n)):
             return True
         if _n in (getattr(gen, '_dict_val_types', None) or {}):
             return True
@@ -211,7 +212,7 @@ def _module_attr_call_return_type(gen, node):
     if qual is None:
         return None
     ret = gen._home_def_return_type_of(qual, _as_str(f.member))
-    if isinstance(ret, str) and ret in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+    if isinstance(ret, str) and (gimple_ctypes.TypeLattice.is_set(ret) or gimple_ctypes.TypeLattice.is_dict(ret) or gimple_ctypes.TypeLattice.is_cstr(ret) or gimple_ctypes.TypeLattice.is_list(ret)):
         return ret
     return None
 
@@ -1204,7 +1205,7 @@ def _quick_type(gen, node) -> str:
             # kind -- a `char *` here cast the bytes pointer to text
             # (`os.path.split(b'a/b')[0]`).
             if (obj.func.member in ('split', 'splitext') and obj.args
-                    and gen._quick_type(obj.args[0]) == 'MojoBytes *'):
+                    and gimple_ctypes.TypeLattice.is_bytes(gen._quick_type(obj.args[0]))):
                 return 'int64_t'
             return 'char *'
         # struct.unpack("<f", buf)[0] / struct.unpack_from(fmt, buf, 0)[2]:
@@ -1390,7 +1391,7 @@ def _infer_list_elem_type(gen, elements: list) -> str:
     for _t in types:
         if not _t or not gimple_ctypes.TypeLattice.ends_in_star(_t):
             continue
-        if _t in ('char *', 'void *'):
+        if (gimple_ctypes.TypeLattice.is_voidp(_t) or gimple_ctypes.TypeLattice.is_cstr(_t)):
             continue
         if _t in _sp_seen:
             continue
@@ -2274,7 +2275,7 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
         _kinds: set = set()
         for _ik in _as_list(inferred[vname]):
             _iks = _as_str(_ik)
-            if (_iks in ('MojoDict *', 'MojoList *', 'MojoSet *')
+            if ((gimple_ctypes.TypeLattice.is_set(_iks) or gimple_ctypes.TypeLattice.is_dict(_iks) or gimple_ctypes.TypeLattice.is_list(_iks))
                     or gimple_exprtypes._is_known_struct_ptr_ctype(_iks, _known_structs)):
                 _kinds.add(_iks)
         if not _kinds:
@@ -2843,7 +2844,7 @@ def _is_none_literal(el) -> bool:
     constructs `NoneLiteral`, despite fire_compiler.py defining the
     class). Centralized here so every None-in-a-literal check in this
     file recognizes the same shape."""
-    return isinstance(el, gimple_ctypes.IdentExpr) and el.name == 'None'
+    return isinstance(el, gimple_ctypes.IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(el.name)
 
 def _is_sys_stderr(expr) -> bool:
     """Structural check for `sys.stderr` — deliberately not lowered as a

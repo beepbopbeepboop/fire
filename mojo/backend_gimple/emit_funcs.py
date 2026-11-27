@@ -429,7 +429,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                 and symbol_name not in gen.var_types):
             _gv_type = gen._global_var_types[name]
             _gv_ctype = ('int64_t'
-                         if _gv_type in ('MojoDict *', 'MojoList *', 'MojoSet *')
+                         if (gimple_ctypes.TypeLattice.is_set(_gv_type) or gimple_ctypes.TypeLattice.is_dict(_gv_type) or gimple_ctypes.TypeLattice.is_list(_gv_type))
                          else _gv_type)
             gen._declare_var(symbol_name, _gv_ctype)
             safe_owner = gimple_ctypes._c_field_name(_gv_owner) if _gv_owner else "root"
@@ -1890,7 +1890,7 @@ def _dvt_val_cts(_ann):
         _nv = _dvt_val_cts(_vann)
         if _nv is not None:
             _nested = _nv[0]
-    elif _outer in ('MojoList *', 'MojoSet *'):
+    elif (gimple_ctypes.TypeLattice.is_set(_outer) or gimple_ctypes.TypeLattice.is_list(_outer)):
         # `dict[K, list[E]]` / `dict[K, set[E]]` — E, so `d.get(k)[i]`
         # / `for x in d.get(k)` reads with the right accessor instead
         # of boxing (e.g. `func_param_types: dict[str, list[str]]` ->
@@ -4150,7 +4150,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
                 gen._nested_elem_types.setdefault(bare, _sc)
         else:
             _ec = _annotated_elem_ctype(gen, _eann)
-            if _ec == 'float':
+            if gimple_ctypes.TypeLattice.is_c_float(_ec):
                 # `Float32` elements of a container are stored as C `double`
                 # (the Array/FixedSizeArray constructor arm does the same:
                 # `MojoList`'s float elements are doubles — emit_calls.py
@@ -4518,7 +4518,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         if _pp.startswith('*'):
             continue
         _gf = _pg_apis.get(_pb)
-        if _gf is not None and gen.var_types.get(_pb) == 'MojoGenerator *':
+        if _gf is not None and gimple_ctypes.TypeLattice.is_generator(gen.var_types.get(_pb)):
             _api24 = gen._generator_api.get(_gf)
             if _api24 is not None:
                 gen._generator_var_api[gen._cname(_pb)] = _api24
@@ -5881,7 +5881,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
                 # the return-type inference below must read the parameter as it.
                 _refined = gen._inferred_param_types.get(
                     f"{struct_name}_{node.name}", {}).get(pname)
-                if _refined in ('char *', 'double'):
+                if (gimple_ctypes.TypeLattice.is_cstr(_refined) or gimple_ctypes.TypeLattice.is_double(_refined)):
                     ctype = _refined
             else:
                 ctype = gen._param_ctype(pname, ptype, node)

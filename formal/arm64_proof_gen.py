@@ -131,6 +131,9 @@ CFG_LEAF_SITES = {
     # frame contract sets `strict` and takes the `done` branch below, so this
     # site is the NO-frame path.)
     "walk-terminal",
+    # The compositional walk's terminal: the one closed value-flow goal
+    # `W_0 init` reduces to (`_gen_wp_walk`).
+    "wp-walk-terminal",
     # The `dec`-while loop contract's back edge: the counter's own decrement
     # and the frame slot that pins the exit value, read off the executed path.
     "dec-while-back-edge-decrement",
@@ -9973,6 +9976,594 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
             "caller whose budget is below the instruction count")
 
 
+# ---------------------------------------------------------------------------
+# The compositional universal walk.
+#
+# `_gen_universal_e2e_cfg`'s `emit_block` writes the whole rest of the run once
+# PER CFG PATH: after `k` independent `if`s the join block's continuation is
+# emitted `2**k` times, each copy with its own `s_i` chain, `hcert`/`h_adv`
+# advances and `hcond`/`hprior` side proofs.  `bigbody` (six `if`s, 64 paths)
+# measured 894 advances and a 38 000-line theorem that, on top of the 4.7 GB the
+# block certificates already cost, exceeds the generated-proof ceiling.
+#
+# Every ingredient the walk uses is already generic over the entry state: a
+# block's `…_runs`/`…_mid` take `st` and `hpc`, and `rec1_glue_gen`,
+# `go_exit_cbz_taken/fall`, `go_exit_step` take the state as an argument.  What
+# was per path was only the emitter's recursion.  So this emits, per reachable
+# block `k` in reverse topological order:
+#
+#   def  W_k (n) (s) : Prop       -- the weakest precondition of "from block k's
+#                                    entry state `s`, the run ends in a state
+#                                    satisfying the terminal claim"
+#   theorem T_k : ∀ s f, s.pc = start_k → need_k ≤ f → W_k n s →
+#                  match arm64_go_exit s code exit f with …terminal claim…
+#
+# `W_k` is the control structure itself (`if cond then W_taken … else W_fall …`),
+# so a join block's `T_join` is proved ONCE and both arms apply it: declarations
+# grow linearly in blocks, not in paths.  The fuel is `∀ f ≥ need_k` (`need_k`
+# the longest path's instruction count) because path costs differ at a join.
+#
+# The value flow is what `W_0 init` says once its definitions are unfolded; the
+# stack-floor guard's dead edge becomes the conjunct `cond`, and a statically
+# dead `cbz` arm becomes `False`, exactly the facts `emit_block` closed per path
+# with `hguard_k`/`hne_k`.  The terminal tactic then reduces that one closed term.
+#
+# Declined (returns None, and the caller keeps the per-path walk) for every
+# shape `emit_block` handles with state it threads along a path: loops, calls
+# (recursive, same-image or out-of-image other than the trap `BL`), contracts,
+# short-circuit conditions, dynamic-write assumptions, multi-argument entries.
+# ---------------------------------------------------------------------------
+
+# A walk with at most this many CFG paths keeps the per-path emission: it is
+# byte-identical to what every smaller program has always had, and nothing in
+# the corpus below this size comes near the generated-proof ceiling.
+#
+# DISABLED by default (the threshold is unreachable): the control half checks in
+# Lean for `bigbody` (every `T_k`/`R_k`), but the terminal value flow does not
+# yet close at four or more `if`s in a row, so switching programs onto it would
+# trade a known-red `bigbody` for unknown regressions.  Set `_WP_MIN_PATHS = 5`
+# (or monkeypatch it, as the scratch harness in the part2 bug doc does) to try it.
+_WP_MIN_PATHS = 10 ** 9
+
+# `lib/ProofLib.lean`'s `arm64_ite_<field>` lemmas, one per `Arm64State` field.
+_ARM64_STATE_FIELDS = ([f"x{i}" for i in range(31)] + ["sp"]
+                       + [f"d{i}" for i in range(8)] + ["pc", "nzcv", "mem"])
+
+_WP_MEM_LEMMAS = ("mem_read_after_write_u64, mem_read_after_write_u64_ne, "
+                  "mem_read_two_writes_same, mem_read_two_writes_adj_uint, "
+                  "UInt64.add_zero")
+
+
+def _via_prog_default(fr, entry_arity):
+    """The statement is the plain `s.x0 = mojo n` one `_gen_wp_walk` proves."""
+    return not (fr.get('prop') or fr.get('hyps') or fr.get('no_change')
+                or fr.get('halt_only') or fr.get('params')) and entry_arity <= 1
+
+
+def _wp_cond_text(block, words, state):
+    """The taken-edge proposition of a conditional block, over `state`."""
+    w = words[block["instrs"][-1]]
+    r = w & 0x1f
+    bidx = _step_branch_index(w)
+    if bidx in (52, 53):
+        return _bit_test_condtxt(r, state, w, bidx)
+    if bidx == 51:
+        return f"arm64_matches_condition {w & 0xf} {state}.nzcv = true"
+    if bidx == 17:
+        return f"arm64_reg {r} {state} ≠ 0"
+    return f"arm64_reg {r} {state} = 0"
+
+
+def _gen_wp_walk(*, thm, name, C, sr_name, blocks, words, base, code, run_info,
+                 start_to_bi, halt_info, dead_edges, trap, exit_pc, init, fuel0,
+                 prop, none_br, cbz_src_map, sc_by_merge, svc_hyp, entry_arity,
+                 loop_contract):
+    """The compositional walk for the default universal theorem, or None.
+
+    Returns `(helpers, body)`: `helpers` are top-level declarations to place
+    before the theorem, `body` the tactic lines that close its goal.  See the
+    section comment above for what is emitted and what is declined.
+    """
+    if (svc_hyp is not None or entry_arity > 1 or loop_contract
+            or sc_by_merge or none_br != "True" or prop != _DEFAULT_TERM_PROP):
+        return None
+    EXIT = exit_pc
+
+    # ---- the walk's shape: successors per block, or None to decline --------
+    class _Decline(Exception):
+        pass
+
+    succ = {}      # bi -> description of how the block ends
+    order = []     # reverse topological (successors first)
+    state = {}
+
+    def straight(bi):
+        """Whether block `bi` is a single-successor, certified straight block."""
+        cert, mid, exit_expr, m, defs, is_ret, last_pc, run_pcs = run_info[bi]
+        if bi in halt_info or blocks[bi]["kind"] not in ("seq", "b"):
+            return False
+        return not (cert is not None and last_pc + 4 == EXIT)
+
+    def nxt(bi):
+        b = blocks[bi]
+        pc = b["instrs"][-1] + 4 if b["kind"] == "seq" else b["targets"][0]
+        return start_to_bi.get(pc)
+
+    def chain(bi):
+        out = [bi]
+        while straight(out[-1]):
+            nb = nxt(out[-1])
+            if nb is None or nb in out:
+                return None
+            out.append(nb)
+        return out
+
+    def diamond(a, b):
+        """`(arm_a, arm_b, join)` when the two arms are straight chains that
+        reach a common block, else None.  An arm may be empty (an `if` with no
+        `else`: that edge's target IS the join)."""
+        la, lb = chain(a), chain(b)
+        if la is None or lb is None:
+            return None
+        for x in la:
+            if x in lb:
+                return la[:la.index(x)], lb[:lb.index(x)], x
+        return None
+
+    def visit(bi):
+        if bi in state:
+            if state[bi] == 1:
+                raise _Decline("loop")
+            return
+        state[bi] = 1
+        block = blocks[bi]
+        kind = block["kind"]
+        cert, mid, exit_expr, m, defs, is_ret, last_pc, run_pcs = run_info[bi]
+        if bi in halt_info:
+            succ[bi] = ("halt",)
+        elif kind == "ret":
+            if cert is None:
+                raise _Decline("ret without run")
+            succ[bi] = ("ret",)
+        elif cert is not None and last_pc + 4 == EXIT and kind != "ret":
+            succ[bi] = ("halts",)
+        elif kind == "seq":
+            nb = start_to_bi.get(block["instrs"][-1] + 4)
+            if nb is None:
+                raise _Decline("seq")
+            succ[bi] = ("seq", nb)
+            visit(nb)
+        elif kind == "b":
+            nb = start_to_bi.get(block["targets"][0])
+            if nb is None:
+                raise _Decline("b")
+            succ[bi] = ("b", nb)
+            visit(nb)
+        elif kind == "cbz":
+            if block["start"] in cbz_src_map and False:
+                pass
+            fall, taken = block["targets"]
+            w = words[block["instrs"][-1]]
+            bidx = _step_branch_index(w)
+            r = w & 0x1f
+            edges = {}
+            for tag, tgt in (("taken", taken), ("fall", fall)):
+                if (block["start"], tgt) in dead_edges:
+                    edges[tag] = None
+                    continue
+                tb = start_to_bi.get(tgt)
+                if tb is None:
+                    raise _Decline("cbz edge")
+                edges[tag] = tb
+            # A statically non-zero register at a CBZ: the taken arm is dead.
+            if (block["start"] not in cbz_src_map and bidx == 16
+                    and edges["taken"] is not None):
+                rc = _cbz_reg_const(block, words, r)
+                if rc is not None and rc != 0:
+                    edges["taken"] = None
+            dia = None
+            if edges["taken"] is not None and edges["fall"] is not None:
+                dia = diamond(edges["taken"], edges["fall"])
+            if dia is not None:
+                arm_a, arm_b, j = dia
+                succ[bi] = ("diamond", arm_a, arm_b, j, taken, fall)
+                visit(j)
+            else:
+                succ[bi] = ("cbz", edges["taken"], edges["fall"], taken, fall)
+                for tb in (edges["taken"], edges["fall"]):
+                    if tb is not None:
+                        visit(tb)
+        elif kind == "bl":
+            ret, entry = block["targets"]
+            if (ret not in trap or entry == EXIT
+                    or (base <= entry < base + len(code))):
+                raise _Decline("bl")
+            ext = code + bytes.fromhex("c0035fd6")
+            off = entry - base
+            word = 0
+            for k in range(4):
+                if 0 <= off + k < len(ext):
+                    word |= ext[off + k] << (8 * k)
+            succ[bi] = ("bltrap", ret, entry, word)
+        else:
+            raise _Decline(kind)
+        state[bi] = 2
+        order.append(bi)
+
+    try:
+        visit(0)
+    except _Decline:
+        return None
+
+    # ---- path count gate and per-block fuel need ---------------------------
+    def blk_cost(q):
+        return run_info[q][3] + (1 if blocks[q]["kind"] == "b" else 0)
+
+    def arm_cost(arm):
+        return sum(blk_cost(q) for q in arm)
+
+    paths, need = {}, {}
+    for bi in order:
+        s = succ[bi]
+        m = run_info[bi][3]
+        if s[0] == "halt":
+            paths[bi], need[bi] = 1, halt_info[bi][1] + 1
+        elif s[0] in ("ret", "halts"):
+            paths[bi], need[bi] = 1, m + 1
+        elif s[0] == "bltrap":
+            paths[bi], need[bi] = 1, m + 2
+        elif s[0] in ("seq",):
+            paths[bi], need[bi] = paths[s[1]], m + need[s[1]]
+        elif s[0] == "b":
+            paths[bi], need[bi] = paths[s[1]], m + 1 + need[s[1]]
+        elif s[0] == "diamond":
+            _, arm_a, arm_b, j, _tp, _fp = s
+            paths[bi] = 2 * paths[j]
+            need[bi] = (m + 1 + max(arm_cost(arm_a), arm_cost(arm_b)) + need[j])
+        else:
+            live = [t for t in (s[1], s[2]) if t is not None]
+            paths[bi] = sum(paths[t] for t in live) or 1
+            need[bi] = m + 1 + max([need[t] for t in live] or [0])
+    if paths[0] < _WP_MIN_PATHS:
+        return None
+
+    W = lambda k: f"{thm}_wp_{k}"
+    T = lambda k: f"{thm}_T_{k}"
+    post = (f"match arm64_go_exit s {C} {EXIT} f with\n"
+            f"     | some s => {prop}\n     | none => {none_br}")
+
+    def ex(bi):
+        """Block `bi`'s run-exit state over the variable `s`."""
+        e = run_info[bi][2]
+        return "(" + re.sub(r"\bst\b", "s", e) + ")" if run_info[bi][3] else "s"
+
+    def prop_at(e):
+        return re.sub(r"\bs\b", e, prop)
+
+    R = lambda q: f"{thm}_R_{q}"
+    M = lambda k: f"{thm}_M_{k}"
+
+    def arm_state(arm, x0):
+        """The state after the straight blocks `arm`, entered at state `x0`."""
+        x = x0
+        for q in arm:
+            if run_info[q][3]:
+                x = "(" + re.sub(r"\bst\b", f"({x})", run_info[q][2]) + ")"
+            if blocks[q]["kind"] == "b":
+                x = f"{{ {x} with pc := {blocks[q]['targets'][0]} }}"
+        return x
+
+    arm_used = []
+    for bi in order:
+        if succ[bi][0] == "diamond":
+            for q in succ[bi][1] + succ[bi][2]:
+                if q not in arm_used:
+                    arm_used.append(q)
+
+    helpers = []
+    H = helpers.append
+    # ---- the preconditions --------------------------------------------------
+    for bi in order:
+        s = succ[bi]
+        e = ex(bi)
+        hd = f"def {W(bi)} (n : UInt64) (s : Arm64State) : Prop :="
+        if s[0] == "halt":
+            H(f"{hd} True")
+        elif s[0] == "bltrap":
+            H(f"{hd} True")
+        elif s[0] == "ret":
+            m = run_info[bi][3]
+            H(f"{hd}\n  ({name}_b{bi}_qS{m - 1} s).x30 = UInt64.ofNat {EXIT} ∧ "
+              + prop_at(e))
+        elif s[0] == "halts":
+            H(f"{hd}\n  " + prop_at(e))
+        elif s[0] == "seq":
+            H(f"{hd}\n  {W(s[1])} n {e}")
+        elif s[0] == "b":
+            tgt = blocks[bi]["targets"][0]
+            H(f"{hd}\n  {W(s[1])} n {{ {e} with pc := {tgt} }}")
+        elif s[0] == "diamond":
+            _, arm_a, arm_b, j, taken, fall = s
+            cond = _wp_cond_text(blocks[bi], words, e)
+            # The merge is its OWN def over a state variable `t`: written inline
+            # the run-exit state `e` appears in the condition and in both arms,
+            # so `k` diamonds in a row triplicate the whole preceding state
+            # `3**k`-fold when the definitions are unfolded.  As `{M}_k (e s)`
+            # the preceding state appears ONCE.
+            cond_t = _wp_cond_text(blocks[bi], words, "t")
+            xa = arm_state(arm_a, f"{{ t with pc := {taken} }}")
+            xb = arm_state(arm_b, f"{{ t with pc := {fall} }}")
+            H(f"def {M(bi)} (t : Arm64State) : Arm64State :=\n"
+              f"  if {cond_t} then {xa} else {xb}\n")
+            H(f"{hd}\n  {W(j)} n ({M(bi)} {e})")
+        else:
+            _, tb, fb, taken, fall = s
+            cond = _wp_cond_text(blocks[bi], words, e)
+            ta = (f"{W(tb)} n {{ {e} with pc := {taken} }}"
+                  if tb is not None else "False")
+            fa = (f"{W(fb)} n {{ {e} with pc := {fall} }}"
+                  if fb is not None else "False")
+            H(f"{hd}\n  if {cond} then {ta}\n  else {fa}")
+        H("")
+
+    # ---- the per-block theorems --------------------------------------------
+    def adv(bi, L):
+        m = run_info[bi][3]
+        if not m:
+            return "s"
+        cert, mid = run_info[bi][0], run_info[bi][1]
+        e = ex(bi)
+        args = f"{cert} s hpc" + (" hjump" if succ[bi][0] == "ret" else "")
+        L.append(f"  have hcert := {args}")
+        L.append(f"  have hmid := {mid} {EXIT} s hpc (by simp)")
+        L.append(f"  have hadv := rec1_glue_gen {C} {EXIT} {m} (f - {m}) s {e} "
+                 f"hcert hmid")
+        L.append(f"  rw [show {m} + (f - {m}) = f from by omega] at hadv")
+        L.append(f"  rw [hadv]")
+        L.append(f"  generalize ht : {e} = t at hw ⊢")
+        return "t"
+
+    def step_pc(bi, st):
+        """`st.pc = pc` for the state after block `bi`'s run."""
+        return "by rw [← ht] <;> rfl" if run_info[bi][3] else "hpc"
+
+    for q in arm_used:
+        blk = blocks[q]
+        m = run_info[q][3]
+        c = blk_cost(q)
+        L = [f"theorem {R(q)} (s : Arm64State) (f : Nat) (hpc : s.pc = {blk['start']})",
+             f"    (hf : {c} ≤ f) :",
+             f"    arm64_go_exit s {C} {EXIT} f = "
+             f"arm64_go_exit ({arm_state([q], 's')}) {C} {EXIT} (f - {c}) := by"]
+        if m:
+            e = ex(q)
+            cert, mid = run_info[q][0], run_info[q][1]
+            L.append(f"  have hcert := {cert} s hpc")
+            L.append(f"  have hmid := {mid} {EXIT} s hpc (by simp)")
+            L.append(f"  have hadv := rec1_glue_gen {C} {EXIT} {m} (f - {m}) s {e} "
+                     f"hcert hmid")
+            L.append(f"  rw [show {m} + (f - {m}) = f from by omega] at hadv")
+            L.append(f"  rw [hadv]")
+        if blk["kind"] == "b":
+            tgt = blk["targets"][0]
+            bpc = blk["instrs"][-1]
+            e = ex(q)
+            if m:
+                L.append(f"  generalize ht : {e} = t")
+            t = "t" if m else "s"
+            L.append(f"  have hpcb : {t}.pc = {bpc} := "
+                     + ("by rw [← ht] <;> rfl" if m else "hpc"))
+            L.append(f"  have hs : arm64_step {t} {C} = some "
+                     f"({{ {t} with pc := {tgt} }}) := by")
+            L.append(f"    have hsr := {sr_name}_sr_{(bpc - base) // 4} {t} hpcb")
+            L.append(f"    rw [hpcb] at hsr")
+            L.append(f"    exact hsr")
+            fm = f"f - {m}" if m else "f"
+            L.append(f"  obtain ⟨g, hg⟩ : ∃ g, {fm} = g + 1 := "
+                     f"⟨{fm} - 1, by omega⟩")
+            L.append(f"  rw [hg, show f - {c} = g from by omega]")
+            L.append(f"  rw [go_exit_step {t} _ {C} {EXIT} g {tgt} {bpc} hs "
+                     f"(by rfl) hpcb (by omega) (by omega)]")
+        L.append("")
+        helpers.extend(L)
+
+    for bi in order:
+        s = succ[bi]
+        block = blocks[bi]
+        m = run_info[bi][3]
+        fm = f"f - {m}" if m else "f"
+        start = block["start"]
+        L = []
+        L.append(f"theorem {T(bi)} (n : UInt64) (s : Arm64State) (f : Nat) "
+                 f"(hpc : s.pc = {start})")
+        L.append(f"    (hf : {need[bi]} ≤ f) (hw : {W(bi)} n s) :")
+        L.append(f"    ({post}) := by")
+        L.append(f"  unfold {W(bi)} at hw")
+        if s[0] == "halt":
+            hname = halt_info[bi][0]
+            L.append(f"  rw [{hname} s hpc f (by omega)]")
+            L.append(f"  exact True.intro")
+        elif s[0] == "ret":
+            L.append(f"  have hjump : ({name}_b{bi}_qS{m - 1} s).x30.toNat ≠ "
+                     f"{run_info[bi][6]} := by")
+            L.append(f"    rw [show ({name}_b{bi}_qS{m - 1} s).x30 = "
+                     f"UInt64.ofNat {EXIT} from hw.1]; native_decide")
+            t = adv(bi, L)
+            L.append(f"  have hhit := arm64_go_exit_hit {t} {C} {EXIT} (f - {m}) "
+                     f"(by omega) (by")
+            L.append(f"    rw [← ht]; change ({name}_b{bi}_qS{m - 1} s).x30.toNat"
+                     f" = {EXIT}")
+            L.append(f"    rw [hw.1]; rfl)")
+            L.append(f"  rw [hhit]")
+            L.append(f"  exact hw.2")
+        elif s[0] == "halts":
+            t = adv(bi, L)
+            L.append(f"  have hhit := arm64_go_exit_hit {t} {C} {EXIT} (f - {m}) "
+                     f"(by omega) ({step_pc(bi, t)})")
+            L.append(f"  rw [hhit]")
+            L.append(f"  exact hw")
+        elif s[0] == "seq":
+            t = adv(bi, L)
+            L.append(f"  exact {T(s[1])} n _ (f - {m}) ({step_pc(bi, t)}) "
+                     f"(by omega) hw")
+        elif s[0] == "b":
+            t = adv(bi, L)
+            tgt = block["targets"][0]
+            bpc = block["instrs"][-1]
+            L.append(f"  have hpcb : {t}.pc = {bpc} := "
+                     + ("by rw [← ht] <;> rfl" if m else "hpc"))
+            L.append(f"  have hs : arm64_step {t} {C} = some "
+                     f"({{ {t} with pc := {tgt} }}) := by")
+            L.append(f"    have hsr := {sr_name}_sr_{(bpc - base) // 4} {t} hpcb")
+            L.append(f"    rw [hpcb] at hsr")
+            L.append(f"    exact hsr")
+            L.append(f"  obtain ⟨g, hg⟩ : ∃ g, {fm} = g + 1 := "
+                     f"⟨{fm} - 1, by omega⟩")
+            L.append(f"  rw [hg]")
+            L.append(f"  rw [go_exit_step {t} _ {C} {EXIT} g {tgt} {bpc} hs "
+                     f"(by rfl) hpcb (by omega) (by omega)]")
+            L.append(f"  exact {T(s[1])} n _ g (by rfl) (by omega) hw")
+        elif s[0] == "bltrap":
+            _, ret, entry, word = s
+            t = adv(bi, L)
+            bpc = block["instrs"][-1]
+            cs = f"({{ {t} with x30 := UInt64.ofNat {ret}, pc := {entry} }} : Arm64State)"
+            L.append(f"  have hpcb : {t}.pc = {bpc} := "
+                     + ("by rw [← ht] <;> rfl" if m else "hpc"))
+            L.append(f"  have hbl : arm64_step {t} {C} = some {cs} := by")
+            L.append(f"    have hsr := {sr_name}_sr_{(bpc - base) // 4} {t} hpcb")
+            L.append(f"    rw [hpcb] at hsr")
+            L.append(f"    exact hsr")
+            L.append(f"  obtain ⟨g, hg⟩ : ∃ g, {fm} = g + 1 := "
+                     f"⟨{fm} - 1, by omega⟩")
+            L.append(f"  rw [hg]")
+            L.append(f"  rw [go_exit_step {t} _ {C} {EXIT} g {entry} {bpc} hbl "
+                     f"(by rfl) hpcb (by omega) (by omega)]")
+            L.append(f"  have hpc' : {cs}.pc = {entry} := by rfl")
+            L.append(f"  have hinsn : arm64_read_insn {C} {entry} = "
+                     f"(0x{word:08x} : UInt32) := by rfl")
+            L.append(f"  have hstep : arm64_step {cs} {C} = none := by")
+            L.append(f"    unfold arm64_step")
+            L.append(f"    rw [hpc', hinsn]")
+            L.append(f"    rfl")
+            L.append(f"  unfold arm64_go_exit")
+            L.append(f"  by_cases hg0 : g = 0")
+            L.append(f"  · rw [hg0]; simp")
+            L.append(f"  · rw [if_neg hg0, if_neg (by rw [hpc']; omega), hstep]; "
+                     f"trivial")
+        elif s[0] == "diamond":
+            _, arm_a, arm_b, j, taken, fall = s
+            t = adv(bi, L)
+            cpc = block["instrs"][-1]
+            cond = _wp_cond_text(block, words, t)
+            idx = (cpc - base) // 4
+            L.append(f"  have hpcb : {t}.pc = {cpc} := "
+                     + ("by rw [← ht] <;> rfl" if m else "hpc"))
+            L.append(f"  have hcbz : arm64_step {t} {C} = some (if {cond} then "
+                     f"({{ {t} with pc := {taken} }} : Arm64State) else "
+                     f"({{ {t} with pc := {fall} }} : Arm64State)) := by")
+            L.append(f"    have hsr := {sr_name}_sr_{idx} {t} hpcb")
+            L.append(f"    rw [hpcb] at hsr")
+            L.append(f"    exact hsr")
+            L.append(f"  obtain ⟨g, hg⟩ : ∃ g, {fm} = g + 1 := "
+                     f"⟨{fm} - 1, by omega⟩")
+            L.append(f"  rw [hg]")
+            L.append(f"  by_cases hc : {cond}")
+            for tag, arm, entry_pc, lemma, rewr in (
+                    ("taken", arm_a, taken, "go_exit_cbz_taken", "if_pos"),
+                    ("fall", arm_b, fall, "go_exit_cbz_fall", "if_neg")):
+                L.append(f"  · rw [{lemma} {t} {C} {EXIT} g _ _ _ hcbz hc "
+                         f"(by rw [hpcb]; simp) (by rw [hpcb]; omega)]")
+                x = f"{{ {t} with pc := {entry_pc} }}"
+                gexpr = "g"
+                for q in arm:
+                    gnew = f"({gexpr} - {blk_cost(q)})"
+                    L.append(f"    rw [{R(q)} ({x}) {gexpr} (by rfl) (by omega)]")
+                    x = arm_state([q], x)
+                    gexpr = gnew
+                L.append(f"    exact {T(j)} n _ {gexpr} (by rfl) (by omega) "
+                         f"(by unfold {M(bi)} at hw; rw [{rewr} hc] at hw; "
+                         f"exact hw)")
+        else:
+            _, tb, fb, taken, fall = s
+            t = adv(bi, L)
+            cpc = block["instrs"][-1]
+            cond = _wp_cond_text(block, words, t)
+            idx = (cpc - base) // 4
+            L.append(f"  have hpcb : {t}.pc = {cpc} := "
+                     + ("by rw [← ht] <;> rfl" if m else "hpc"))
+            L.append(f"  have hcbz : arm64_step {t} {C} = some (if {cond} then "
+                     f"({{ {t} with pc := {taken} }} : Arm64State) else "
+                     f"({{ {t} with pc := {fall} }} : Arm64State)) := by")
+            L.append(f"    have hsr := {sr_name}_sr_{idx} {t} hpcb")
+            L.append(f"    rw [hpcb] at hsr")
+            L.append(f"    exact hsr")
+            L.append(f"  obtain ⟨g, hg⟩ : ∃ g, {fm} = g + 1 := "
+                     f"⟨{fm} - 1, by omega⟩")
+            L.append(f"  rw [hg]")
+            for tag, edge, lemma, hyp, rewr in (
+                    ("taken", tb, "go_exit_cbz_taken", "hc", "if_pos"),
+                    ("fall", fb, "go_exit_cbz_fall", "hc", "if_neg")):
+                pre = "  " if edge is not None or True else ""
+                if tag == "taken":
+                    L.append(f"  by_cases hc : {cond}")
+                    L.append(f"  · rw [{lemma} {t} {C} {EXIT} g _ _ _ hcbz hc "
+                             f"(by rw [hpcb]; simp) (by rw [hpcb]; omega)]")
+                else:
+                    L.append(f"  · rw [{lemma} {t} {C} {EXIT} g _ _ _ hcbz hc "
+                             f"(by rw [hpcb]; simp) (by rw [hpcb]; omega)]")
+                if edge is None:
+                    L.append(f"    rw [{rewr} hc] at hw")
+                    L.append(f"    exact hw.elim")
+                else:
+                    L.append(f"    exact {T(edge)} n _ g (by rfl) (by omega) "
+                             f"(by rw [{rewr} hc] at hw; exact hw)")
+        L.append("")
+        helpers.extend(L)
+
+    # ---- the terminal value flow -------------------------------------------
+    flags = ", ".join(_COND_LEMMA.values())
+    # The merged states (`if c then sA else sB`) are read field by field.
+    ite_lemmas = ", ".join([f"arm64_ite_{f}" for f in _ARM64_STATE_FIELDS]
+                           + ["mem_read_u64_ite", "mem_write_u64_ite"])
+    common = (f"{_WP_MEM_LEMMAS}, {flags}, {ite_lemmas}, arm64_reg, "
+              f"arm64_set_reg, Arm64State.init")
+
+    def layer_defs(bi):
+        """The definitions ONE layer of the walk needs unfolded: the block's own
+        run, and for a diamond its merge and both arms' runs."""
+        ds = list(run_info[bi][4] or [])
+        if succ[bi][0] == "diamond":
+            ds.append(M(bi))
+            for q in succ[bi][1] + succ[bi][2]:
+                ds.extend(run_info[q][4] or [])
+        return ds
+
+    # ONE layer at a time.  `simp only [every def]` unfolds the whole chain in
+    # one pass and `simp` then normalizes a term the size of the entire program
+    # (measured: the step budget at four `if`s in a row, over 12 GB at six).
+    # The walk is a single chain once arms are merged, so each layer unfolds
+    # against an already-normal, small state.
+    layers = []
+    for bi in order:
+        # `simp only [W]`, not `rw [W]`: `rw` tries each of the walk's defs in
+        # turn, and a failed match unfolds both heads' bodies (the whole state)
+        # in `whnf` until the heartbeat budget is gone.
+        layers.append(f"      | (simp only [{W(bi)}]; try simp (disch := decide) "
+                      f"[{common}, {', '.join(layer_defs(bi))}])")
+    body = [f"  have hw : {W(0)} n {init} := by",
+            "    repeat' first",
+            "      | (apply And.intro)"] + layers + [
+            # What is left is the guard facts and the source model over the
+            # merged values: the model's own `if`s.
+            f"    all_goals (try intro _hov)",
+            f"    all_goals (first | (simp [mem_read_u64]; done) | decide | "
+            f"(simp only [mojo, {name}_go]; repeat' split) | skip)",
+            f"    all_goals (try simp_all [arm64_adds_flags, "
+            f"arm64_matches_condition])"]
+    return helpers, body
+
+
 def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                            recursive: bool = False, go_lemmas: list = None,
                            fn=None, tw_extra: str = "", tc: dict = None,
@@ -13112,6 +13703,24 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # receiver (`n v : UInt64`), so it keeps the parentheses the callers always
     # wrote; the entry-point default is `_entry_binders`, which brings its own.
     _params = _fr.get("params")
+    # The compositional walk, for walks with many CFG paths (see `_gen_wp_walk`).
+    _wp = None
+    if (not recursive and not frame and fuel is None and fuel_lean is None
+            and not _narrow_param_hyps(fn, fuel) and _via_prog_default(
+                _fr, entry_arity)):
+        _wp = _gen_wp_walk(
+            thm=_thm, name=name, C=C, sr_name=sr_name, blocks=blocks,
+            words=words, base=base, code=code, run_info=run_info,
+            start_to_bi=start_to_bi, halt_info=_halt_info,
+            dead_edges=_dead_edges, trap=_trap, exit_pc=exit_pc, init=init,
+            fuel0=FUEL0, prop=_prop,
+            none_br="True" if (_trap_stop or _trap_branch_reach) else "False",
+            cbz_src_map=_cbz_src_map,
+            sc_by_merge=_sc_by_merge, svc_hyp=_svc_hyp, entry_arity=entry_arity,
+            loop_contract=_loop_contract)
+        if _wp is not None:
+            for _ln in _wp[0]:
+                A(_ln)
     A(f"theorem {_thm} ({_params})" if _params
       else f"theorem {_thm} {_entry_binders(entry_arity)}")
     # `runProg` seeds ONLY `x0` from `Arm64State.init` (`lib/Refine.lean:112`),
@@ -13190,7 +13799,14 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         _init_ctx["lets"] = list(frame["lets"])
     if (frame or {}).get("hx30_lets"):
         _init_ctx["hx30_lets"] = list(frame["hx30_lets"])
-    emit_block(0, init, FUEL0, 0, set(), _init_ctx)
+    if _wp is not None:
+        for _ln in _wp[1]:
+            A(_ln)
+        _cfg_leaf(A, "    ", "wp-walk-terminal",
+                  "all_goals (first | done | sorry)")
+        A(f"  exact {_thm}_T_0 n _ {FUEL0} (by rfl) (by omega) hw")
+    else:
+        emit_block(0, init, FUEL0, 0, set(), _init_ctx)
     return "\n".join(L)
 
 

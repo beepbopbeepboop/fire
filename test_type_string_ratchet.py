@@ -61,9 +61,12 @@ PATTERNS = {
 #   about 930 in all, not the 30 the old seven-spelling patterns showed. This
 #   scanner measures 216 / 263 / 38 after them. `--counts` reprints the figures.
 BASELINE = {
-    "== type string": 216,
-    "in (type tuple)": 263,
-    "endswith('*')": 38,
+    # Stage 4 is landed (2026-11-27): the backlog this ratchet was created
+    # against is drained. Every type test goes through a `TypeLattice`
+    # predicate; the zeroes are the lock, not a temporary state.
+    "== type string": 0,
+    "in (type tuple)": 0,
+    "endswith('*')": 0,
     # Stage 2b is landed: every statement the lowering writes is a builder
     # call, and `build.raw` is the only text channel left (its own baseline).
     "gen._emit( text": 0,
@@ -77,8 +80,15 @@ BASELINE = {
 # and writes no gimple statement at all, so its 21 `self._emit(` calls can
 # never move.  Leaving them in made the ratchet's floor 21 instead of 0,
 # where a real regression could hide behind them (measured 2026-11-21).
+#
+# The three TYPE patterns are about C spellings; the Metal emitters spell Metal
+# Shading Language (`uint`, `half`, `float`), which is a different vocabulary
+# and not what stage 4 replaces. They are excluded whole, for the same reason.
 _NOT_THIS_PATTERNS_SUBJECT = {
     "gen._emit( text": {"mojo/backend_gimple/emit_metal.py"},
+    "== type string": {"mojo/backend_gimple/emit_metal.py", "mojo/middle/metal_ops.py"},
+    "in (type tuple)": {"mojo/backend_gimple/emit_metal.py", "mojo/middle/metal_ops.py"},
+    "endswith('*')": {"mojo/backend_gimple/emit_metal.py", "mojo/middle/metal_ops.py"},
 }
 
 
@@ -93,31 +103,61 @@ def sources() -> list:
 
 
 def _predicate_lines(text: str) -> set:
-    """1-based line numbers of the `is_*` methods of class TypeLattice (decorators included).
+    """1-based line numbers of the sanctioned spelling methods of TypeLattice.
 
-    These bodies are the sanctioned spelling of each type test, so they are not counted;
-    every other method of the class is."""
+    The `is_*` predicates and the two pointer-shape predicates (`ends_in_star`,
+    `ends_with_star`) ARE the one place a spelling may be tested, so their
+    bodies are not counted; every other method of the class is."""
     lines: set = set()
     for node in ast.parse(text).body:
         if not (isinstance(node, ast.ClassDef) and node.name == 'TypeLattice'):
             continue
         for item in node.body:
-            if not (isinstance(item, ast.FunctionDef) and item.name.startswith('is_')):
+            if not (isinstance(item, ast.FunctionDef)
+                    and (item.name.startswith('is_') or item.name.startswith('ends_'))):
                 continue
             start = min([item.lineno] + [d.lineno for d in item.decorator_list])
             lines.update(range(start, item.end_lineno + 1))
     return lines
 
 
+def _docstring_lines(text: str) -> set:
+    """1-based line numbers of every docstring (module, class, function).
+
+    A docstring is prose, not code: `emit_infra.py` explains a `join(...)`
+    result by writing `== 'int'` inside one, and a text scan that counted it
+    would report a type test that does not exist. Only the FIRST string
+    statement of a scope is a docstring, so a string literal in an expression
+    (`x == 'int'`) is still counted."""
+    lines: set = set()
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return lines
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+            continue
+        body = getattr(node, 'body', [])
+        if not body:
+            continue
+        first = body[0]
+        if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            lines.update(range(first.lineno, first.end_lineno + 1))
+    return lines
+
+
 def _code_lines(path: str, text: str) -> str:
     """`text` with the lines that are not code blanked out, so line numbers are kept.
 
-    A comment line (first non-blank character `#`) is not code, and in types.py the
-    TypeLattice predicate bodies are not counted. The blank lines keep the regexes'
-    `^` and multi-line matches meaning what they meant."""
-    skip: set = set()
+    A comment line (first non-blank character `#`) is not code, a docstring is
+    prose, and in types.py the TypeLattice predicate bodies are not counted.
+    The blank lines keep the regexes' `^` and multi-line matches meaning what
+    they meant."""
+    skip: set = _docstring_lines(text)
     if os.path.normpath(path) == os.path.normpath(TYPES_PY):
-        skip = _predicate_lines(text)
+        skip |= _predicate_lines(text)
     out: list = []
     for n, line in enumerate(text.split('\n'), 1):
         if n in skip or line.lstrip().startswith('#'):

@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import mojo.middle.types as gimple_ctypes
+
 #: C-escape a Python string into C string literal bodies. `?` is escaped for
 #: trigraph safety: `??` followed by one of `=/()'<!>-` is eaten by a
 #: conforming preprocessor as a digraph, and MSL is full of `?:`.
@@ -173,7 +175,8 @@ def launch_arg_types(params) -> tuple[list[tuple[str, str, bool, int]], int]:
     count_idx = -1
     for _i, (_pn, _ann) in enumerate(params):
         _ann = (_ann or '').strip()
-        if _ann.startswith(_POINTER_ANNOTATIONS) or _ann.endswith('*'):
+        if (_ann.startswith(_POINTER_ANNOTATIONS)
+                or gimple_ctypes.TypeLattice.ends_with_star(_ann)):
             _inner = (_ann[_ann.find('[') + 1:].split(',')[0].strip()
                       if '[' in _ann else 'Float32')
             out.append(LaunchArg(

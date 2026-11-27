@@ -35,12 +35,16 @@ TL = gimple_ctypes.TypeLattice
 # close enough to be caught by a sloppy predicate ('' and None are the
 # "unsolved type" markers the backend really passes).
 PROBES = [
-    None, '', 'unknown', 'void',
+    None, '', 'unknown', 'void', 'None',
     'int', 'int8_t', 'int16_t', 'int32_t', 'int64_t',
     'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t', 'unsigned int',
     'char', 'bool', '_Bool', 'long', 'double', 'float', '__fp16',
-    'char *', 'void *', 'int *', 'Span *', 'long *',
+    'short', 'unsigned short',
+    'char *', 'void *', 'int *', 'Span *', 'long *', 'int64_t *',
+    'const char *',
     'MojoList *', 'MojoDict *', 'MojoSet *', 'MojoBytes *', 'MojoStr *',
+    'MojoGenerator *', 'MojoAsync *', 'MojoBoundMethod *',
+    'MojoMemoryView *', 'MojoStructFmt *', '_SIterBytes *', 'ModuleLoader *',
 ]
 
 # The answer key: each predicate and EXACTLY the members it must accept.
@@ -97,6 +101,28 @@ ANSWER_KEY = {
                       'MojoSet *'},
     'is_c_scalar': {'int', 'int64_t', 'double', '_Bool', 'char *'},
     'is_number_scalar': {'int', 'int64_t', 'double', '_Bool'},
+    # The handle/pointer spellings the stage-4 tail names directly. Each is an
+    # exact equality, so none of them may answer a sibling spelling.
+    'is_generator': {'MojoGenerator *'},
+    'is_async': {'MojoAsync *'},
+    'is_bound_method': {'MojoBoundMethod *'},
+    'is_memoryview': {'MojoMemoryView *'},
+    'is_struct_fmt': {'MojoStructFmt *'},
+    'is_siter_bytes': {'_SIterBytes *'},
+    'is_module_loader': {'ModuleLoader *'},
+    'is_word_ptr': {'int64_t *'},
+    'is_const_cstr': {'const char *'},
+    'is_short': {'short'},
+    'is_ushort': {'unsigned short'},
+    'is_unsigned_int': {'unsigned int'},
+    'is_fp16': {'__fp16'},
+    'is_none_type': {'None'},
+    'ends_with_star': {'char *', 'void *', 'int *', 'Span *', 'long *',
+                       'int64_t *', 'const char *',
+                       'MojoList *', 'MojoDict *', 'MojoSet *', 'MojoBytes *',
+                       'MojoStr *', 'MojoGenerator *', 'MojoAsync *',
+                       'MojoBoundMethod *', 'MojoMemoryView *',
+                       'MojoStructFmt *', '_SIterBytes *', 'ModuleLoader *'},
 }
 
 def _members(items):

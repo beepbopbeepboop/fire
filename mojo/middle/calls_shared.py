@@ -340,7 +340,7 @@ def _is_pointer_ctype(param_ctype) -> bool:
     if not param_ctype:
         return False
     _t = param_ctype if isinstance(param_ctype, str) else str(param_ctype)
-    return _t.endswith('*')
+    return gimple_ctypes.TypeLattice.ends_with_star(_t)
 
 
 def _null_default_pair(param_ctype, int_ctype: str = 'int') -> tuple:
@@ -1031,7 +1031,7 @@ def _struct_operator_receiver(gen, op: str, left_node, aug: bool) -> str | None:
     if aug:
         dunder = '__i' + dunder[2:]
     qt = _as_str(gen._quick_type(left_node))
-    if not gimple_ctypes.TypeLattice.ends_in_star(qt) or qt in ('char *', 'void *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
+    if not gimple_ctypes.TypeLattice.ends_in_star(qt) or (gimple_ctypes.TypeLattice.is_voidp(qt) or gimple_ctypes.TypeLattice.is_list(qt) or gimple_ctypes.TypeLattice.is_cstr(qt) or gimple_ctypes.TypeLattice.is_dict(qt) or gimple_ctypes.TypeLattice.is_str(qt) or gimple_ctypes.TypeLattice.is_set(qt)):
         return None
     sname = gimple_exprtypes._struct_name_of(qt)
     if sname not in gen.struct_field_types:

@@ -136,7 +136,7 @@ def _resolve_type(gen, ann: str | None) -> str:
             _nsm = 0
             for _up in ann.split(' | '):
                 _up = _up.strip()
-                if _up == 'None':
+                if gimple_ctypes.TypeLattice.is_none_type(_up):
                     continue
                 if _up.rsplit('.', 1)[-1] in gen.struct_field_types:
                     _nsm += 1
@@ -237,7 +237,7 @@ def _resolve_type(gen, ann: str | None) -> str:
     # `len()` -> mojo_list_len, `t[i]` -> mojo_list_get, unpack reads the
     # list-backed tuple (see `_body_builds_struct_tuple`'s note on the
     # bounds() family building RUNTIME tuples).
-    if (_ct.startswith('MojoTuple_') and not _ct.endswith('*')
+    if (_ct.startswith('MojoTuple_') and not gimple_ctypes.TypeLattice.ends_with_star(_ct)
             and isinstance(ann, str)
             and ann.strip().split('[', 1)[0].strip() in ('Tuple', 'tuple')
             and (getattr(gen, '_current_filename', '') or '').endswith('.py')):
@@ -258,7 +258,7 @@ def _definitely_bytes_expr(e, bytes_vars: set, fn_ret_types: dict) -> bool:
     if not isinstance(e, CallExpr) or not isinstance(e.func, IdentExpr):
         return False
     name = e.func.name
-    return name in ('bytes', 'bytearray') or fn_ret_types.get(name) == 'MojoBytes *'
+    return name in ('bytes', 'bytearray') or gimple_ctypes.TypeLattice.is_bytes(fn_ret_types.get(name))
 
 
 def _collect_bytes_locals(nodes: list, fn_ret_types: dict, bytes_vars: set) -> set:
@@ -1399,7 +1399,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 except (ValueError, IndexError):
                     continue
                 _pt2 = gen._inferred_param_types.get(_fcp2[0], {}).get(_pname2)
-                if _pt2 in ('MojoList *', 'MojoSet *', 'MojoDict *'):
+                if (gimple_ctypes.TypeLattice.is_set(_pt2) or gimple_ctypes.TypeLattice.is_dict(_pt2) or gimple_ctypes.TypeLattice.is_list(_pt2)):
                     is_iterated = True
                     break
 
@@ -1910,7 +1910,7 @@ def _param_value_binding_kind(gen, value) -> str | None:
     if isinstance(value, gimple_ctypes.NoneLiteral):
         return 'none'
     if isinstance(value, gimple_ctypes.IdentExpr) \
-            and _as_str(value.name) == 'None':
+            and gimple_ctypes.TypeLattice.is_none_type(_as_str(value.name)):
         return 'none'
     if isinstance(value, gimple_ctypes.StringLiteral):
         return 'bytes' if getattr(value, 'is_bytes', False) else 'str'
@@ -1948,7 +1948,7 @@ def _param_kind_is_container(kind) -> bool:
 def _param_kinds_are_numeric(kind_a: str, kind_b: str) -> bool:
     """`bool` and `int` are one numeric family: `True` stored into an `Int`
     parameter is not the annotation lie this detector exists for."""
-    return (kind_a in ('int', 'bool') and kind_b in ('int', 'bool'))
+    return ((gimple_ctypes.TypeLattice.is_c_int(kind_a) or gimple_ctypes.TypeLattice.is_cpp_bool(kind_a)) and (gimple_ctypes.TypeLattice.is_c_int(kind_b) or gimple_ctypes.TypeLattice.is_cpp_bool(kind_b)))
 
 
 def _param_annotation_conflict(gen, pname: str, ann_ctype, body) -> str | None:
@@ -2043,7 +2043,7 @@ def param_default_is_none(func, pname: str) -> bool:
     _d = _defs.get(_as_str(pname).lstrip('*'))
     if isinstance(_d, gimple_ctypes.NoneLiteral):
         return True
-    return isinstance(_d, IdentExpr) and _as_str(_d.name) == 'None'
+    return isinstance(_d, IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(_as_str(_d.name))
 
 
 def param_default_is_bool(func, pname: str) -> bool:
@@ -2062,7 +2062,7 @@ def _is_bool_or_none_literal(expr) -> bool:
     the `int64_t` word cannot carry (True is 1, None is 0)."""
     if isinstance(expr, (BoolLiteral, NoneLiteral)):
         return True
-    return isinstance(expr, IdentExpr) and _as_str(expr.name) == 'None'
+    return isinstance(expr, IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(_as_str(expr.name))
 
 
 def callsite_tagged_literal_params(module_stmts, all_functions,
@@ -2337,7 +2337,7 @@ def _untyped_param_mixed_kinds(gen, pname: str, body) -> str | None:
     if not _has_container:
         # All scalar. Collapse the numeric family the annotation twin does:
         # `True` beside `5` is one kind, not a disagreement.
-        _distinct = {('num' if k in ('int', 'bool') else k) for k in _scalars}
+        _distinct = {('num' if (gimple_ctypes.TypeLattice.is_c_int(k) or gimple_ctypes.TypeLattice.is_cpp_bool(k)) else k) for k in _scalars}
         if len(_distinct) > 1:
             return 'scalar'
     return None
@@ -2724,7 +2724,7 @@ def _is_none_return_arm(node) -> bool:
     if isinstance(node, gimple_ctypes.NoneLiteral):
         return True
     return (isinstance(node, gimple_ctypes.IdentExpr)
-            and _as_str(node.name) == 'None')
+            and gimple_ctypes.TypeLattice.is_none_type(_as_str(node.name)))
 
 
 def _return_arms_need_boxed_word(acc: list, arms: list, joined: str = None) -> bool:
@@ -2780,7 +2780,7 @@ def _return_arms_need_boxed_word(acc: list, arms: list, joined: str = None) -> b
         _node = arms[_i] if _i < len(arms) else None
         if _is_none_return_arm(_node):
             continue
-        if _t in ('double', 'float', '_Bool'):
+        if (gimple_ctypes.TypeLattice.is_bool(_t) or gimple_ctypes.TypeLattice.is_double(_t) or gimple_ctypes.TypeLattice.is_c_float(_t)):
             return True
         if gimple_ctypes.TypeLattice.is_int_word(_t):
             if gimple_exprtypes.scalar_shape_arm_kind(_node) is not None:
@@ -2843,7 +2843,7 @@ def _local_is_provably_int(body: list, name: str) -> bool:
         if isinstance(st, gimple_ctypes.AssignStmt) \
                 and isinstance(st.target, IdentExpr) \
                 and _as_str(st.target.name) == name \
-                and gimple_exprtypes.scalar_shape_arm_kind(st.value) == 'int':
+                and gimple_ctypes.TypeLattice.is_c_int(gimple_exprtypes.scalar_shape_arm_kind(st.value)):
             first = k
             break
         if _mentions_name(st, name):
@@ -2854,7 +2854,7 @@ def _local_is_provably_int(body: list, name: str) -> bool:
     for b in bindings:
         if isinstance(b, gimple_ctypes.AssignStmt):
             if isinstance(b.target, IdentExpr) and _as_str(b.target.name) == name:
-                if gimple_exprtypes.scalar_shape_arm_kind(b.value) != 'int':
+                if not gimple_ctypes.TypeLattice.is_c_int(gimple_exprtypes.scalar_shape_arm_kind(b.value)):
                     return False
             elif _mentions_name(b.target, name):
                 return False
@@ -2862,7 +2862,7 @@ def _local_is_provably_int(body: list, name: str) -> bool:
             if isinstance(b.target, IdentExpr) and _as_str(b.target.name) == name:
                 if _as_str(b.op).rstrip('=') not in ('+', '-', '*', '//', '%'):
                     return False
-                if gimple_exprtypes.scalar_shape_arm_kind(b.value) != 'int':
+                if not gimple_ctypes.TypeLattice.is_c_int(gimple_exprtypes.scalar_shape_arm_kind(b.value)):
                     return False
             elif _mentions_name(b.target, name):
                 return False
@@ -2947,7 +2947,7 @@ def _infer_return_type_core(gen, body: list) -> str:
         # 64-bit, so widen the marker to the word type for a RETURN type --
         # a genuine `_Bool`/`int` join still widens the same way a C
         # arithmetic conversion would.
-        if _rt == 'int':
+        if gimple_ctypes.TypeLattice.is_c_int(_rt):
             _rt = 'int64_t'
         return _rt
     # A function that can only RAISE (an abstract method: `raise
@@ -3396,7 +3396,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                     # nothing about a scalar- or opaque-class-valued call
                     # changes.
                     elif (isinstance(_v.func, gimple_ctypes.MemberExpr)
-                          and _vt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *')
+                          and (gimple_ctypes.TypeLattice.is_set(_vt) or gimple_ctypes.TypeLattice.is_dict(_vt) or gimple_ctypes.TypeLattice.is_cstr(_vt) or gimple_ctypes.TypeLattice.is_list(_vt))
                           and gen._module_attr_call_return_type(_v) == _vt):
                         # `c = m.f(...)` through a bare-import module binding
                         # whose defining unit published a pointer return: a
@@ -3434,7 +3434,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                             if hasattr(gen, '_type_expr_to_ann'):
                                 _dt = gen._type_expr_to_ann(_els[0])
                             _sct = gimple_ctypes._dtype_token_ctype(str(_dt))
-                            if _sct in ('float', 'double', '__fp16'):
+                            if (gimple_ctypes.TypeLattice.is_fp16(_sct) or gimple_ctypes.TypeLattice.is_double(_sct) or gimple_ctypes.TypeLattice.is_c_float(_sct)):
                                 cand = _sct
                 if cand is None and not isinstance(_v, (gimple_ctypes.IdentExpr, gimple_ctypes.StringLiteral)):
                     # A STRING-valued expression bound to a local: `a = str(n)`,
@@ -3563,8 +3563,7 @@ def _dict_value_locals(gen, body: list) -> tuple[dict, dict]:
             lit = _container_literal_ctype(n.value)
             if lit is not None:
                 vt = lit
-        if vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *',
-                          'MojoSet *', 'MojoBytes *')
+        if vt and ((gimple_ctypes.TypeLattice.is_bytes(vt) or gimple_ctypes.TypeLattice.is_list(vt) or gimple_ctypes.TypeLattice.is_cstr(vt) or gimple_ctypes.TypeLattice.is_dict(vt) or gimple_ctypes.TypeLattice.is_set(vt) or gimple_ctypes.TypeLattice.is_double(vt))
                    or gimple_ctypes.TypeLattice.ends_in_star(vt)):
             out_vt[name] = vt
             # Element type of the value: for a list literal, the element type
@@ -3798,7 +3797,7 @@ def _infer_return_type_with_locals(gen, body: list, func_def=None) -> str:
                 # docstring): it stays the erased word so the dynamic
                 # iteration path, which dispatches on the handle's runtime
                 # kind, keeps owning the value.
-                if _ln not in _merged and _lt_s != 'MojoGenerator *':
+                if _ln not in _merged and not gimple_ctypes.TypeLattice.is_generator(_lt_s):
                     _merged[_ln] = _lt_s
     gen.var_types = _merged
     # Same window, second table: `_quick_type`'s SubscriptExpr case reads
@@ -3971,7 +3970,7 @@ def opaque_container_locals(body: list) -> set:
                 _v = n.value
                 if not (isinstance(_v, (gimple_ctypes.DictExpr, gimple_ctypes.ListExpr,
                                         gimple_ctypes.SetExpr, gimple_ctypes.NoneLiteral))
-                        or (isinstance(_v, gimple_ctypes.IdentExpr) and _v.name == 'None')):
+                        or (isinstance(_v, gimple_ctypes.IdentExpr) and gimple_ctypes.TypeLattice.is_none_type(_v.name))):
                     out.add(_as_str(n.target.name))
             if isinstance(n, gimple_ctypes.IfStmt):
                 walk(n.then_body)
@@ -4217,7 +4216,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                     and isinstance(n.target.obj, gimple_ctypes.IdentExpr)):
                 v = n.target.obj.name
                 vt = gen._quick_type(n.value)
-                if v not in _opaque and vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
+                if v not in _opaque and vt and ((gimple_ctypes.TypeLattice.is_list(vt) or gimple_ctypes.TypeLattice.is_cstr(vt) or gimple_ctypes.TypeLattice.is_dict(vt) or gimple_ctypes.TypeLattice.is_set(vt) or gimple_ctypes.TypeLattice.is_double(vt))
                            or gimple_ctypes.TypeLattice.ends_in_star(vt)):
                     dict_val.setdefault(v, vt)
                     # `lst[i] = <float>` is a LIST store when the key is
@@ -4529,6 +4528,13 @@ def _compute_scoped_free_candidates(fn, whole: set, funcs: dict = None, structs:
     except Exception:
         return set()
 
+# The annotation vocabulary's two spellings of the integer type. NOT a C type
+# tuple: `_TYPE_MAP` maps only `Int` to `int64_t`, so `type_map_get('int')`
+# answers '' — the question here is which annotation text was written, not
+# what C type it lowers to.
+_INT_KEY_ANNOTATIONS = ('Int', 'int')
+
+
 def _is_int_keyed_dict_annotation(ann) -> bool:
     """`ann` is `Dict[Int, V]`/`dict[int, V]` (an integer key type)."""
     if not isinstance(ann, str):
@@ -4537,7 +4543,7 @@ def _is_int_keyed_dict_annotation(ann) -> bool:
     if not (s.startswith('Dict[') or s.startswith('dict[')):
         return False
     parts = gimple_ctypes._split_top_level_commas(s.split('[', 1)[1].rstrip(']').strip())
-    return len(parts) >= 2 and parts[0].strip() in ('Int', 'int')
+    return len(parts) >= 2 and parts[0].strip() in _INT_KEY_ANNOTATIONS
 
 _IDENT_TOKEN_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 

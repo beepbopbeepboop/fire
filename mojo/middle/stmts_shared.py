@@ -73,7 +73,7 @@ def _annotation_container_elem_type(gen, ann, ctype: str) -> str | None:
     inline copies had also drifted — the no-initializer one tested
     `ctype == 'MojoList *'` and so answered for a list but not a set.
     """
-    if ctype not in ('MojoList *', 'MojoSet *'):
+    if not (gimple_ctypes.TypeLattice.is_set(ctype) or gimple_ctypes.TypeLattice.is_list(ctype)):
         return None
     # A typed `str` view before any string operation: `ann` arrives
     # unannotated (a str, None or an AST node), and on a bare word the
@@ -381,7 +381,7 @@ def _assign_target(gen, tgt, et, ev):
         # self.tell`). A later `f()` must dispatch dynamically: a bound
         # method needs `self` re-supplied, a plain fnptr must not. Record
         # the name so _lower_call routes it through mojo_maybe_bound_call_N.
-        if et == 'MojoBoundMethod *' and gen.var_types.get(tgt.name) != 'MojoBoundMethod *':
+        if gimple_ctypes.TypeLattice.is_bound_method(et) and not gimple_ctypes.TypeLattice.is_bound_method(gen.var_types.get(tgt.name)):
             gen._bm_tainted_locals.add(tgt.name)
             _brt = gen._bound_method_ret_types.get(ev)
             if _brt:

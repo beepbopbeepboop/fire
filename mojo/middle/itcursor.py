@@ -159,7 +159,7 @@ def read_at(gen, rec, idx):
     # return below). Every container the branch was written for (MojoList *,
     # MojoDict *, MojoSet *, MojoBytes *, MojoStr *, struct pointers) has
     # `suf == 'int'`, so this changes nothing for them.
-    if elem and gimple_ctypes.TypeLattice.ends_in_star(elem) and suf == 'int':
+    if elem and gimple_ctypes.TypeLattice.ends_in_star(elem) and gimple_ctypes.TypeLattice.is_c_int(suf):
         raw = gen._rt_call('int64_t', f"mojo_list_get_{suf}", [_src2, _idx2])
         return elem, gen._cast(elem, raw)
     return vct, gen._rt_call(vct, f"mojo_list_get_{suf}", [_src2, _idx2])

@@ -1106,14 +1106,14 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             gen._gen_for_cstr(var, it_val, node.body)
         elif gimple_ctypes.TypeLattice.is_bytes(it_type):
             gen._gen_for_bytes(var, it_val, node.body)
-        elif it_type == 'MojoMemoryView *':
+        elif gimple_ctypes.TypeLattice.is_memoryview(it_type):
             gen._gen_for_memoryview(var, it_val, node.body)
         elif gimple_ctypes.TypeLattice.is_dict(it_type):
             gen._gen_for_dict(var, it_val, node.body, shadow_name=shadow_name,
                               int_keys=bool(_int_mode))
         elif gimple_ctypes.TypeLattice.is_set(it_type):
             gen._gen_for_set(var, it_val, node.body, shadow_name=shadow_name)
-        elif it_type == 'MojoGenerator *':
+        elif gimple_ctypes.TypeLattice.is_generator(it_type):
             # Milestone B: `for x in <supported generator call>():` —
             # checked before the generic user-struct __iter__ protocol
             # branch below (which would otherwise treat MojoGenerator*
@@ -1196,7 +1196,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 _gen_for_unknown_generator(gen, var, it_val, node.body,
                                            node=node, shadow_name=shadow_name)
         elif ((gimple_ctypes.TypeLattice.ends_in_star(it_type) and not gimple_ctypes.TypeLattice.is_voidp(it_type))
-              or it_type.endswith('*')):
+              or gimple_ctypes.TypeLattice.ends_with_star(it_type)):
             # User-defined struct: try __iter__ / __has_next__ / __next__ protocol
             #
             # `void *` is EXCLUDED, and that exclusion is load-bearing.
@@ -2125,7 +2125,8 @@ def _gen_for_zip(gen, node):
             # iteration, so the remainder after `a` is exactly this slot.
             # Declared as the list it is; `_zip_bind_slot` below fills it.
             star_name = starred_slot_name(vn)
-            force = gen.var_types.get(star_name) not in (None, 'MojoList *')
+            force = (gen.var_types.get(star_name) is not None
+                     and not gimple_ctypes.TypeLattice.is_list(gen.var_types.get(star_name)))
             gen._declare_var(star_name, 'MojoList *', force=force)
             return
         force = gen.var_types.get(vn) not in (None, elem)
@@ -2258,7 +2259,7 @@ def _gen_for_enumerate(gen, node):
     # The gate fires only for the registered `_SIterBytes *` type this pass
     # builds, so a non-siter argument behaves byte-identically to
     # pre-branch.
-    if (lst_type == '_SIterBytes *'
+    if (gimple_ctypes.TypeLattice.is_siter_bytes(lst_type)
             and '_SIterBytes' in getattr(gen, '_intu_prereg_structs', ())
             and for_target_is_tuple(node.target)):
         _start_v = start_val if start_val is not None else '0'
@@ -2267,7 +2268,7 @@ def _gen_for_enumerate(gen, node):
                              node.body, node=node)
         return
 
-    if lst_type == 'MojoGenerator *':
+    if gimple_ctypes.TypeLattice.is_generator(lst_type):
         api = gen._generator_var_api.get(lst_val)
         if api is not None:
             _gen_for_enumerate_generator(
@@ -4548,7 +4549,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         iter_base = base
 
     # If __iter__ returned a generator object, iterate it as a generator
-    if iter_type == 'MojoGenerator *' or iter_type.endswith('*MojoGenerator*') or iter_type == 'MojoGenerator':
+    if gimple_ctypes.TypeLattice.is_generator(iter_type) or iter_type.endswith('*MojoGenerator*') or iter_type == 'MojoGenerator':
         api = getattr(gen, '_generator_var_api', {}).get(iter_var)
         if api is not None:
             destroy_after = False
