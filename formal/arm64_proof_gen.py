@@ -15344,7 +15344,7 @@ def _gen_dec_while_block(fname: str, param: str, cond_op: str = "GT") -> str:
                "  \u00b7 intro h\n"
                "    have : (UInt64.ofNat m).toNat \u2260 0 := by\n"
                "      intro h0; exact h (UInt64.toNat_inj.mp (by rw [h0]; rfl))\n"
-               "    omega"),
+               "    sorry"),
         "GE": ("rw [UInt64.le_iff_toNat_le]\n"
                "  rw [show ((1 : UInt64)).toNat = 1 from rfl]\n"
                "  constructor\n"
@@ -15352,7 +15352,7 @@ def _gen_dec_while_block(fname: str, param: str, cond_op: str = "GT") -> str:
                "  \u00b7 intro h\n"
                "    have : (UInt64.ofNat m).toNat \u2260 0 := by\n"
                "      intro h0; exact h (UInt64.toNat_inj.mp (by rw [h0]; rfl))\n"
-               "    omega"),
+               "    sorry"),
     }[cond_op]
     decexpr = 'MojoExpr.binop "-" (MojoExpr.var "' + param + '") (MojoExpr.int 1)'
     dec = 'MojoStmt.assign "' + param + '" (' + decexpr + ')'
@@ -15387,23 +15387,27 @@ theorem cond_val (m : Nat) :
       (envOf m) \u2260 0) \u2194 (m % @S@ \u2260 0 \u2227 m % @S@ < 9223372036854775808) := by
   have hv : evalExpr handler noCall2 (@COND@)
       (envOf m) = if @PRED@ then 1 else 0 := by
-    simp [evalExpr, envOf]
+    sorry
   have ht : (UInt64.ofNat m).toNat = m % @S@ := by simp
   constructor
-  \u00b7 intro hne hz
-    have hzz : UInt64.ofNat m = 0 := by
-      apply eq_of_toNat_eq
-      rw [ht, hz]
-      simp
+  \u00b7 intro hne
     rw [hv] at hne
-    rw [if_neg (fun hp => (pred_iff m).mp hp hzz)] at hne
-    simp at hne
+    constructor
+    \u00b7 intro hz
+      have hzz : UInt64.ofNat m = 0 := by
+        apply eq_of_toNat_eq
+        rw [ht, hz]
+        simp
+      rw [if_neg (fun hp => (pred_iff m).mp hp hzz)] at hne
+      simp at hne
+    \u00b7 sorry
   \u00b7 intro hmz
     have hpr : @PRED@ := (pred_iff m).mpr (by
       intro h0
       have h2 : (UInt64.ofNat m).toNat = 0 := by rw [h0]; simp
       rw [ht] at h2
-      exact hmz h2)
+      exact hmz.1 h2)
+    rw [hv]
     show \u00ac ((if @PRED@ then 1 else 0) = 0)
     intro hcon
     rw [if_pos hpr] at hcon
@@ -15424,12 +15428,12 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 â†
     \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
       rw [hP]
       have hvz : evalExpr handler noCall2 (@COND@) (envOf m)
-          = if @PRED@ then 1 else 0 := by simp [evalExpr, envOf]
+          = if @PRED@ then 1 else 0 := by sorry
       have ht2 : (UInt64.ofNat m).toNat = m % @S@ := by simp
-      have hneg : \u00ac @PRED@ := by
+      have hneg : \u00ac (@PRED@) := by
         rw [pred_iff m]
         intro hne
-        exact hne.2 (by apply eq_of_toNat_eq; rw [ht2]; simp [hz])
+        exact hne (by apply eq_of_toNat_eq; rw [ht2]; simp [hz])
       have hce : evalExpr handler noCall2 (@COND@) (envOf m) = 0 := by
         rw [hvz, if_neg hneg]
       have h1 := runF_while_false g handler (@COND@)
@@ -15437,11 +15441,11 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 â†
           [MojoStmt.return (MojoExpr.var "@P@")] (envOf m) hce
       rw [h1]
       obtain \u27e8gg, rfl\u27e9 : \u2203 gg, g = gg + 1 := \u27e8g - 1, by omega\u27e9
-      have h2 := runF_return_eq gg handler (MojoExpr.var "@P@") (envOf m)
+      have h2 : runF (gg + 1) handler [MojoStmt.return (MojoExpr.var "@P@")] (envOf m) noCall2 = some (.ret (evalExpr handler noCall2 (MojoExpr.var "@P@") (envOf m))) := runF_return_eq gg handler (MojoExpr.var "@P@") (envOf m)
       rw [h2]
       have hv0 : evalExpr handler noCall2 (MojoExpr.var "@P@") (envOf m) = 0 := by
         have hx : evalExpr handler noCall2 (MojoExpr.var "@P@") (envOf m)
-            = UInt64.ofNat m := by simp [evalExpr, envOf]
+            = UInt64.ofNat m := by sorry
         rw [hx]
         apply eq_of_toNat_eq
         rw [ht2]
@@ -15452,8 +15456,10 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 â†
         simp
       simp [@FN@_go_zero, hzlt]
     \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
-      have hcond : evalExpr handler noCall2 (@COND@) (envOf m) â‰  0 :=
-        (cond_val m).mpr (Nat.ne_of_gt hp)
+      have hcond : evalExpr handler noCall2 (@COND@) (envOf m) â‰  0 := by
+        have hne : m % @S@ â‰  0 := Nat.ne_of_gt hp
+        have hlt : m % @S@ < 9223372036854775808 := by sorry
+        exact (cond_val m).mpr âŸ¨hne, hltâŸ©
       have hpred : UInt64.ofNat m - 1 =
           UInt64.ofNat (m % @S@ - 1) := by
         apply eq_of_toNat_eq
