@@ -271,8 +271,8 @@ class _FuncFacts:
     — see module docstring for exactly what each disqualifies."""
 
     def __init__(self):
-        self.assign_count = {}       # name -> int
-        self.all_ctor_assigns = {}   # name -> bool (True until proven False)
+        self.assign_count: dict[str, int] = {}       # name -> int
+        self.all_ctor_assigns: dict[str, bool] = {}  # name -> bool (True until proven False)
         self.disqualified = set()    # names ruled out by rules 3-8
         # Callee parameter summaries (see `_summarize_params`): memo maps a
         # callee's name to the '|'-joined names of its non-escaping
@@ -286,7 +286,7 @@ class _FuncFacts:
         # (recorded, not an escape) and needs to know which names were built
         # ONLY by container displays, not merely by "maybe fresh" calls.
         self.allow_return = False
-        self.all_display = {}        # name -> bool: every assignment a display
+        self.all_display: dict[str, bool] = {}       # name -> bool: every assignment a display
         # Struct instances. `structs` maps a struct name to {method name:
         # FunctionDef} for the module's structs whose constructor the caller has
         # vetted (see infra_infer._build_analysis_structs); `struct_bound` maps
@@ -297,10 +297,17 @@ class _FuncFacts:
         self.struct_bound = {}
 
     def note_assign(self, name: str, is_ctor: bool, is_display: bool = False):
-        self.assign_count[name] = self.assign_count.get(name, 0) + 1
-        prev = self.all_ctor_assigns.get(name, True)
+        _n0: int = 0
+        if name in self.assign_count:
+            _n0 = self.assign_count[name]
+        self.assign_count[name] = _n0 + 1
+        prev: bool = True
+        if name in self.all_ctor_assigns:
+            prev = self.all_ctor_assigns[name]
         self.all_ctor_assigns[name] = prev and is_ctor
-        prev_d = self.all_display.get(name, True)
+        prev_d: bool = True
+        if name in self.all_display:
+            prev_d = self.all_display[name]
         self.all_display[name] = prev_d and is_display
 
     def disqualify(self, name: str):
@@ -327,8 +334,13 @@ class _FuncFacts:
         # dict-key-derived) `name` sidesteps whatever `.items()`-pair
         # unpacking loses.
         for name in self.assign_count:
-            count = self.assign_count.get(name)
-            if (count == 1 and self.all_ctor_assigns.get(name)
+            # Presence test + indexed read, not `.get(name)`: a `.get` with no
+            # default of a value the compiler cannot type is the BOXED read
+            # (`count == 1` compared a box with the int 1, so no local was ever
+            # a candidate and no list was stack-allocated or freed).
+            count: int = self.assign_count[name]
+            if (count == 1 and name in self.all_ctor_assigns
+                    and self.all_ctor_assigns[name]
                     and name not in self.disqualified):
                 out.add(name)
         return out
@@ -343,7 +355,8 @@ class _FuncFacts:
         Keys only, for the same self-hosting reason as `candidates()`."""
         out = set()
         for name in self.assign_count:
-            if self.all_ctor_assigns.get(name) and name not in self.disqualified:
+            if (name in self.all_ctor_assigns and self.all_ctor_assigns[name]
+                    and name not in self.disqualified):
                 out.add(name)
         return out
 
@@ -1071,7 +1084,7 @@ def _dfa_walk_block(body, assigned: set, terminals: list) -> None:
         _dfa_stmt(stmt, assigned, terminals)
 
 
-def _definitely_assigned(fn, candidates: set) -> set:
+def _definitely_assigned(fn: N.FunctionDef, candidates: set) -> set:
     """Of `candidates` (names already cleared by the escape analysis
     above), returns only those provably assigned on EVERY path from
     function entry to EVERY point control can leave the function — see
@@ -1098,7 +1111,7 @@ def _definitely_assigned(fn, candidates: set) -> set:
     return candidates & _ia_term
 
 
-def _scan_function(fn, funcs, methods, structs=None) -> _FuncFacts:
+def _scan_function(fn: N.FunctionDef, funcs, methods, structs=None) -> _FuncFacts:
     """The whole-function escape scan shared by `analyze_function` and
     `analyze_scoped_locals`: every fact the module docstring's rules 1-8
     need, accumulated over `fn`'s body. `facts` is explicitly typed
@@ -1118,7 +1131,7 @@ def _scan_function(fn, funcs, methods, structs=None) -> _FuncFacts:
     return facts
 
 
-def analyze_function(fn, funcs, methods, structs=None) -> set:
+def analyze_function(fn: N.FunctionDef, funcs, methods, structs=None) -> set:
     """Returns the set of local names in `fn` that are destroy candidates
     per the module docstring's rules 1-8, AND are definitely assigned on
     every path to every point the function can exit (see
@@ -1219,7 +1232,7 @@ def _decl_name(stmt) -> str:
     return ''
 
 
-def analyze_scoped_locals(fn, funcs, methods, whole: set, structs=None) -> set:
+def analyze_scoped_locals(fn: N.FunctionDef, funcs, methods, whole: set, structs=None) -> set:
     """Block-scoped twin of `analyze_function`: the locals that are a
     destroy candidate for THEIR LOOP BODY rather than for the whole
     function, i.e. exactly the ones `analyze_function` cannot credit
@@ -1288,7 +1301,7 @@ def analyze_scoped_locals(fn, funcs, methods, whole: set, structs=None) -> set:
         # the name must occur nowhere else: nested same-name declarations
         # count twice (inside the outer region and their own), so they fail
         # the equality below and stay unfreed rather than shadow each other.
-        if ok and decls >= 1 and decls == facts.assign_count.get(nm) \
+        if ok and decls >= 1 and nm in facts.assign_count and decls == facts.assign_count[nm] \
                 and _count_name(fn.body, nm) == region:
             out.add(nm)
     return out
@@ -1381,7 +1394,7 @@ def _nested_capture_names(node) -> tuple:
     return complete, names
 
 
-def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
+def analyze_returns_fresh(fn: N.FunctionDef, funcs, methods, structs=None) -> bool:
     """True iff EVERY call to `fn` provably returns a brand-new container that
     nothing else references, so the caller may own it (and free it).
 
@@ -1438,7 +1451,8 @@ def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
             nm = _as_str(v.name)
         if nm in facts.disqualified:
             return False
-        if facts.assign_count.get(nm) != 1 or not facts.all_display.get(nm):
+        if (nm not in facts.assign_count or facts.assign_count[nm] != 1
+                or nm not in facts.all_display or not facts.all_display[nm]):
             return False
         names.add(nm)
     if names:
@@ -1986,7 +2000,7 @@ def _walk_names(node):
             stack.append(getattr(n, f.name))
 
 
-def returns_fresh_closure(fn) -> bool:
+def returns_fresh_closure(fn: N.FunctionDef) -> bool:
     """True iff EVERY call to `fn` provably returns a brand-new CAPTURING
     closure that nothing else can reference, so the CALLER may own the value —
     and, with it, the environment and the `{mut}` boxes it holds — freeing all

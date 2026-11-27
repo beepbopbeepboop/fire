@@ -243,8 +243,18 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     # Module aliases are tracked in `_module_alias_names`, NOT in `var_types`,
     # so this cannot shadow a real one.
     try:
-        if module_name in getattr(gen, 'var_types', {}):
-            return False
+        # A function-LOCAL `import X as Y` declares `Y` as the int64_t module
+        # marker in `var_types` (`_gen_stmt_ImportStmt`), so that entry alone is
+        # not a shadowing local: the marker of a registered alias is the module
+        # itself. Without this every `Y.f(...)` in such a function was stubbed
+        # (`int64_t.f() stubbed`, e.g. `_pv_ein.collect_param_value_obs`: the
+        # whole stage-5c value-class pass never ran in the compiled compiler).
+        _vts = getattr(gen, 'var_types', {})
+        if module_name in _vts:
+            _is_marker = (module_name in getattr(gen, '_module_alias_names', ())
+                          and _vts[module_name] == 'int64_t')
+            if not _is_marker:
+                return False
         if module_name in (getattr(gen, '_cur_func_params', None) or ()):
             return False
     except Exception:
