@@ -13186,8 +13186,10 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
               f"(by intro pc hmem; simp only [List.mem_cons, List.not_mem_nil, or_false] at hmem; "
               f"rcases hmem with h | h <;> (rw [h]; native_decide))")
             if ctx.get("tree"):
-                _ih = ctx["tree_ih"][_ci]
-                _subarg = ctx["tree_subargs"][_ci]
+                tree_ih = ctx.get("tree_ih", ["ih1", "ih2"])
+                tree_subargs = ctx.get("tree_subargs", ["arg - 1", "arg - 2"])
+                _ih = tree_ih[_ci % len(tree_ih)]
+                _subarg = tree_subargs[_ci % len(tree_subargs)]
             else:
                 _ih, _subarg = "ih", "arg - 1"
             A(f"{IND}have hx0sub_{n} : ({call_state}).x0 = {_subarg} := by")
