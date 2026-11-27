@@ -22,11 +22,6 @@ class Hole:
 
 
 SCAFFOLD_HOLES: dict[str, Hole] = {
-    "scaffold_canary": Hole(
-        "step-01a",
-        "census positive control; delete when the first real scaffold lands",
-        "control",
-    ),
 }
 
 

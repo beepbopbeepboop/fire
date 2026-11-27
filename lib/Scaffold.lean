@@ -28,6 +28,3 @@ proofs or other library theorems.
 -/
 
 set_option autoImplicit false
-
-/-- Positive control for the census; delete when the first real scaffold lands. -/
-theorem scaffold_canary : True := by sorry

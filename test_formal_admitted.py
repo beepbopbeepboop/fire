@@ -1305,7 +1305,7 @@ LIBRARY_TRUST = {
     # real `#print axioms` run over all 55 declarations.
     "Extern": (0, 0, 1, 1),
     "Specs": (0, 0, 0, 0),
-    "Scaffold": (0, 1, 0, 0),
+    "Scaffold": (0, 0, 0, 0),
 }
 
 #: What the CLOSURE census measured, per module: how many theorems were asked,
@@ -1381,7 +1381,7 @@ AXIOM_CLOSURE = {
     "ProofLibSteps7": (6, 6, 0, 0, 0, 0),
     "ProofLibSteps8": (6, 5, 0, 0, 1, 0),
     "Refine": (32, 0, 32, 0, 0, 0),
-    "Scaffold": (1, 0, 1, 0, 0, 0),
+    "Scaffold": (0, 0, 0, 0, 0, 0),
     "Specs": (67, 0, 67, 0, 0, 0),
     "X86": (175, 2, 172, 0, 1, 0),
     "work": (20, 0, 18, 0, 2, 0),
