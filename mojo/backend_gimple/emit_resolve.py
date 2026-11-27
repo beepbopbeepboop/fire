@@ -2674,7 +2674,9 @@ def _binop_operands(gen, ctype: str, a: str, op: str, b: str) -> list:
 def _binop_text(gen, ctype: str, a: str, op: str, b: str) -> str:
     """`a op b` as text; see `_binop_operands`."""
     parts: list = _binop_operands(gen, ctype, a, op, b)
-    return parts[0] + ' ' + op + ' ' + parts[1]
+    # `_as_str`: a list slot is a boxed word on the self-hosted path, and `+` on it
+    # concatenated nothing (every binary operation came out as `_t1 = ;`).
+    return _as_str(parts[0]) + ' ' + op + ' ' + _as_str(parts[1])
 
 
 def _binop(gen, ctype: str, a: str, op: str, b: str) -> str:
@@ -2696,7 +2698,7 @@ def _binop_into(gen, dst: str, a: str, op: str, b: str) -> None:
     dt = gen.var_types.get(dst)
     dts: str = '' if dt is None else _as_str(dt)
     parts: list = _binop_operands(gen, dts, a, op, b)
-    build.binop_into(gen, dst, parts[0], op, parts[1])
+    build.binop_into(gen, dst, _as_str(parts[0]), op, _as_str(parts[1]))
 
 
 def _loop_head(gen, idx: str, n: str, bb_cond: str, bb_body: str,

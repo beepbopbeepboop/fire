@@ -3370,6 +3370,17 @@ def _lmc_name_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, st
         # `_register_sibling_module_member`'s own docstring for why
         # `_note_own_func_home` alone is not enough.
         _register_sibling_module_member(gen, module_name, method_name)
+        # A LOCAL of the member's own name (`label` the parameter beside
+        # `build.label(gen, label, ...)`) would answer the bare name: the
+        # re-dispatched call became a call THROUGH the local, a function-pointer
+        # call on a string (`mojo_fnptr_call_3(label, gen, label, hint)`), and
+        # every compiled `while`/`for`/`if` jumped to a heap address. The
+        # module-qualified C symbol names the member without the bare name.
+        _sib_callee = method_name
+        if method_name in gen.var_types:
+            _sib_csym = register_module_member_value(gen, module_name, method_name)
+            if _sib_csym is not None:
+                _sib_callee = _as_str(_sib_csym[0])
         # Re-dispatch as a BARE-name call: the alias qualifier is a
         # Python-import artifact only. `_lower_call` owns struct-ctor
         # allocation, default-argument padding, keyword ordering and
@@ -3380,7 +3391,7 @@ def _lmc_name_receiver(gen, node: gimple_ctypes.CallExpr, func) -> tuple[str, st
         # that would otherwise look like a function).
         _bare_node = gimple_ctypes.CallExpr(
             func=gimple_ctypes.IdentExpr(
-                name=method_name, line=getattr(node, 'line', 0)),
+                name=_sib_callee, line=getattr(node, 'line', 0)),
             args=list(node.args),
             kwargs=list(getattr(node, 'kwargs', None) or []))
         return gen._lower_call(_bare_node)

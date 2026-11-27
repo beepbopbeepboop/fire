@@ -391,7 +391,10 @@ def _lower_StringLiteral(gen, node):
 
     # For f-strings with expressions: build a concatenation of all parts
     # Lower each expression part and concatenate via mojo_str_cat
-    acc_val: str | None = None
+    # '' = no part yet (a value temp is never empty). A `str | None` held the
+    # first part as an unknown word on the self-hosted path, so the `in` tests
+    # below hashed the pointer, never found it, and no accumulator was freed.
+    acc_val: str = ''
     for kind, text, _spec, _conv in parts:
         if kind == 'lit':
             if not text:
@@ -478,7 +481,7 @@ def _lower_StringLiteral(gen, node):
                       file=gimple_ctypes.sys.stderr)
                 esc = gimple_ctypes._c_escape('{' + text + '}')
                 part_val = gen._new_val('char *', f'{gen._intern_string(esc)}')
-        if acc_val is None:
+        if acc_val == '':
             acc_val = part_val
         else:
             # The running accumulator is a temp this loop built (when it is
@@ -499,9 +502,9 @@ def _lower_StringLiteral(gen, node):
             # question is asked through the registry rather than by node
             # shape.
             acc_val = gen._emit_str_cat(
-                acc_val, part_val, acc_val in gen._fresh_str_tmps,
-                part_val in gen._fresh_vals)
-    if acc_val is None:
+                acc_val, part_val, _as_str(acc_val) in gen._fresh_str_tmps,
+                _as_str(part_val) in gen._fresh_vals)
+    if acc_val == '':
         # Only reachable for an f-string whose parts are all empty
         # literals (e.g. f"{''}") — emit an empty string, not the old
         # "<formatted>" placeholder that leaked into program output.
@@ -4541,11 +4544,12 @@ def _kind_arith_operand(gen, ctype: str, val: str, op: str) -> bool:
 
 
 def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
-                         right_node, rt: str, rv: str):
+                         right_node, rt: str, rv: str) -> str:
     """`lhs OP rhs` where a TAGGED generator word (`_tagged_word_vals`) or a
     READ-side box (`may_be_box`, stage 5b's carried `Box` kind) is an operand
-    beside an INTEGER, and OP is arithmetic. Returns the result temp, or None
-    when the shape does not apply.
+    beside an INTEGER, and OP is arithmetic. Returns the result temp, or the empty
+    string when the shape does not apply (a plain string test, which the
+    self-hosted path gets right; see `_tagged_cmp_select`).
 
     The answer is the integer one or a double box holding the double answer,
     and which one is a run-time fact: the box's kind. That is the same select
@@ -4556,15 +4560,15 @@ def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
     double operand is not handled here: its answer is a double whatever the
     box holds, and the tail's double arm already gives that."""
     if op not in ginf._FLOAT_PARAM_OPS:
-        return None
+        return ''
     _tag_l = gen._word_is_tagged(lv)
     _tag_r = gen._word_is_tagged(rv)
     _box_l = _tag_l or _kind_arith_operand(gen, lt, lv, op)
     _box_r = _tag_r or _kind_arith_operand(gen, rt, rv, op)
     if not (_box_l or _box_r):
-        return None
+        return ''
     if not gimple_ctypes.TypeLattice.is_int_word(lt) or not gimple_ctypes.TypeLattice.is_int_word(rt):
-        return None
+        return ''
     # A tagged operand may be the shared None box (`x = yield` after
     # `next(it)`), which has no numeric kind. Unwrapping it would compute with
     # its word (0), so each tagged operand is checked first and a None box
@@ -4603,18 +4607,21 @@ def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
 
 
 def _tagged_cmp_select(gen, op: str, left_node, lt: str, lv: str,
-                       right_node, rt: str, rv: str):
+                       right_node, rt: str, rv: str) -> tuple[str, str]:
     """`lhs OP rhs` where a TAGGED generator word is beside an INTEGER
     and OP is a comparison (`<`, `<=`, `>`, `>=`). Returns the result
-    temp (`_Bool`), or None when the shape does not apply."""
+    temp (`_Bool`), or `('', '')` when the shape does not apply -- never `None`: a
+    tuple-returning function's `None` is not a value the self-hosted path can
+    test, and `is not None` took its garbage pair for an answer, so every
+    arithmetic operator after it lowered to nothing."""
     if op not in ('<', '<=', '>', '>='):
-        return None
+        return '', ''
     _tag_l = gen._word_is_tagged(lv)
     _tag_r = gen._word_is_tagged(rv)
     if not (_tag_l or _tag_r):
-        return None
+        return '', ''
     if not gimple_ctypes.TypeLattice.is_int_word(lt) or not gimple_ctypes.TypeLattice.is_int_word(rt):
-        return None
+        return '', ''
     if _tag_l:
         lv = _none_arith_guard(gen, op, lv, 'int', 1)
     if _tag_r:
@@ -5161,13 +5168,13 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # A tagged word beside an integer under arithmetic: the run-time select
     # by the box's kind (see `_tagged_arith_select`).
     _tsel = _tagged_arith_select(gen, op, left_node, lt, lv, right_node, rt, rv)
-    if _tsel is not None:
+    if _tsel != '':
         return 'int64_t', _tsel
     # A tagged word beside an integer under comparison: the comparison
     # counterpart to `_tagged_arith_select` (select by box kind).
-    _tcmp = _tagged_cmp_select(gen, op, left_node, lt, lv, right_node, rt, rv)
-    if _tcmp is not None:
-        return _tcmp
+    _tcmp_t, _tcmp_v = _tagged_cmp_select(gen, op, left_node, lt, lv, right_node, rt, rv)
+    if _tcmp_t != '':
+        return _tcmp_t, _tcmp_v
     # A tagged word beside a DOUBLE under arithmetic (`x + 1.5`, `x / 2.0`):
     # the box is unwrapped to a double below, and a None box would unwrap to
     # 0.0. It is checked first, as in `_tagged_arith_select`, which answers only
@@ -6781,7 +6788,7 @@ def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     if ginf._float_param_arith_applies(gen, '//', node.left, lt, node.right, rt):
         return 'int64_t', ginf._float_param_arith(gen, '//', node.left, lt, lv, node.right, rt, rv)
     _tsel = _tagged_arith_select(gen, '//', node.left, lt, lv, node.right, rt, rv)
-    if _tsel is not None:
+    if _tsel != '':
         return 'int64_t', _tsel
     # Boxed-PythonObject floor division (2026-10-21 part 4, further,
     # test_python_object): `a // b` on box locals answers through the

@@ -56,7 +56,8 @@ import mojo.backend_gimple.emit_calls as ggc
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.calls_shared import *  # noqa: F401,F403
 from mojo.middle.types import _SCALAR_INT_TYPES, _SCALAR_FLOAT_TYPES  # underscore: `import *` won't carry them
-from mojo.middle.funcs_shared import _find_symbol_home_module
+from mojo.middle.funcs_shared import _find_symbol_home_module, param_default_pairs
+from fire_compiler import _as_dict
 from mojo.middle.calls_shared import (
     _is_pointer_ctype, _null_default_pair,
     _as_str, _build_call_args_for_candidate, _callable_default_generator,
@@ -11812,6 +11813,44 @@ def _lnc_abs(gen, arg_pairs: list) -> tuple[str, str] | None:
     return None
 
 
+
+def _imported_function_param_defaults(gen, bare_name: str) -> list:
+    """`[(name, default_node), ...]` of the free function `bare_name` as the
+    module this compile pinned for it defines it; `[]` for no pin, an ambiguous
+    one, a function with no defaults, or an overload set.
+
+    `_func_param_defaults` is keyed by the C symbol (`<qualifier>_<name><hash>`)
+    and filled while the definer compiles, so a call site whose hash was taken
+    earlier, or whose module compiled first in an import cycle, found nothing
+    and padded `0`/NULL: the self-hosted compiler lost `indent: int = 2` of
+    `build.assign(...)` and wrote every statement at column 0. The pin
+    (`_note_own_func_home`) is made by the call's own `<alias>.<fn>` or
+    `from M import fn` resolution, before the call lowers."""
+    if bare_name in gen._local_top_level_func_names:
+        # A def of this module's own answers the bare name (its defaults are
+        # registered by its own pass); the pin below may name a homonym.
+        return []
+    _ref = None
+    _stack = gen._import_scope_stack
+    for _si in range(len(_stack) - 1, -1, -1):
+        _frame = _as_dict(_stack[_si])
+        if bare_name in _frame:
+            _ref = _as_str(_frame[bare_name])
+            break
+    if _ref is None:
+        _own = _as_dict(gen._own_imported_func_home)
+        if bare_name in _own:
+            _ref = _as_str(_own[bare_name])
+    if not _ref or _ref == gimple_codegen._AMBIGUOUS_FUNC_HOME:
+        return []
+    _stmts = gen._parsed_import(_ref)[2] or []
+    _defs = [s for s in _stmts
+             if isinstance(s, gimple_ctypes.FunctionDef) and _as_str(s.name) == bare_name]
+    if len(_defs) != 1:
+        return []
+    return param_default_pairs(getattr(_defs[0], 'param_defaults', None) or {})
+
+
 def _lnc_pad_args(gen, fname_raw: str, node: gimple_ctypes.CallExpr, _call_has_spread: bool, arg_pairs: list, expected_params: list, fname: str, kwarg_dict: dict) -> tuple[str, str] | None:
     """`f(...)` that supplies fewer positional arguments than the callee declares: pads each missing slot with the parameter's recorded default, or a typed NULL for a pointer parameter.
 
@@ -11820,6 +11859,8 @@ def _lnc_pad_args(gen, fname_raw: str, node: gimple_ctypes.CallExpr, _call_has_s
     # Free-function param defaults: `def greet(name: String = "world")`
     # called as `greet()` must pad with "world", not NULL/0.
     _dflts = gen._func_param_defaults.get(fname) or gen._func_param_defaults.get(fname_raw) or []
+    if not _dflts:
+        _dflts = _as_dict(gen._csym_defaults).get(fname) or _imported_function_param_defaults(gen, fname_raw)
     _dflt_by_pos = {pn: _dv for pn, _dv in _dflts}
     # `param_defaults` only holds entries for params THAT HAVE one,
     # starting at the first defaulted position — i.e. the last

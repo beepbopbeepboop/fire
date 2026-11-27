@@ -3404,6 +3404,11 @@ class GimpleGen:
         self._stores_without_presence: set[str] = set()
         # free-function C symbol -> its bare source name (`_func_csym` fills it)
         self._csym_bare: dict[str, str] = {}
+        # C symbol -> [(param, default node)] of an IMPORTED free function, recorded when a
+        # `<alias>.<fn>` call resolves it (`funcs_shared.module_member_function_csym`), so
+        # default padding does not wait on the symbol-keyed `_func_param_defaults` that
+        # the definer's own compile fills (import cycles, early hashes).
+        self._csym_defaults: dict = {}
         self._early_def_pts_used: dict[str, list] = {}
         # _pair_key(sanitized home-module qualifier, fn name) -> return ctype —
         # the RETURN-type twin of the store just added, and written for the same

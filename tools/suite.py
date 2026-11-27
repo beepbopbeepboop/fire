@@ -1962,6 +1962,15 @@ test('sys-maxsize-value',
      [PY, 'test_sys_maxsize_value.py'], mem='small',
      desc='`sys.maxsize` read as a value compiles (the self-hosted compiler '
           'died on startup in comptime.py\'s module-level _HOST_IS_32BIT)')
+test('tagged-select-no-none',
+     [PY, 'test_tagged_select_no_none.py'], mem='tiny',
+     desc='_tagged_cmp_select/_tagged_arith_select answer "does not apply" with a '
+          'value, not None (the self-hosted compiler lowered every `a + 1` to nothing)')
+test('imported-default-padding',
+     [PY, 'test_imported_default_padding.py'], mem='small',
+     desc='a call to an imported module\'s defaulted function pads with the '
+          'definer\'s own defaults in an import cycle (the self-hosted compiler '
+          'wrote every statement at column 0: build.assign lost indent=2)')
 test('importer-param-forwarder',
      [PY, 'test_importer_param_forwarder.py'], mem='small',
      desc='an importer compiled before its definer in an import cycle links: '
@@ -5222,7 +5231,8 @@ BUCKETS = {
               # it makes gcc reject, so the everyday gate has to see the next
               # one (bug doc deleted with the fix, 2026-11-21).
               'selfhost-struct-layout-map', 'selfhost-sig-types-declared',
-              'dotted-module-global-accessor', 'importer-param-forwarder',
+              'dotted-module-global-accessor', 'importer-param-forwarder', 'imported-default-padding',
+              'tagged-select-no-none',
               'sys-maxsize-value', 'uncompiled-marker-alias',
               'presence-helpers-annotated', 'runtime-function-not-prefix',
               'method-none-default-boxed', 'tagged-param-forwarded',

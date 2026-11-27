@@ -1284,6 +1284,9 @@ def module_member_function_csym(gen, module_name: str, member_name: str):
         suffix = _as_str(gen.overload_suffix_for(_pts))
         sym = (qualifier + '_' + base if qualifier else base) + suffix
     gen._csym_bare[_as_str(sym)] = _as_str(def_name)
+    _fd = param_default_pairs(getattr(fs, 'param_defaults', None) or {})
+    if len(_fd) > 0:
+        gen._csym_defaults[_as_str(sym)] = _fd
     return sym, definer, def_name, fs
 
 
