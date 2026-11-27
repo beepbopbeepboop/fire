@@ -3409,6 +3409,17 @@ class GimpleGen:
         # default padding does not wait on the symbol-keyed `_func_param_defaults` that
         # the definer's own compile fills (import cycles, early hashes).
         self._csym_defaults: dict = {}
+        # Parameter value-class facts (emit_infra.collect_param_value_facts, doc/GIR.md
+        # stage 5c). Declared here, typed: an attribute first assigned by a pass is
+        # not a field of the compiled `GimpleGen`, so the pass's `gen._pv_*` writes
+        # and the readers' `getattr(gen, '_pv_*', None)` never met and every
+        # `None` store into a mixed field stayed the bare word 0.
+        self._pv_structs: dict = {}
+        self._pv_param_names: dict = {}
+        self._pv_own_structs: set = set()
+        self._pv_mixed_cache: dict = {}
+        self._pv_local_structs: dict = {}
+        self._param_value_obs: dict = {}
         self._early_def_pts_used: dict[str, list] = {}
         # _pair_key(sanitized home-module qualifier, fn name) -> return ctype —
         # the RETURN-type twin of the store just added, and written for the same

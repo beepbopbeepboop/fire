@@ -4991,22 +4991,19 @@ def boxed_param_names(gen) -> set:
 
 def _self_field_stores(node, out: list) -> None:
     """Append `(field, value node)` for every `self.<field> = <value>` under
-    `node` (a statement, a list of statements, or a nested block)."""
-    if isinstance(node, (list, tuple)):
-        for item in node:
-            _self_field_stores(item, out)
-        return
-    if isinstance(node, gimple_ctypes.AssignStmt):
-        t = node.target
-        if isinstance(t, gimple_ctypes.MemberExpr) \
-                and isinstance(t.obj, gimple_ctypes.IdentExpr) \
-                and t.obj.name == 'self':
-            out.append((t.member, node.value))
-    if dataclasses.is_dataclass(node):
-        for f in dataclasses.fields(node):
-            v = getattr(node, f.name, None)
-            if isinstance(v, (list, tuple)) or dataclasses.is_dataclass(v):
-                _self_field_stores(v, out)
+    `node` (a statement, a list of statements, or a nested block).
+
+    One flat `_walk_ast`, not a recursion over `dataclasses.fields`: the compiled
+    compiler has no dataclass reflection, so there the recursion saw the
+    statement list and nothing under it, found no store, and every `None` field
+    store was the bare word 0."""
+    for n in gimple_exprtypes._walk_ast(node):
+        if isinstance(n, gimple_ctypes.AssignStmt):
+            t = n.target
+            if isinstance(t, gimple_ctypes.MemberExpr) \
+                    and isinstance(t.obj, gimple_ctypes.IdentExpr) \
+                    and t.obj.name == 'self':
+                out.append((t.member, n.value))
 
 
 # The value classes of doc/GIR.md stage 5c ("DECISION"): what a slot can hold
@@ -5035,10 +5032,13 @@ def param_value_class(gen, func_name, param_name) -> str:
     informative evidence, nothing changes). `func_name` is the callee key the
     call-site pass records under: the bare name for a free function,
     `<Struct>_<method>` for a method (a constructor is `<Struct>___init__`)."""
-    obs = getattr(gen, '_param_value_obs', None)
-    if not obs:
+    obs: dict = _as_dict(getattr(gen, '_param_value_obs', None) or {})
+    if len(obs) == 0:
         return 'unknown'
-    bits = obs.get(param_value_key(func_name, param_name), 0)
+    _pvk = param_value_key(func_name, param_name)
+    bits: int = 0
+    if _pvk in obs:
+        bits = _as_int(obs[_pvk])
     if bits == _PV_REFS:
         return 'refs'
     if bits == _PV_SCALAR:
@@ -5089,29 +5089,33 @@ def _pv_var_type(gen, caller_key, name) -> str:
 
 def _pv_bind_local_structs(node, structs: dict, out: dict) -> None:
     """Record `name -> '<Struct> *'` for every `name = Struct(...)` under
-    `node`; a name bound to two different structs is dropped (`''`)."""
-    if isinstance(node, (list, tuple)):
-        for item in node:
-            _pv_bind_local_structs(item, structs, out)
-        return
-    if isinstance(node, (gimple_ctypes.FunctionDef, gimple_ctypes.StructDef)):
-        return
-    if isinstance(node, gimple_ctypes.AssignStmt) \
-            and isinstance(node.target, gimple_ctypes.IdentExpr) \
-            and isinstance(node.value, gimple_ctypes.CallExpr) \
-            and isinstance(node.value.func, gimple_ctypes.IdentExpr) \
-            and _as_str(node.value.func.name) in structs:
-        nm = _as_str(node.target.name)
-        ty = _as_str(node.value.func.name) + ' *'
-        if nm in out and out[nm] != ty:
-            out[nm] = ''
-        else:
-            out[nm] = ty
-    if dataclasses.is_dataclass(node):
-        for f in dataclasses.fields(node):
-            v = getattr(node, f.name, None)
-            if isinstance(v, (list, tuple)) or dataclasses.is_dataclass(v):
-                _pv_bind_local_structs(v, structs, out)
+    `node`, not descending into a nested `def`/`class`; a name bound to two
+    different structs is dropped (`''`).
+
+    Flat `_walk_ast` plus a set of the nodes that sit inside a nested
+    definition, not a recursion over `dataclasses.fields`: the compiled compiler
+    has no dataclass reflection (see `_self_field_stores`)."""
+    nodes: list = gimple_exprtypes._walk_ast(node)
+    inside: set = set()
+    for n in nodes:
+        if isinstance(n, (gimple_ctypes.FunctionDef, gimple_ctypes.StructDef)):
+            for k in gimple_exprtypes._walk_ast(n):
+                if k is not n:
+                    inside.add(gimple_exprtypes._nid(k))
+    for n in nodes:
+        if gimple_exprtypes._nid(n) in inside:
+            continue
+        if isinstance(n, gimple_ctypes.AssignStmt) \
+                and isinstance(n.target, gimple_ctypes.IdentExpr) \
+                and isinstance(n.value, gimple_ctypes.CallExpr) \
+                and isinstance(n.value.func, gimple_ctypes.IdentExpr) \
+                and _as_str(n.value.func.name) in structs:
+            nm = _as_str(n.target.name)
+            ty = _as_str(n.value.func.name) + ' *'
+            if nm in out and out[nm] != ty:
+                out[nm] = ''
+            else:
+                out[nm] = ty
 
 
 def value_class_of(gen, node, caller_key, caller_struct, depth) -> str:
@@ -5374,8 +5378,11 @@ def collect_param_value_obs(gen, all_functions: list, all_structs: list,
         allnames[k] = set(pnames[k])
     gen._pv_structs = structs
     gen._pv_param_names = allnames
-    gen._pv_own_structs = set(_as_str(n) for n in (own_struct_names or []))
-    gen._pv_mixed_cache = None
+    _pv_own: set = set()
+    for n in (own_struct_names or []):
+        _pv_own.add(_as_str(n))
+    gen._pv_own_structs = _pv_own
+    gen._pv_mixed_cache = {}
     locs: dict = {}
     for entry in caller_bodies:
         one: dict = {}
@@ -5408,17 +5415,25 @@ def mixed_field_read(gen, struct_name, member) -> bool:
     own compile sees, so an imported struct (whose defining module made its
     own decision from its own call sites) is left as it was rather than read
     with a representation its stores may not use."""
-    own = getattr(gen, '_pv_own_structs', None)
-    if not own or _as_str(struct_name) not in own:
+    own: set = _as_set(getattr(gen, '_pv_own_structs', None) or set())
+    if len(own) == 0 or _as_str(struct_name) not in own:
         return False
     cache = getattr(gen, '_pv_mixed_cache', None)
     if cache is None:
         cache = {}
         gen._pv_mixed_cache = cache
     sn = _as_str(struct_name)
-    if sn not in cache:
-        cache[sn] = mixed_field_names((getattr(gen, '_pv_structs', None) or {})[sn], gen)
-    return _as_str(member) in cache[sn]
+    # One flat dict keyed `<struct>\x1f<field>` (plus the bare struct name as the
+    # "already computed" marker): a frozenset VALUE read back out of an untyped
+    # dict is a boxed word on the self-hosted path, so `member in cache[sn]` was
+    # never true and no `None` store was boxed (`self.s = None` stored the word 0).
+    _mc = _as_dict(cache)
+    if sn not in _mc:
+        _mc[sn] = 1
+        _names: list = _as_list(list(mixed_field_names(_as_dict(getattr(gen, '_pv_structs', None) or {})[sn], gen)))
+        for _mn in _names:
+            _mc[sn + '\x1f' + _as_str(_mn)] = 1
+    return (sn + '\x1f' + _as_str(member)) in _mc
 
 
 def mixed_field_names(struct, gen=None) -> frozenset:
@@ -5433,6 +5448,9 @@ def mixed_field_names(struct, gen=None) -> frozenset:
     a `refs` parameter) keeps the NULL word and is NOT mixed. A scalar literal
     or a `scalar` parameter beside the `None` store makes it mixed. A store of
     unproven kind (`unknown`) is silence and does not."""
+    # Per field a bitmask (1 = a `none` store, 2 = a `scalar` one), not a set of
+    # class names: a set held as a dict VALUE is a boxed word once compiled, and
+    # `'none' in ks` / `stores[f].add(...)` on it were not set operations.
     stores: dict = {}
     order: list = []
     sname = _as_str(getattr(struct, 'name', ''))
@@ -5443,13 +5461,18 @@ def mixed_field_names(struct, gen=None) -> frozenset:
         for i in range(len(found)):
             fname = _as_str(found[i][0])
             if fname not in stores:
-                stores[fname] = set()
+                stores[fname] = 0
                 order.append(fname)
-            stores[fname].add(value_class_of(gen, found[i][1], ckey, sname, 0))
+            _vc = _as_str(value_class_of(gen, found[i][1], ckey, sname, 0))
+            _bit = 0
+            if _vc == 'none':
+                _bit = 1
+            elif _vc == 'scalar':
+                _bit = 2
+            stores[fname] = _as_int(stores[fname]) | _bit
     out: list = []
     for fname in order:
-        ks = stores[fname]
-        if 'none' in ks and 'scalar' in ks:
+        if (_as_int(stores[fname]) & 3) == 3:
             out.append(fname)
     return frozenset(out)
 
