@@ -17043,10 +17043,17 @@ def gen_module_impl(self, stmts: list):
                 # table is authoritative — override this pass's per-instance
                 # inference so `_struct_method_signatures`, the method
                 # externs, the forward decl and the definition all agree.
-                _gg_sig = (self._selfhost_gimplegen_sigs or {}).get(
-                    f"GimpleGen_{m.name}") if s.name == 'GimpleGen' and not _oid else None
-                if _gg_sig is not None:
-                    _fz_ret, _fz_params, _ = _gg_sig
+                # An explicit presence test, not `.get(...) if ... else None`
+                # followed by `is not None`: on the self-hosted path the `None`
+                # arm and a `.get` miss are boxed words, `is not None` took them
+                # for a signature row, and the unpack below raised "object is not
+                # iterable" on the first program that defines a class.
+                _gg_sigs = _as_dict(self._selfhost_gimplegen_sigs or {})
+                _gg_key = f"GimpleGen_{_as_str(m.name)}"
+                if _as_str(s.name) == 'GimpleGen' and not _oid and _gg_key in _gg_sigs:
+                    _gg_row = _as_list(_gg_sigs[_gg_key])
+                    _fz_ret = _as_str(_gg_row[0])
+                    _fz_params = _as_list(_gg_row[1])
                     _ret_type = _fz_ret
                     _all_ctypes = list(_fz_params)
                     param_ctypes = _all_ctypes[1:] if _has_self_first else _all_ctypes

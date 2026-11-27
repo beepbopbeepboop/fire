@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from mojo.middle.types import TypeLattice, _LIBM_FN_RETVALS,_C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES, _SIGNED_INT_TRUE_DIV_TYPES
 import dataclasses
-from fire_compiler import is_fstring_literal, for_target_names, AugAssignStmt, MultiAssignStmt, WalrusExpr, VarDecl, WithStmt, TryStmt, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CompareChain, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
+from fire_compiler import is_fstring_literal, for_target_names, AugAssignStmt, MultiAssignStmt, WalrusExpr, VarDecl, WithStmt, TryStmt, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CompareChain, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _as_list, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 # Whether a node's CLASS is a dataclass, cached beside the field names for
 # the same reason and on the same key. `dataclasses.is_dataclass` is a pure
@@ -83,6 +83,20 @@ _WALK_AST_PARENTS: dict = {}
 _WALK_INDEX_MEMO: dict = {}
 
 
+def _nid(node) -> int:
+    """The memo key of `node`: `id(node) * 2 + 1`.
+
+    Not the bare address. The self-hosted runtime classifies a raw integer dict
+    key by looking its VALUE up among the live containers (`mojo_dict_key_for`),
+    so `memo[id(some_list)]` raised "unhashable type: 'list'" -- the integer
+    equalled a registered list's address -- and the compiled compiler died in
+    `_walk_ast_invalidate` on the first struct it registered. An address is
+    16-aligned, so an odd number can never equal one; doubling keeps distinct
+    nodes distinct."""
+    return id(node) * 2 + 1
+
+
+
 def _walk_ast_invalidate(node) -> None:
     """Drop every memo entry that could contain `node`'s pre-mutation walk.
 
@@ -104,10 +118,10 @@ def _walk_ast_invalidate(node) -> None:
 
     Cycles are possible in a walked graph (the walk itself is depth-capped,
     so it survives one), hence the `seen` set rather than a plain loop."""
-    stack = [id(node)]
-    seen = set()
+    stack: list = [_nid(node)]
+    seen: set = set()
     while stack:
-        k = stack.pop()
+        k: int = stack.pop()
         if k in seen:
             continue
         seen.add(k)
@@ -115,11 +129,10 @@ def _walk_ast_invalidate(node) -> None:
             del _WALK_AST_MEMO[k]
         if k in _WALK_INDEX_MEMO:
             del _WALK_INDEX_MEMO[k]
-        par = _WALK_AST_PARENTS.get(k)
-        if par is not None:
-            for p in par:
-                if p not in seen:
-                    stack.append(p)
+        par: list = _as_list(_WALK_AST_PARENTS.get(k, []))
+        for p in par:
+            if p not in seen:
+                stack.append(p)
 
 
 def _walk_ast_reset() -> None:
@@ -176,9 +189,9 @@ def _walk_ast_into(node, out, _depth=0, _from=0):
     if node is None:
         return
     if _from:
-        _nk = id(node)
-        _par = _WALK_AST_PARENTS.get(_nk)
-        if _par is None:
+        _nk = _nid(node)
+        _par: list = _as_list(_WALK_AST_PARENTS.get(_nk, []))
+        if len(_par) == 0:
             _WALK_AST_PARENTS[_nk] = [_from]
         elif _par[-1] != _from:
             # One dict write per descended node, which the memo is what makes
@@ -188,11 +201,11 @@ def _walk_ast_into(node, out, _depth=0, _from=0):
     if _depth > _WALK_AST_MAX_DEPTH:
         return
     if isinstance(node, list) or isinstance(node, tuple):
-        _lk = id(node)
+        _lk = _nid(node)
         for item in node:
             _walk_ast_into(item, out, _depth + 1, _lk)
         return
-    _self_id = id(node)
+    _self_id = _nid(node)
     out.append(node)
     if isinstance(node, type):
         return
@@ -263,10 +276,10 @@ def _walk_ast(node):
 
     A one-node result is not memoized: it is a leaf, so there is nothing to
     reuse, and caching it would pin every distinct scalar ever walked."""
-    key = id(node)
-    hit = _WALK_AST_MEMO.get(key)
-    if hit is not None:
-        return hit[1]
+    key = _nid(node)
+    hit: list = _as_list(_WALK_AST_MEMO.get(key, []))
+    if len(hit) == 2:
+        return _as_list(hit[1])
     out = []
     _walk_ast_into(node, out)
     if len(out) > 1:
@@ -305,9 +318,9 @@ def _walk_derived_index(stmts: list, build) -> object:
     call that produces the answer — the memo entry is written AFTER `build`
     returns, and a write-site invalidation can only find it through edges the
     walk already recorded."""
-    key = id(stmts)
-    hit = _WALK_INDEX_MEMO.get(key)
-    if hit is not None:
+    key = _nid(stmts)
+    hit: list = _as_list(_WALK_INDEX_MEMO.get(key, []))
+    if len(hit) == 2:
         return hit[1]
     out = build(stmts)
     _WALK_INDEX_MEMO[key] = (stmts, out)

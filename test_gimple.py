@@ -12592,7 +12592,7 @@ print("%r" % p)
             # A freed node's id could otherwise be handed to a different node
             # and the memo would answer with the first one's nodes.
             sd = stmts[0]
-            entry = ET._WALK_AST_MEMO.get(id(sd))
+            entry = ET._WALK_AST_MEMO.get(ET._nid(sd))
             if entry is None or entry[0] is not sd:
                 err = 'the memo entry does not hold the node it is keyed on'
             # ... and a mutation costs both the node and its container their
@@ -12704,7 +12704,7 @@ print("%r" % p)
                 # `getattr`: before the fix the memo did not exist, and the
                 # assertion above is the one that fails then; the entry shape
                 # is checked only where the memo is.
-                entry = getattr(ET, '_WALK_INDEX_MEMO', {}).get(id(stmts))
+                entry = getattr(ET, '_WALK_INDEX_MEMO', {}).get(ET._nid(stmts))
                 if entry is None or entry[0] is not stmts:
                     err = 'the memo entry does not hold the list it is keyed on'
             if not err:
@@ -12737,7 +12737,7 @@ print("%r" % p)
                     err = 'the mutation leaked into the pre-mutation census'
             if not err:
                 ET._walk_ast_reset()
-                if id(stmts) in ET._WALK_INDEX_MEMO:
+                if ET._nid(stmts) in ET._WALK_INDEX_MEMO:
                     err = '_walk_ast_reset left the index memo behind'
         except Exception as e:  # noqa: BLE001
             err = f'{type(e).__name__}: {e}'
@@ -12841,7 +12841,7 @@ print("%r" % p)
             # The reference walk, straight through `_walk_ast_into` with the
             # memo unreachable (it is only consulted by `_walk_ast`).
             real_into(node, out)
-            if id(node) in ET._WALK_AST_MEMO:
+            if ET._nid(node) in ET._WALK_AST_MEMO:
                 state["hits"] += 1
                 cached = real_walk(node)
                 if cached is not out and state["bad"] is None:

@@ -38,7 +38,7 @@ import mlir
 # re-export is invisible to the self-hosted call lowering while this module is
 # inside the compiler's own import cycle, and the call became a weak
 # "unavailable in compiled mode" stub returning 0.
-from fire_compiler import for_target_is_tuple, for_target_single_name
+from fire_compiler import for_target_is_tuple, for_target_single_name, _as_dict
 import mojo.middle.types as gimple_ctypes
 import mojo.ir.build as build
 import mojo.middle.solvers as gimple_solvers
@@ -1761,7 +1761,10 @@ def _lme_struct_field(gen, node, field_map, op: str, ov, struct_name: str) -> tu
     """`x.field` where `x` is a struct instance and the field is in its map: loads the field through its pointer (guarded by the instance's presence bit for a minted field) and carries the field's element and nested-container kinds onto the temp.
 
     One arm of `_lower_MemberExpr`, which tests the condition and calls this."""
-    field_type = field_map[node.member]
+    # Typed reads: `field_map[node.member]` on the untyped parameter was an INDEX
+    # into a list on the self-hosted path (`mojo_list_get_int_checked` on a dict:
+    # IndexError on the first `obj.field` read of any compiled program).
+    field_type = _as_str(_as_dict(field_map)[_as_str(node.member)])
     # A minted field (StructDef.presence_fields) the instance never
     # received is an AttributeError on a direct read, not its zero
     # storage: guard the load on the instance's presence bit.
