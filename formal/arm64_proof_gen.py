@@ -15334,9 +15334,9 @@ def _gen_dec_while_block(fname: str, param: str, cond_op: str = "GT") -> str:
     _op = {"GT": ">", "NE": "!=", "GE": ">="}[cond_op]
     _rhs = "1" if cond_op == "GE" else "0"
     cond = f'MojoExpr.binop "{_op}" (MojoExpr.var "{param}") (MojoExpr.int {_rhs})'
-    _PRED = {"GT": "m < 9223372036854775808 ∧ 0 < UInt64.ofNat m",
-             "NE": "m < 9223372036854775808 ∧ UInt64.ofNat m \u2260 0",
-             "GE": "m < 9223372036854775808 ∧ 1 \u2264 UInt64.ofNat m"}[cond_op]
+    _PRED = {"GT": "m % 18446744073709551616 < 9223372036854775808 ∧ 0 < UInt64.ofNat m",
+             "NE": "m % 18446744073709551616 < 9223372036854775808 ∧ UInt64.ofNat m \u2260 0",
+             "GE": "m % 18446744073709551616 < 9223372036854775808 ∧ 1 \u2264 UInt64.ofNat m"}[cond_op]
     _HPRED = {
         "NE": "exact Iff.rfl",
         "GT": ("rw [UInt64.lt_iff_toNat_lt]\n"
@@ -15389,7 +15389,10 @@ theorem cond_val (m : Nat) :
       (envOf m) \u2260 0) \u2194 (m % @S@ \u2260 0 \u2227 m % @S@ < 9223372036854775808) := by
   have hv : evalExpr handler noCall2 (@COND@)
       (envOf m) = if @PRED@ then 1 else 0 := by
-    sorry
+    simp [evalExpr, envOf, sKey, MojoExpr, UInt64.ofNat, UInt64.ofNat_toNat,
+          Nat.mod_eq_of_lt]
+    <;>
+    aesop
   have ht : (UInt64.ofNat m).toNat = m % @S@ := by simp
   constructor
   \u00b7 intro hne
