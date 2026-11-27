@@ -9489,6 +9489,19 @@ def _gmp_selfhost_ast_layouts(self, _is_selfhost_file: bool) -> None:
         # fire_compiler_Parser___init__, producing undefined-symbol link
         # errors. See _struct_method_qualifier's three-tier lookup.
         self._imported_struct_home['Parser'] = 'fire_compiler'
+        # ModuleLoader is defined in module_loader.py, whose own compile emits
+        # `module_loader_ModuleLoader_<method>`. build_stdlib_dylib.py imports
+        # it from there and calls/forward-declares its methods, but the
+        # whole-closure compile never records the home: `_register_imported_
+        # structs` is dylib-only (`do_imports` returns early), and the
+        # `_publish_imported_class` fallback only fires when it can recover a
+        # path from the import ref. Measured symptom (fire1 link, 2026-11-27):
+        # `_ModuleLoader_load_module`, `_ModuleLoader__mojo_type_to_c`, ... all
+        # undefined; the declarations and `_mojo_getattr_ModuleLoader` used the
+        # BARE name while the only definitions were `module_loader_`-prefixed.
+        # Same class of fix as Parser immediately above — this is the
+        # compiler's own closure, so the home is a stable repo-internal fact.
+        self._imported_struct_home['ModuleLoader'] = 'module_loader'
 
         self.func_param_types['Scope_define'] = ['Scope *', 'char *', 'int']
         self.func_param_types['Scope_get']    = ['Scope *', 'char *']
