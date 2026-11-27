@@ -1084,7 +1084,7 @@ def _dfa_walk_block(body, assigned: set, terminals: list) -> None:
         _dfa_stmt(stmt, assigned, terminals)
 
 
-def _definitely_assigned(fn, candidates: set) -> set:
+def _definitely_assigned(fn: N.FunctionDef, candidates: set) -> set:
     """Of `candidates` (names already cleared by the escape analysis
     above), returns only those provably assigned on EVERY path from
     function entry to EVERY point control can leave the function — see
@@ -1111,7 +1111,7 @@ def _definitely_assigned(fn, candidates: set) -> set:
     return candidates & _ia_term
 
 
-def _scan_function(fn, funcs, methods, structs=None) -> _FuncFacts:
+def _scan_function(fn: N.FunctionDef, funcs, methods, structs=None) -> _FuncFacts:
     """The whole-function escape scan shared by `analyze_function` and
     `analyze_scoped_locals`: every fact the module docstring's rules 1-8
     need, accumulated over `fn`'s body. `facts` is explicitly typed
@@ -1131,7 +1131,7 @@ def _scan_function(fn, funcs, methods, structs=None) -> _FuncFacts:
     return facts
 
 
-def analyze_function(fn, funcs, methods, structs=None) -> set:
+def analyze_function(fn: N.FunctionDef, funcs, methods, structs=None) -> set:
     """Returns the set of local names in `fn` that are destroy candidates
     per the module docstring's rules 1-8, AND are definitely assigned on
     every path to every point the function can exit (see
@@ -1232,7 +1232,7 @@ def _decl_name(stmt) -> str:
     return ''
 
 
-def analyze_scoped_locals(fn, funcs, methods, whole: set, structs=None) -> set:
+def analyze_scoped_locals(fn: N.FunctionDef, funcs, methods, whole: set, structs=None) -> set:
     """Block-scoped twin of `analyze_function`: the locals that are a
     destroy candidate for THEIR LOOP BODY rather than for the whole
     function, i.e. exactly the ones `analyze_function` cannot credit
@@ -1394,7 +1394,7 @@ def _nested_capture_names(node) -> tuple:
     return complete, names
 
 
-def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
+def analyze_returns_fresh(fn: N.FunctionDef, funcs, methods, structs=None) -> bool:
     """True iff EVERY call to `fn` provably returns a brand-new container that
     nothing else references, so the caller may own it (and free it).
 
@@ -2000,7 +2000,7 @@ def _walk_names(node):
             stack.append(getattr(n, f.name))
 
 
-def returns_fresh_closure(fn) -> bool:
+def returns_fresh_closure(fn: N.FunctionDef) -> bool:
     """True iff EVERY call to `fn` provably returns a brand-new CAPTURING
     closure that nothing else can reference, so the CALLER may own the value —
     and, with it, the environment and the `{mut}` boxes it holds — freeing all
