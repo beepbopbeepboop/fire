@@ -38,7 +38,7 @@ import mojo.backend_gimple.device_glue as _gmi_glue
 # re-export is invisible to the self-hosted call lowering while this module is
 # inside the compiler's own import cycle, and the call became a weak
 # "unavailable in compiled mode" stub returning 0.
-from fire_compiler import for_target_is_tuple, for_target_single_name, for_target_names, target_slots, _as_list
+from fire_compiler import for_target_is_tuple, for_target_single_name, for_target_names, target_slots, _as_list, _as_dict
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
@@ -9218,11 +9218,16 @@ def _is_may_hold_float_param(gen, node) -> bool:
     Only the name form is answered. Every call site that passes a `double` to
     such a slot passes a box (`_box_float_call_args`), so the slot's word is a
     box address or a plain integer, and `mojo_repr_boxed` tells them apart."""
-    _names = getattr(gen, '_int64_may_hold_float', {})
     if isinstance(node, IdentExpr):
+        # Key test first, then the set: `.get(_cf)` of a miss is the boxed None
+        # word on the self-hosted path, which is truthy and answered `True` for
+        # every parameter of every function (`a + 1` lowered to nothing).
+        _names = _as_dict(getattr(gen, '_int64_may_hold_float', {}))
         _cf = _as_str(getattr(gen, 'current_func_name', '') or '')
-        _in = _names.get(_cf)
-        return bool(_in) and _as_str(node.name) in _in
+        if _cf not in _names:
+            return False
+        _in = _as_set(_names[_cf])
+        return _as_str(node.name) in _in
     return False
 
 
@@ -9372,7 +9377,10 @@ def _box_float_call_args(gen, callee: str, arg_pairs: list) -> list:
     position `i` is parameter `_func_param_names[callee][i]`. Every other pair
     passes through unchanged, and a callee with no such slot returns the list
     as it came in."""
-    _names = getattr(gen, '_int64_may_hold_float', {}).get(_as_str(callee))
+    _all_names = _as_dict(getattr(gen, '_int64_may_hold_float', {}))
+    if _as_str(callee) not in _all_names:
+        return arg_pairs
+    _names = _as_set(_all_names[_as_str(callee)])
     if not _names:
         return arg_pairs
     _pnames = getattr(gen, '_func_param_names', {}).get(_as_str(callee)) or []

@@ -171,7 +171,7 @@ def main():
     if not any(n is call.func for n in recorded):
         fails.append("rewritten MemberExpr was never invalidated")
     for node in (call, call.func):
-        if id(node) in ET._WALK_AST_MEMO:
+        if ET._nid(node) in ET._WALK_AST_MEMO:
             fails.append("walk memo still holds an entry for %s after the "
                          "rewrite site invalidated it" % type(node).__name__)
     out_text = render_lines(out)

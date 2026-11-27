@@ -884,9 +884,16 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                     # use/call-site inference settled on, not the bare
                     # `int64_t` default: a closure capturing `p` stores it in
                     # its env under THIS type.
-                    _ip = (getattr(ctx, '_inferred_param_types', None) or {}).get(s.name)
-                    if _ip and _ip.get(pname):
-                        outer_scope[pname] = _ip[pname]
+                    # Presence tests and typed views, not `.get(...)` chains: a
+                    # miss is the boxed None word on the self-hosted path, and
+                    # `_ip[pname]` on an untyped value indexed a LIST with the
+                    # name (`mojo_list_get_int` crash on any program with a `def`).
+                    _ipt = _as_dict(getattr(ctx, '_inferred_param_types', None) or {})
+                    _sname = _as_str(s.name)
+                    if _sname in _ipt:
+                        _ipd = _as_dict(_ipt[_sname])
+                        if pname in _ipd and _as_str(_ipd[pname]) != '':
+                            outer_scope[pname] = _as_str(_ipd[pname])
             _saved_vt = dict(ctx.var_types)
             ctx.var_types.update(outer_scope)
             for stmt in s.body:

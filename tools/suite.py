@@ -1755,8 +1755,7 @@ def fanout(*a, **kw) -> Fanout:
 # reorganising the runner. `gate` below is the wider one.
 test('gimple', [PY, 'test_gimple.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple.py'],
-     desc='GIMPLE unit suite (python-interpreted codegen)',
-     disabled='bugs/gate-gimple.md')
+     desc='GIMPLE unit suite (python-interpreted codegen)')
 # Registered 2026-09-26. Both `test_gimple_runner.py` and
 # `test_gimple_generator_runner.py` were in NO bucket — no `make check`, no
 # `make gate` ran a single case in them — for as long as they existed. That
@@ -1967,6 +1966,15 @@ test('sys-maxsize-value',
      [PY, 'test_sys_maxsize_value.py'], mem='small',
      desc='`sys.maxsize` read as a value compiles (the self-hosted compiler '
           'died on startup in comptime.py\'s module-level _HOST_IS_32BIT)')
+test('tagged-select-no-none',
+     [PY, 'test_tagged_select_no_none.py'], mem='tiny',
+     desc='_tagged_cmp_select/_tagged_arith_select answer "does not apply" with a '
+          'value, not None (the self-hosted compiler lowered every `a + 1` to nothing)')
+test('imported-default-padding',
+     [PY, 'test_imported_default_padding.py'], mem='small',
+     desc='a call to an imported module\'s defaulted function pads with the '
+          'definer\'s own defaults in an import cycle (the self-hosted compiler '
+          'wrote every statement at column 0: build.assign lost indent=2)')
 test('importer-param-forwarder',
      [PY, 'test_importer_param_forwarder.py'], mem='small',
      desc='an importer compiled before its definer in an import cycle links: '
@@ -2179,8 +2187,7 @@ test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=Tru
 # a dict comprehension's key and value live in, which formal/model.py reads.
 test('doc-refs-stale-verdicts', [PY, 'test_dangling_doc_refs.py'], cache=True,
      mem='tiny', extra=['test_dangling_doc_refs.py', 'tools/dangling_doc_refs.py'],
-     desc='the stale-verdict report flags a wrong row and passes a right one',
-     disabled='bugs/gate-doc-refs-stale-verdicts.md')
+     desc='the stale-verdict report flags a wrong row and passes a right one')
 test('comprehension-parse-shape', [PY, 'test_comprehension_parse_shape.py'],
      cache=True, mem='tiny', extra=['test_comprehension_parse_shape.py', 'fire_compiler.py'],
      desc='Comprehension stores a dict comprehension\'s key in .element, value in .value')
@@ -2225,8 +2232,7 @@ test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
-     desc='compile-and-execute: plain programs, structs, closures, stdlib calls',
-     disabled='bugs/gate-gimplerunner.md')
+     desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
 test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_gimple_generator_runner.py',
                              'exec_budget.py',      # imported: must be in the key
@@ -2547,8 +2553,7 @@ test('suite-self-test', [PY, 'test_suite.py'], cache=True, mem='tiny',
             # `SHARED_BUDGET_HELPERS`), so it is an input to this job.
             'tools/pydiff.py'],
      extraglob=['**/test_*.py', '**/*_test.py'],
-     desc='the runner: drivers, deps, exclusivity, fanout, tally, log split',
-     disabled='bugs/gate-suite-self-test.md')
+     desc='the runner: drivers, deps, exclusivity, fanout, tally, log split')
 
 # The ledger every job above reserves out of, tested on its own. In `smoke`
 # rather than nowhere, which is where it was for a commit: `test_memslot.py`
@@ -5230,7 +5235,8 @@ BUCKETS = {
               # it makes gcc reject, so the everyday gate has to see the next
               # one (bug doc deleted with the fix, 2026-11-21).
               'selfhost-struct-layout-map', 'selfhost-sig-types-declared',
-              'dotted-module-global-accessor', 'importer-param-forwarder',
+              'dotted-module-global-accessor', 'importer-param-forwarder', 'imported-default-padding',
+              'tagged-select-no-none',
               'sys-maxsize-value', 'uncompiled-marker-alias',
               'presence-helpers-annotated', 'runtime-function-not-prefix',
               'method-none-default-boxed', 'tagged-param-forwarded',

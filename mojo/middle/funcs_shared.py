@@ -426,7 +426,14 @@ def param_aug_rebinding_ctype(gen, func, pname: str, base_ctype: str):
         gen._param_aug_rebind_cache = cache
     key = (id(func), _as_str(pname), _as_str(base_ctype))
     if key in cache:
-        return cache[key] if cache[key] else None
+        # `_as_str` + `len`, not `cache[key] if cache[key] else None`: the compiled
+        # compiler reads the slot as a bare word and tests `!= 0`, so the cached `''` (the
+        # "no widening" answer) was a non-null pointer and came back as the type `''`
+        # for every unannotated parameter from the second query on.
+        _hit = _as_str(cache[key])
+        if len(_hit) > 0:
+            return _hit
+        return None
     # The walk is per FUNCTION, not per parameter: a signature pass resolves
     # every parameter of every function, and re-walking a large body once
     # per parameter would make this quadratic. `by_name` records every
@@ -1277,6 +1284,9 @@ def module_member_function_csym(gen, module_name: str, member_name: str):
         suffix = _as_str(gen.overload_suffix_for(_pts))
         sym = (qualifier + '_' + base if qualifier else base) + suffix
     gen._csym_bare[_as_str(sym)] = _as_str(def_name)
+    _fd = param_default_pairs(getattr(fs, 'param_defaults', None) or {})
+    if len(_fd) > 0:
+        gen._csym_defaults[_as_str(sym)] = _fd
     return sym, definer, def_name, fs
 
 

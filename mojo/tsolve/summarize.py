@@ -532,9 +532,15 @@ class _Summarizer:
             self._declare_module(mod)
         for mod in self.order:
             self._resolve_wildcards(mod)
-        for cs in self.class_list:
-            for name in cs.fields:
-                self.prog.field_index.setdefault(name, []).append(cs.fields[name])
+        for cs0 in self.class_list:
+            # Typed locals: `cs.fields` on the untyped list element is a dynamic
+            # getattr word, and the `for` over it read a dict as a list
+            # (`mojo_list_get_int` on a MojoDict: the self-hosted compiler
+            # crashed on the first program that defines a class).
+            cs: ClassSummary = cs0
+            fields: dict = cs.fields
+            for name in fields:
+                self.prog.field_index.setdefault(name, []).append(fields[name])
 
     def _declare_module(self, mod: _Mod) -> None:
         for st in mod.stmts:
@@ -1447,10 +1453,12 @@ class _Summarizer:
 
     def _lambda(self, scope: _Scope, e) -> Term:
         child = _Scope(scope.mod, scope.cls, scope.cs, scope.fn, scope)
-        for pair in e.params:
-            var = self.prog.new_var(pair[0])
+        _lparams: list = N._as_list(e.params)
+        for _li in range(len(_lparams)):
+            pair: list = N._as_list(_lparams[_li])
+            var = self.prog.new_var(N._as_str(pair[0]))
             self.prog.pin(var, sty.DYN)
-            child.locals[pair[0]] = _Binding('var', '', var, '', '')
+            child.locals[N._as_str(pair[0])] = _Binding('var', '', var, '', '')
             if pair[1] is not None:
                 self._term(scope, pair[1])
         self._term(child, e.body)

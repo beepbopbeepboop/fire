@@ -67,6 +67,30 @@ _FAIL = 0
 #     `gen_module` only through `hoist_awaits_from_call_args`, which
 #     invalidates the enclosing `fn` once the rewrite is done.
 _WALK_AST_MUTATION_ALLOWLIST = {
+    "mojo/backend_gimple/cpp_core.py::_cpp_boxed_list_literal_expr": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_brace_ex": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_build_container_from_iterable": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_call_ex": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_call_line": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_dyn_word_lambda": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_generator_start_kwargs_expr": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_if_break_line": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_int64_thunk": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_list_literal_arg_expr": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_next_lambda_ex": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_not_ex": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_raise_tuple_msg_expr": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_rethrow_pending": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_struct_word_lambda": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpp_try_kwargs_forward_call": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cps_assign_stmt": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpx_binary_op": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpx_call_ident": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpx_call_member": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_cpx_lambda_expr": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_field_ex": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/backend_gimple/cpp_core.py::_un_ex": "writes fields of an `Ex` (mojo/ir/instr.py), the typed IR, not an AST node: `_walk_ast` never sees one",
+    "mojo/middle/valueinfo.py::WordFacts.mark_mixed_field": "writes `kind` of a `ValueInfo` record (mojo/middle/valueinfo.py), a plain class, not an AST node",
     "ast_rewriter.py::Lit.__init__": "the rewriter's own pattern dataclass, not an AST node",
     "ast_rewriter.py::Node.__init__": "ditto",
     "ast_rewriter.py::Optional_.__init__": "ditto",
@@ -12572,7 +12596,7 @@ print("%r" % p)
             # A freed node's id could otherwise be handed to a different node
             # and the memo would answer with the first one's nodes.
             sd = stmts[0]
-            entry = ET._WALK_AST_MEMO.get(id(sd))
+            entry = ET._WALK_AST_MEMO.get(ET._nid(sd))
             if entry is None or entry[0] is not sd:
                 err = 'the memo entry does not hold the node it is keyed on'
             # ... and a mutation costs both the node and its container their
@@ -12684,7 +12708,7 @@ print("%r" % p)
                 # `getattr`: before the fix the memo did not exist, and the
                 # assertion above is the one that fails then; the entry shape
                 # is checked only where the memo is.
-                entry = getattr(ET, '_WALK_INDEX_MEMO', {}).get(id(stmts))
+                entry = getattr(ET, '_WALK_INDEX_MEMO', {}).get(ET._nid(stmts))
                 if entry is None or entry[0] is not stmts:
                     err = 'the memo entry does not hold the list it is keyed on'
             if not err:
@@ -12717,7 +12741,7 @@ print("%r" % p)
                     err = 'the mutation leaked into the pre-mutation census'
             if not err:
                 ET._walk_ast_reset()
-                if id(stmts) in ET._WALK_INDEX_MEMO:
+                if ET._nid(stmts) in ET._WALK_INDEX_MEMO:
                     err = '_walk_ast_reset left the index memo behind'
         except Exception as e:  # noqa: BLE001
             err = f'{type(e).__name__}: {e}'
@@ -12821,7 +12845,7 @@ print("%r" % p)
             # The reference walk, straight through `_walk_ast_into` with the
             # memo unreachable (it is only consulted by `_walk_ast`).
             real_into(node, out)
-            if id(node) in ET._WALK_AST_MEMO:
+            if ET._nid(node) in ET._WALK_AST_MEMO:
                 state["hits"] += 1
                 cached = real_walk(node)
                 if cached is not out and state["bad"] is None:
@@ -13016,8 +13040,11 @@ print("%r" % p)
                     # classes have fields named `name`/`op`/`body` like AST
                     # nodes do, but they are not AST nodes and `_walk_ast`
                     # never sees one, so there is no memo to invalidate.
+                    # `mojo/tsolve` is the type solver: plain classes of its own
+                    # (`STy`, `Term`, `FnSummary`, ...) with fields named `name`/
+                    # `kind`/`args` like AST nodes, never handed to `_walk_ast`.
                     _dn[:] = [d for d in _dn if d != "__pycache__"
-                              and not (_dp == "mojo" and d == "ir")]
+                              and not (_dp == "mojo" and d in ("ir", "tsolve"))]
                     for _n2 in sorted(_ns):
                         if _n2.endswith(".py"):
                             paths.append(os.path.join(_dp, _n2))
@@ -13131,7 +13158,7 @@ print("%r" % p)
             problems.append("%s: %s" % (type(e).__name__, e))
         if problems:
             print("FAIL  %s: %d problem(s):" % (name, len(problems)))
-            for q in problems[:12]:
+            for q in problems:
                 print("  " + q)
             _FAIL += 1
             return

@@ -17,3 +17,7 @@ deleted in the same commit, as for any bug.
 | `GPU_offload_validation_modular.md` | see doc | workers |
 | `CODEGEN_selfhost_stage2_attributeerror_comptimevar_node.md` | see doc | workers |
 | `FORMAL_eval_eq_mojo_bridge_red_on_head.md` | see doc | workers |
+| `CODEGEN_prelude_sort_is_not_resolved.md` | see doc | workers |
+| `FORMAL_x86_endtoend_memory_ceiling.md` | see doc | workers |
+| `GIR_selfhost_compiled_output_diverges.md` | see doc | workers |
+| `GIR_stage4_one_type_vocabulary.md` | see doc | workers |

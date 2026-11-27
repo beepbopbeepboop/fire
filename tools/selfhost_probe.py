@@ -15,6 +15,7 @@ was found (doc/GIR.md, "Selfhost closure"). Typical use:
     # an AttributeError: break where it is raised
     lldb ... -o 'breakpoint set -n mojo_raise_attribute_error' ...
 
+`SELFHOST_PROBE_DEBUG=1` on `build` adds -g1 so `bt` in lldb shows `file.py:line`.
 `build` takes about 15 minutes and 10 GB; `probe` takes seconds per file.
 """
 import difflib
@@ -31,6 +32,25 @@ def build(out_dir: str) -> int:
     sys.path.insert(0, ROOT)
     import tempfile
     import test_selfhost as T
+    if os.environ.get('SELFHOST_PROBE_DEBUG'):
+        # `-g1`: lldb then maps a crash frame to the compiler's own .py line (the
+        # `#line` directives), which names the `for`/call a bare address cannot.
+        import functools
+        sys.path.insert(0, ROOT)
+        import fire
+        fire.build_executable = functools.partial(
+            fire.build_executable, debug_flag='-g1', opt_flag='-O1')
+        # macOS keeps DWARF in the .o files, which `build_executable` deletes after
+        # linking; `dsymutil` right after the link folds it into `<exe>.dSYM`.
+        _real_run = fire.subprocess.run
+
+        def _run_with_dsym(cmd, *a, **k):
+            r = _real_run(cmd, *a, **k)
+            if (isinstance(cmd, list) and '-o' in cmd and r.returncode == 0
+                    and os.path.basename(cmd[cmd.index('-o') + 1]) == 'mojo_selfhost'):
+                _real_run(['dsymutil', cmd[cmd.index('-o') + 1]], capture_output=True)
+            return r
+        fire.subprocess.run = _run_with_dsym
     os.makedirs(out_dir, exist_ok=True)
     with tempfile.TemporaryDirectory() as td:
         cwd = os.getcwd()
@@ -41,6 +61,10 @@ def build(out_dir: str) -> int:
                 print('build failed')
                 return 1
             shutil.copy(exe, os.path.join(out_dir, 'mojo_selfhost'))
+            if os.path.isdir(exe + '.dSYM'):
+                dst = os.path.join(out_dir, 'mojo_selfhost.dSYM')
+                shutil.rmtree(dst, ignore_errors=True)
+                shutil.copytree(exe + '.dSYM', dst)
         finally:
             os.chdir(cwd)
     print('built', os.path.join(out_dir, 'mojo_selfhost'))
