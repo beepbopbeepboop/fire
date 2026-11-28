@@ -3282,6 +3282,11 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     `enode` is the operand's AST node when the caller has it, and is the ONLY
     way a bool is distinguishable from the integer 1/0 it shares a slot with:
     a bool's C type here is a plain `int` (see `is_python_bool_expr`)."""
+    # `repr(None)` / `'%r' % None` / `f'{None!r}'` is "None", not the decimal
+    # of the integer word the literal lowers to (the `str()` route already
+    # answers this; `repr` did not, so `'%r' % None` printed `0`).
+    if enode is not None and gen._is_none_literal(enode):
+        return gen._new_val('char *', gen._intern_string('None'))
     # `_Bool` FIRST, before every other arm: Python's repr of a bool is
     # `True`/`False`, and with no arm for it a `_Bool` fell all the way to
     # the int64_t one and printed `1`/`0` — the right value, the wrong type.
@@ -3297,9 +3302,12 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         return gen._call_expr('char *', 'mojo_repr_bool',
                               [('int', gen._cast('int', rav))])
     # A WORD whose kind only the runtime knows (a regex group, a match, a
-    # DirEntry name): its repr is spelled by the kind the runtime reads off it.
+    # DirEntry name), or a TAGGED/mixed-field word: its repr is spelled by the
+    # kind the runtime reads off it. Without the box half `repr(self.x)` on a
+    # mixed field holding an int box called the str helper on the box's
+    # address (SIGSEGV, classes/21_str_and_repr).
     if gimple_ctypes.TypeLattice.is_int_word(rat) and (
-            gen._word_is_dyn(rav)
+            gen._word_is_dyn(rav) or gen._word_may_be_box(rav)
             or (isinstance(enode, gimple_ctypes.IdentExpr)
                 and _as_str(enode.name) in gen._dyn_word_locals)):
         return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])

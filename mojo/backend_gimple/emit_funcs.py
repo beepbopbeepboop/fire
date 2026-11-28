@@ -4177,7 +4177,9 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._reset_func(node.body, node.params,
                     allow_lambda_reduction=not _is_coro_body,
                     default_none_params=ginf.param_default_none_names(
-                        gen, node, _as_str(node.name)))
+                        gen, node, _as_str(node.name)),
+                    mixed_field_params=ginf.param_mixed_field_names(
+                        gen, _as_str(node.name)))
     # Per-FUNCTION record of which locals hold a beta-reducible
     # capturing lambda (see mojo/middle/lambdareduce). Cleared here,
     # at a real per-function entry point, rather than in `_reset_func`
@@ -4606,6 +4608,18 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         gen._cattr_restore_end()
     finally:
         gen._emitting_plain_func = False
+
+    # Stage 5c: a word-returning function that can reach the end of its body
+    # returns Python's None there. When the return slot is proven scalar
+    # beside None (`_gmp_collect_boxed_return_names`), that path is the shared
+    # None box, exactly like an explicit `return None`; without this the C
+    # function simply fell off the end and the caller read whatever the
+    # register held. `main` keeps the integer 0: its return value is the
+    # PROCESS EXIT CODE, not a Python value.
+    if (gimple_ctypes.TypeLattice.is_word(ret_type) and node.name != 'main'
+            and id(node.body) in (getattr(gen, '_mixed_return_bodies', None) or ())
+            and ginf.body_may_fall_off(node.body)):
+        gen._ret(gen._call_expr('int64_t', 'mojo_box_none', []))
 
     # Add implicit return 0 for main if it returns int but has no explicit
     # return. Deliberately NOT `gen.body_lines[-1:]`/`gen.body_lines[-1]`
@@ -5746,7 +5760,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     gen._reset_func(node.body, node.params,
                     default_none_params=ginf.param_default_none_names(
                         gen, node,
-                        f"{struct_name}_{_as_str(node.name)}{overload_id}"))
+                        f"{struct_name}_{_as_str(node.name)}{overload_id}"),
+                    mixed_field_params=ginf.param_mixed_field_names(
+                        gen, f"{struct_name}_{_as_str(node.name)}{overload_id}"))
     # Per-function, same reason and same placement as gen_func's.
     gen._inlined_lambdas = {}
     gen._reset_no_candidates()
@@ -6023,6 +6039,8 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     hardcoded_params = (_suffixed_params if _suffixed_params is not None
                          else gen.func_param_types.get(method_full_name, []))
     seen_varargs = False
+    _m_boxed = ((getattr(gen, '_param_box_names', None) or {}).get(
+        method_full_name) or ())
     for i, (pname, ptype) in enumerate(node.params):
         # Strip Mojo parameter modifiers (inout, borrowed, etc.)
         bare = gimple_ctypes._strip_mojo_param_modifiers(pname.lstrip('*'))
@@ -6047,6 +6065,14 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             # is authoritative — use the struct pointer, not a type a sibling
             # overload clobbered onto the shared base key.
             ctype = f"{ptype.split('[', 1)[0].split('.')[0].strip()} *"
+        elif bare in _m_boxed:
+            # Stage 5c: a parameter whose call sites pass a `None`/bool
+            # literal (or a mixed field store) is the TAGGED WORD, even
+            # though the pass that filled `func_param_types` ran before that
+            # evidence existed and recorded the usage-inferred `char *`. The
+            # call sites box the argument (`_box_param_call_args`), so the
+            # definition must declare the word the argument really is.
+            ctype = 'int64_t'
         elif (hardcoded_params and '...' not in hardcoded_params and i < len(hardcoded_params)
               and not (i == 0 and pname != 'self'
                        and hardcoded_params[i] == f"{struct_name} *")):
@@ -6146,6 +6172,14 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     gen._emit_fallthrough_frees(node)
     gen._cattr_restore_fallthrough(node)
     gen._cattr_restore_end()
+
+    # Stage 5c: the implicit `return None` epilogue (gen_func's identical
+    # block). A method whose return slot is proven scalar beside None reaches
+    # the end of its body as the shared None box, not an uninitialised word.
+    if (gimple_ctypes.TypeLattice.is_word(ret_type)
+            and id(node.body) in (getattr(gen, '_mixed_return_bodies', None) or ())
+            and ginf.body_may_fall_off(node.body)):
+        gen._ret(gen._call_expr('int64_t', 'mojo_box_none', []))
 
     # Store per-overload param types so forward declarations can match definitions exactly
     param_ctypes_only = [s.rsplit(' ', 1)[0].strip() for s in param_strs]

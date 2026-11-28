@@ -105,8 +105,11 @@ c.put(5)
 c.clear(None)
 ''', {'C_put.x': 'scalar', 'C_clear.y': 'unknown'}, {'C': ['s']})
 
-    # Both kinds, or an argument nothing proves, is unknown (rule 3).
-    check('unknown', '''
+    # Both kinds at the call sites is the TAGGED WORD (the box), not silence:
+    # rule 3's "no evidence" is the `unknown`-only case, and a mixed slot's
+    # reads must dispatch by kind. Its field store is mixed for the same
+    # reason.
+    check('both kinds', '''
 class C:
     def __init__(self):
         self.s = None
@@ -115,7 +118,7 @@ class C:
 c = C()
 c.put(5)
 c.put("a")
-''', {'C_put.x': 'unknown'}, {'C': []})
+''', {'C_put.x': 'mixed'}, {'C': ['s']})
 
     # A keyword argument and a scalar default count too.
     check('kw and default', '''

@@ -1570,6 +1570,16 @@ class GimpleGen:
         # to code in _toplevel or any other function.
         self._field_elem_types: dict[str, dict[str, str]] = {}
         self._field_dict_val_types: dict[str, dict[str, str]] = {}
+        # Struct fields whose LIST value carries a per-slot kinds row
+        # (`mojo_list_append_kinded` / `mojo_list_append_word`). The row lives
+        # on the runtime list, but a field READ lowers to a fresh temp whose
+        # compile-time facts start empty, so `self.items[-1]` read the raw
+        # word (a None/bool box's payload 0) instead of the boxed slot. The
+        # append site records the field here and `_lower_MemberExpr` marks
+        # every later read of it (`_word_mark_slot_kinds`), which is what makes
+        # `_ls_list` take the `mojo_list_get_boxed` arm. Cross-method like
+        # `_field_elem_types`, so NOT reset per function.
+        self._field_slot_kinds: dict[str, dict[str, int]] = {}
         # For a struct field annotated `dict[K, dict[K2, V2]]`: the INNER
         # dict's value C type (`struct_field_types: dict[str, dict[str, str]]`
         # -> 'char *'), so `field[k]` / `field.get(k, {})` / `field.items()`
@@ -1765,6 +1775,14 @@ class GimpleGen:
         # caller's `g = mk(...)` must carry the return type into
         # `_bound_method_ret_types` for `g(...)` to narrow its box.
         self._return_bound_method_ret_types: dict[str, str] = {}
+        # The tagged-word twin of the two maps above (stage 5c): a callable
+        # value whose lifted body's return slot is a scalar beside None. The
+        # value-keyed halves are `_bound_method_tagged` / `_callable_tagged`
+        # (per function); these carry the fact across a factory's return to
+        # the caller, exactly as the type maps do.
+        self._return_bound_method_tagged: dict[str, int] = {}
+        self._return_callable_tagged: dict[str, int] = {}
+        self._return_slot_tagged: dict[str, list] = {}
         self._return_func_value_names: dict[str, str] = {}
         # Function name -> per-slot C types of a MULTI-VALUE return's
         # tuple handle (`return cfg, Model(cfg)`). Deliberately module
@@ -5863,9 +5881,10 @@ class GimpleGen:
         return ginf._is_exc_class_name(self, name)
     def _reset_func(self, body: list=None, params: list=None,
                     allow_lambda_reduction: bool=True,
-                    default_none_params: set=None):
+                    default_none_params: set=None,
+                    mixed_field_params: set=None):
         return ginf._reset_func(self, body, params, allow_lambda_reduction,
-                                default_none_params)
+                                default_none_params, mixed_field_params)
     def _record_sys_path_inserts(self, source: str, base_dir: str=None) -> None:
         return ginf._record_sys_path_inserts(self, source, base_dir)
     def _compile_link_inline_cpp_unit(self, cpp_code: str):

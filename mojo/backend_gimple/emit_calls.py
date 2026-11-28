@@ -3344,6 +3344,13 @@ def _lc_non_ident_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _vt = gen._global_container_callable_ret.get(node.func.obj.name)
             if not _vt:
                 _vt = 'int64_t'
+            # Stage 5c: a container holding a callable whose lifted body
+            # returns a scalar beside None. Mark the element VALUE so
+            # `_lower_fnptr_call_value` marks the call result a tagged word
+            # (`ops[3](7, 0)` -> None, not 0).
+            if (getattr(gen, '_container_callable_tagged', None) or {}).get(
+                    node.func.obj.name):
+                gen._callable_tagged.add(_as_str(_callee_v))
             return gen._lower_fnptr_call_value(_callee_t, _callee_v, node, _vt)
     if isinstance(node.func, gimple_ctypes.SubscriptExpr):
         # A bracket-parametrized call to a function that needs
@@ -10868,7 +10875,14 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
         return 'double', t
     raw_t = gen._rt_call('int64_t', helper, call_args)
     if gimple_ctypes.TypeLattice.is_word(ret_type):
-        gen._word_mark_dyn(raw_t)   # nothing says what the callee returns: a word of unknown kind
+        if _as_str(fp_raw) in getattr(gen, '_callable_tagged', ()):
+            # Stage 5c: the callee's lifted body returns a scalar beside None,
+            # so the word is a tagged box (None on one path), not an unknown
+            # plain word.
+            gen._word_mark_boxed(raw_t)
+            gen._word_mark_tagged(raw_t)
+        else:
+            gen._word_mark_dyn(raw_t)   # nothing says what the callee returns: a word of unknown kind
     # Calling a HIGHER-ORDER PARAMETER whose declared default is a compiled
     # generator of this compile (`def walk_tree(root, *, walk=_walk_tree)`
     # — Tools/c-analyzer/c_common/fsutil.py's whole idiom, and the shape
@@ -11199,7 +11213,8 @@ def _vararg_elem_kind(ctype: str) -> str:
     return 'i'
 
 
-def _append_vararg_element(gen, lst: str, ctype: str, cvalue: str) -> None:
+def _append_vararg_element(gen, lst: str, ctype: str, cvalue: str,
+                           node=None) -> None:
     """Append ONE packed `*args` element to the packed `MojoList *` `lst`
     through the accessor its own C type needs — `mojo_list_append_str` for a
     `char *`, `mojo_list_append_double` for a double, `mojo_list_append_int`
@@ -11213,6 +11228,13 @@ def _append_vararg_element(gen, lst: str, ctype: str, cvalue: str) -> None:
     `_pack_vararg_trailing_params`, `_pack_kwargs_slot_call` and
     `_pack_generator_star_args` — the generator arm's own copy of the
     str/double/int dispatch is what this consolidated (see its docstring)."""
+    if node is not None and gen._is_none_literal(node):
+        # A `None` argument in the pack is the shared None box, appended under
+        # its own slot kind; the callee's `*args` is slot-kinded
+        # (`_reset_func`), so `args[i]` reads it back as None, not 0.
+        _nw = gen._call_expr('int64_t', 'mojo_box_none', [])
+        gen._rt_void('mojo_list_append_word', [lst, f"{_nw}"])
+        return
     if gimple_ctypes.TypeLattice.is_cstr(ctype):
         gen._rt_void('mojo_list_append_str', [lst, f"{cvalue}"])
     elif gimple_ctypes.TypeLattice.is_double(ctype):
@@ -11676,7 +11698,8 @@ def _lnc_bool(gen, arg_pairs: list) -> tuple[str, str] | None:
             or (gimple_ctypes.TypeLattice.is_double(_bt) or gimple_ctypes.TypeLattice.is_c_float(_bt))
             or (gimple_ctypes.TypeLattice.is_word(_bt) and (
                 gen._word_is_dyn(_bv) or _bv in gen._dyn_word_locals
-                or _bv in getattr(gen, '_cur_untyped_params', ())))) :
+                or _bv in getattr(gen, '_cur_untyped_params', ())
+                or ginf.mixed_box_name(gen, _as_str(_bv))))) :
         # A string's truth is its length, a float's is `x != 0.0` (not
         # "its integer part is nonzero"), and a word of unknown kind's is
         # whatever the runtime finds there -- the one place that answers
@@ -12896,6 +12919,11 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # _CONTAINER_LEN_FN, but a bool() CALL was the one path that never
     # used it). Mirror that here so both paths agree.
     if gimple_ctypes.TypeLattice.is_cpp_bool(fname_raw) and len(arg_pairs) == 1:
+        # `bool(None)` is False, not the integer 0 the literal lowers to
+        # (stage 5c; `strings/17_str_repr_bool_none`). A None-valued NAME is
+        # covered by `_lnc_bool`'s mixed-box arm.
+        if node.args and gen._is_none_literal(node.args[0]):
+            return '_Bool', gen._new_val('_Bool', '0')
         _arm_r = _lnc_bool(gen, arg_pairs)
         if _arm_r is not None:
             return _arm_r
@@ -13073,7 +13101,18 @@ def _lower_varargs_pack(gen, pack_args: list) -> tuple:
     if len(lowered) == 1 and gimple_ctypes.TypeLattice.is_list(lowered[0][0]):
         return lowered[0]
     lst = gen._rt_call('MojoList *', 'mojo_list_new', [])
-    for atype, aval in lowered:
+    for _vi in range(len(lowered)):
+        atype = _as_str(lowered[_vi][0])
+        aval = _as_str(lowered[_vi][1])
+        if _vi < len(pack_args) and gen._is_none_literal(pack_args[_vi]):
+            # A `None` in the pack is the shared None box, appended under its
+            # own slot kind; the callee's `*args` is slot-kinded
+            # (`_reset_func`), so `args[i]` reads it back as None, not 0.
+            _nw = gen._call_expr('int64_t', 'mojo_box_none', [])
+            gen._void_call('mojo_list_append_word', [('MojoList *', lst),
+                                                     ('int64_t', _nw)])
+            gen._word_mark_slot_kinds(lst)
+            continue
         aval = gen._coerce_to_type(atype, 'int64_t', aval)
         gen._rt_void('mojo_list_append_int', [lst, f"{aval}"])
     return ('MojoList *', lst)
@@ -13164,10 +13203,15 @@ def _lower_struct_constructor(gen, struct_name: str,
         _chosen = gen._resolve_overload(_init_candidates, args, kwargs)
         if _chosen is not None:
             init_fname = gen._struct_method_csym(struct_name, '__init__', _chosen['overload_id'])
-            arg_pairs = [(f"{struct_name} *", t)] + \
-                gen._build_call_args_for_candidate(
-                    _chosen, args, kwargs,
-                    gen._struct_init_defaults.get(struct_name, {}))
+            _iinit = _as_str(struct_name) + '___init__'
+            _ipairs = gen._build_call_args_for_candidate(
+                _chosen, args, kwargs,
+                gen._struct_init_defaults.get(struct_name, {}))
+            if (getattr(gen, '_param_box_names', None) or {}).get(_iinit):
+                _ipairs = ginf._box_param_call_args(
+                    gen, _iinit, _ipairs, list(args), kwargs,
+                    (getattr(gen, '_method_param_names', None) or {}).get(_iinit))
+            arg_pairs = [(f"{struct_name} *", t)] + _ipairs
             gen._emit_call('void', '', init_fname, arg_pairs, _arg_nodes)
             return ctype, t
         # No candidate could be resolved — either no candidate's arity fits
@@ -13281,6 +13325,17 @@ def _lower_struct_constructor(gen, struct_name: str,
         # arg_pairs, so a cross-module `Class(module_name=<boxed local>,
         # aset={..})` passed an int64_t into `char *` / a MojoSet* into
         # `int64_t` uncast (GCC -Wint-conversion, hard error under -fgimple).
+        # Stage 5c: a `__init__` parameter tagged at its call sites (a
+        # `None`/bool literal, or mixed kinds) is boxed by kind here exactly
+        # as a method/function call's argument is; the ctor path built the
+        # pairs itself and skipped `_box_param_call_args`.
+        _iinit2 = _as_str(struct_name) + '___init__'
+        if (getattr(gen, '_param_box_names', None) or {}).get(_iinit2):
+            _ipairs2 = ginf._box_param_call_args(
+                gen, _iinit2, arg_pairs[1:], list(args), kwargs,
+                (getattr(gen, '_method_param_names', None) or {}).get(_iinit2)
+                or init_pnames or None)
+            arg_pairs = [arg_pairs[0]] + _ipairs2
         _init_full = gen.func_param_types.get(init_fname, [])
         if len(_init_full) == len(arg_pairs):
             for _ai in range(1, len(arg_pairs)):
@@ -13960,6 +14015,11 @@ def _ls_list(gen, node: gimple_ctypes.SubscriptExpr, iv, ov) -> tuple[str, str]:
             idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
             if gimple_ctypes.TypeLattice.is_double(_skd):
                 return 'double', gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
+            if _skd == 'none' or _skd == 'n':
+                t = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{ov}", idx64])
+                gen._word_mark_boxed(t)
+                gen._word_mark_tagged(t)
+                return 'int64_t', t
             if _skd == 'bytes':
                 return _list_slot_bytes(gen, ov, idx64)
             if _skd == 'str':

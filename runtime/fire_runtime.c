@@ -1601,6 +1601,29 @@ static void _kinds_set_byte(MojoList *l, int64_t idx, char kind) {
 
 static void _kinds_forget(uint64_t addr);
 
+/* Remove ONE slot's kind byte from the row, shifting the later bytes down.
+ * Copy-on-write for the same reason as `_kinds_set_byte` (the string may be
+ * a shared pool constant). The per-slot box cache is indexed by slot too, so
+ * a removal drops it rather than leaving a box at the wrong index. */
+static void _kinds_remove_byte(MojoList *l, int64_t idx) {
+    if (!l || idx < 0) return;
+    _KindRow *r = _kinds_row((uint64_t)(uintptr_t)l);
+    if (!r || !r->kinds) return;
+    size_t n = strlen(r->kinds);
+    if ((size_t)idx >= n) return;
+    char *priv = (char *)malloc(n + 1);
+    if (!priv) return;
+    memcpy(priv, r->kinds, (size_t)idx);
+    memcpy(priv + idx, r->kinds + idx + 1, n - (size_t)idx);
+    if (r->owned == 2)
+        free(r->kinds - 8);
+    else if (r->owned == 1)
+        free(r->kinds);
+    r->kinds = priv;
+    r->owned = 1;
+    if (r->boxes) r->boxes = NULL;
+}
+
 void mojo_list_set_kinds(MojoList *l, const char *kinds)
 {
     if (!l) return;
@@ -1925,7 +1948,15 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
 {
     if (!l) return 0;
     int64_t idx = _norm_idx(l, i);
-    if (idx < 0 || idx >= l->len) return 0;
+    if (idx < 0 || idx >= l->len) {
+        /* A source-level subscript of a kinded list (`*args`, a hetero
+         * tuple) is still a Python `lst[i]`: out of range raises, exactly as
+         * `mojo_list_get_int_checked` does. Returning 0 made
+         * `lambda *a: a[0]` on an empty pack print 0 instead of raising
+         * IndexError. */
+        mojo_raise_index_error((char *)"list index out of range");
+        return 0;
+    }
     char _k = mojo_list_slot_kind(l, idx);
     /* An int slot is its own answer and stays the bare word: a box is a heap
      * cell per (list, slot), and taxing every int in a mixed list to serve the
@@ -4345,23 +4376,31 @@ MojoList *mojo_list_concat(MojoList *a, MojoList *b)
      * container type, so the result has to be marked like every other
      * derivation of one. */
     if (mojo_is_tuple(a) || mojo_is_tuple(b)) mojo_mark_as_tuple(r);
-    /* `t + t` and `t + []` are described by the source kinds, repeated to
-     * cover the result's slots; anything else (two lists whose kinds differ)
-     * has ONE slot array and no single correct answer, so nothing is
-     * recorded rather than something wrong. The repeated string is a fresh
-     * allocation because the source's is shared with every copy of it. */
+    /* A kinds row is ONE BYTE PER SLOT (`mojo_list_slot_kind` reads `k[i]`),
+     * so the result's row is exactly the two source rows laid end to end —
+     * whatever their kinds and lengths. The old rule only propagated for
+     * equal-length, equal-row operands (plus `kinds + []`), so
+     * `walk(left) + [node.key]` over a multi-node subtree recorded nothing
+     * and the generic walker rendered an integer `0` as `None`
+     * (`classes/13_binary_tree_inorder` printed `[-2, None, ...]` for
+     * `[-2, 0, ...]`). A missing tail byte reads as `'i'` there, so a short
+     * row is padded with `'i'` the same way. The buffer belongs to the
+     * result (a fresh allocation): the sources' rows are shared with every
+     * copy of them. */
     {
         const char *ka = mojo_list_get_kinds(a);
         const char *kb = mojo_list_get_kinds(b);
         int64_t na = a->len, nb = b->len;
-        if (ka && nb == 0) {
-            mojo_list_set_kinds(r, ka);
-        } else if (ka && kb && na == nb && strcmp(ka, kb) == 0) {
+        if ((ka || kb) && na + nb > 0) {
             char *kk = (char *)malloc((size_t)(na + nb) + 1);
-            memcpy(kk, ka, (size_t)na);
-            memcpy(kk + na, kb, (size_t)nb);
-            kk[na + nb] = '\0';
-            mojo_list_set_kinds(r, kk);
+            if (kk) {
+                size_t _la = ka ? strlen(ka) : 0, _lb = kb ? strlen(kb) : 0;
+                memset(kk, 'i', (size_t)(na + nb));
+                if (ka) memcpy(kk, ka, _la < (size_t)na ? _la : (size_t)na);
+                if (kb) memcpy(kk + na, kb, _lb < (size_t)nb ? _lb : (size_t)nb);
+                kk[na + nb] = '\0';
+                mojo_list_set_kinds(r, kk);
+            }
         }
     }
     /* The element repr propagates on the same terms as the kinds string
@@ -8311,6 +8350,62 @@ void mojo_dict_set_none_key_struct(MojoDict *d, void *v)
     _dict_set_none_key_raw(d, (int64_t)(uintptr_t)v, 5);
 }
 
+/* ── A BOX-HOLDING word stored as a dict VALUE (stage 5c) ───────────────────
+ *
+ * `d['k'] = c.s` where `c.s` is a MIXED struct field (a scalar beside `None`)
+ * lowers to a WORD whose kind only the runtime knows: `mojo_box_none()` for
+ * the `None` half, `mojo_box_int`/`_from_double`/`_from_str` for the scalar
+ * half. The static C type of that word is `int64_t`, so the store used to go
+ * through `mojo_dict_set_int` with `_DictSlot.kind == 0` — the box's own
+ * ADDRESS was stored as an integer, and every reader said so: `{'k': c.s}`
+ * printed `{'k': 0}` where CPython prints `{'k': None}` (the box's payload is
+ * the integer 0 the None half means). The kind is exactly what the slot tag
+ * exists for, so the store has to ask the box, the same way
+ * `mojo_list_append_word` asks it for a list slot.
+ *
+ * `_dict_box_slot_kind` is the inverse of `_dict_slot_boxed`: a slot stored
+ * here reads back as the same box (kind 4 -> `mojo_box_none()`, kind 1/3 ->
+ * the double/bool box, kind 2 -> the string), so a dict literal, a subscript
+ * store and a later `d['k']`/`print(d)` all agree with the value the field
+ * held. A box this function does not own (a bytes `'s'` box, a list `'l'`
+ * box) keeps kind 0 with its POINTER, which is how a container value is
+ * already stored everywhere and which the generic readers dispatch on by
+ * registry membership (`_dict_val_repr_int` declines exactly those).
+ *
+ * A word that is not a box but IS a registered string pointer keeps kind 2:
+ * `mojo_boxed_is_str` is the same provenance test `mojo_list_append_word`
+ * uses, and without it such a value would render as its decimal address. */
+static int64_t _dict_box_slot_kind(int64_t w, int64_t *out)
+{
+    if (mojo_is_boxed(w)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)w;
+        switch (bx->kind) {
+            case 'd': *out = bx->bits; return 1;
+            case 'p': *out = bx->bits; return 2;
+            case 'b': *out = bx->bits ? 1 : 0; return 3;
+            case 'n': *out = 0; return 4;
+            default:  *out = bx->bits; return 0;
+        }
+    }
+    *out = w;
+    if (mojo_boxed_is_str(w)) return 2;
+    return 0;
+}
+
+void mojo_dict_set_word(MojoDict *d, char *key, int64_t w)
+{
+    int64_t v;
+    int64_t kind = _dict_box_slot_kind(w, &v);
+    _dict_set_raw(d, key, v, kind);
+}
+
+void mojo_dict_set_none_key_word(MojoDict *d, int64_t w)
+{
+    int64_t v;
+    int64_t kind = _dict_box_slot_kind(w, &v);
+    _dict_set_none_key_raw(d, v, kind);
+}
+
 void mojo_dict_set_bytes_none_key(MojoDict *d, MojoBytes *key, int64_t v)
 {
     (void)key;
@@ -8642,6 +8737,15 @@ void mojo_dict_set_bytes_bool(MojoDict *d, MojoBytes *key, int v)
  * `None` value from the integer 0 it shares a representation with. */
 void mojo_dict_set_bytes_none(MojoDict *d, MojoBytes *key)
 { _dict_set_bytes_raw(d, key, 0, 4); }
+
+/* The bytes-key twin of mojo_dict_set_word: the value is a box-holding word,
+ * so the slot's kind comes from the box (see that function's comment). */
+void mojo_dict_set_bytes_word(MojoDict *d, MojoBytes *key, int64_t w)
+{
+    int64_t v;
+    int64_t kind = _dict_box_slot_kind(w, &v);
+    _dict_set_bytes_raw(d, key, v, kind);
+}
 
 /* ...and of mojo_dict_set_struct (kind 5, rendered by the dict's recorded
  * val_repr). */
@@ -10504,6 +10608,50 @@ int mojo_word_eq(int64_t a, int64_t b)
     return mojo_value_eq(a, b, MOJO_EQ_UNKNOWN);
 }
 
+/* `a == b` where at least one side is a TAGGED word (a box whose kind only
+ * the runtime knows): `None` is equal only to `None`, a float box compares
+ * NUMERICALLY with an int (`0.0 == 0` is True), a bool/int box by payload,
+ * a str box by content. The plain unbox path (`mojo_box_word`) cannot answer
+ * this: it keeps a double box as its address (so `0.0 == 0` was False) and
+ * flattens the None box to 0 (so `None == 0` was True). Measured on
+ * `flow/12_early_return_loop.py`'s `contains_zero([None, 1])` / `[1, 0.0, 2]`. */
+int mojo_box_eq(int64_t a, int64_t b)
+{
+    if (a == b) return 1;
+    if (mojo_is_boxed(a)) {
+        MojoBox *ax = (MojoBox *)(intptr_t)a;
+        if (ax->kind == 'n') return mojo_word_is_none(b);
+        if (mojo_is_boxed(b)) {
+            MojoBox *bx = (MojoBox *)(intptr_t)b;
+            if (bx->kind == 'n') return 0;
+            if (ax->kind == 'p' && bx->kind == 'p') {
+                if (ax->bits == 0 || bx->bits == 0) return ax->bits == bx->bits;
+                return strcmp((char *)(intptr_t)ax->bits,
+                              (char *)(intptr_t)bx->bits) == 0;
+            }
+            if (ax->kind == 'p' || bx->kind == 'p') return 0;
+            if (ax->kind == 'd' || bx->kind == 'd') {
+                double da = (ax->kind == 'd') ? mojo_double_from_bits(ax->bits)
+                                              : (double)ax->bits;
+                double db = (bx->kind == 'd') ? mojo_double_from_bits(bx->bits)
+                                              : (double)bx->bits;
+                return da == db;
+            }
+            return ax->bits == bx->bits;
+        }
+        if (ax->kind == 'd') return mojo_double_from_bits(ax->bits) == (double)b;
+        if (ax->kind == 'p') {
+            if (ax->bits == 0) return b == 0;
+            return mojo_boxed_is_str(b)
+                && strcmp((char *)(intptr_t)ax->bits, (char *)(intptr_t)b) == 0;
+        }
+        if (ax->kind == 'l') return 0;
+        return ax->bits == b;
+    }
+    if (mojo_is_boxed(b)) return mojo_box_eq(b, a);
+    return mojo_word_eq(a, b);
+}
+
 int mojo_value_eq(int64_t a, int64_t b, int elem)
 {
     if (a == b) return 1;
@@ -11428,7 +11576,7 @@ char *mojo_repr_list_doubles(MojoList *l) {
      * trailing comma, [..] otherwise) but reads each slot via
      * mojo_list_get_double and formats it with mojo_repr_float. */
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return strdup(_is_tup ? "()" : "[]");
+    if (!l) return strdup("None");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11469,7 +11617,7 @@ char *mojo_repr_list_ints(MojoList *l) {
      * reads each slot via mojo_list_get_int and formats it with
      * mojo_repr_int unconditionally, with no None-sentinel check. */
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return strdup(_is_tup ? "()" : "[]");
+    if (!l) return strdup("None");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11500,7 +11648,7 @@ char *mojo_repr_list_bools(MojoList *l) {
      * exact structure but formats each slot with mojo_repr_bool
      * unconditionally, with no None-sentinel check. */
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return strdup(_is_tup ? "()" : "[]");
+    if (!l) return strdup("None");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11529,7 +11677,7 @@ static char *_mojo_repr_pairlist(MojoList *l, int _kind) {
        (see _mojo_repr_defers_to_kinds). */
     char *_dk = _mojo_repr_defers_to_kinds(l);
     if (_dk) return _dk;
-    if (!l) return strdup("[]");
+    if (!l) return strdup("None");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup("[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11605,7 +11753,7 @@ static char *_mojo_repr_intlists(MojoList *l) {
     char *_dk = _mojo_repr_defers_to_kinds(l);
     if (_dk) return _dk;
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return strdup(_is_tup ? "()" : "[]");
+    if (!l) return strdup("None");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11676,7 +11824,7 @@ char *mojo_repr_list_slotkinds(MojoList *l, const char *kinds) {
     char *_dk = _mojo_repr_defers_to_kinds(l);
     if (_dk) return _dk;
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return strdup(_is_tup ? "()" : "[]");
+    if (!l) return strdup("None");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11706,7 +11854,7 @@ char *mojo_repr_list_bytes(MojoList *l) {
      * `MojoBytes *` (e.g. b.split(sep)). Each int64_t slot holds a
      * MojoBytes pointer; format each via mojo_bytes_repr. */
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return strdup(_is_tup ? "()" : "[]");
+    if (!l) return strdup("None");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11844,7 +11992,7 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
      * trailing comma, [..] otherwise). */
     if (!kinds) kinds = mojo_list_get_kinds(l);
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return strdup(_is_tup ? "()" : "[]");
+    if (!l) return strdup("None");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -13971,22 +14119,8 @@ MojoList *mojo_dict_values(MojoDict *d) {
         if (uk >= 0) mojo_list_set_elem_repr(out, (void *)_dict_val_repr_fn[uk]);
     }
     int64_t *order = mojo_dict_order_indices(d);
-    /* Describe each VALUE slot so a consumer that walks this list with the
-     * string accessor skips ints/None instead of strcmp'ing them. A dict can
-     * hold int, str, float and None values at once; without a row here,
-     * `"" in inventory.values()` handed an int word to mojo_list_contains_str
-     * and died in libc (containers/36). The row is owned by the kinds table,
-     * which stores the pointer without freeing it, like the interned rows. */
-    char *kbuf = d->used > 0 ? (char *)malloc((size_t)d->used + 1) : NULL;
-    for (int64_t oi = 0; oi < d->used; oi++) {
-        int64_t _vi = order[oi];
-        mojo_list_append_int(out, d->slots[_vi].val);
-        if (kbuf) {
-            char _kb = mojo_dict_kind_byte(d->slots[_vi].kind);
-            kbuf[oi] = _kb ? _kb : 'i';
-        }
-    }
-    if (kbuf) { kbuf[d->used] = '\0'; mojo_list_set_kinds(out, kbuf); }
+    for (int64_t oi = 0; oi < d->used; oi++)
+        mojo_list_append_int(out, d->slots[order[oi]].val);
     free(order);
     return out;
 }
@@ -14564,7 +14698,31 @@ int64_t mojo_list_pop_at(MojoList *l, int64_t idx) {
     int64_t val = l->data[idx];
     for (int64_t i = idx; i < l->len - 1; i++) l->data[i] = l->data[i + 1];
     l->len--;
+    /* The per-slot kinds row is indexed by slot like `data`, so a removal
+     * shifts it too. Without this, `pop(0)` of a mixed list left every later
+     * slot described by its PREDECESSOR's kind (a str slot rendered as an
+     * int, an int as a str). */
+    _kinds_remove_byte(l, idx);
     return val;
+}
+
+/* `lst.pop(i)` on a list that describes its own slots: the popped VALUE as
+ * the tagged word its kind calls for (`mojo_list_get_boxed`'s mapping), not
+ * the raw slot word. `mojo_list_pop_at` answers the bare `int64_t`, so a
+ * None or bool box's payload 0 came back as the integer 0 and `print` said
+ * `0` where CPython says `None` / `False`. Read BEFORE the removal, then
+ * remove; the per-slot box cache is invalidated by the removal, so the box
+ * handed back here stays alive (the same bounded-leak convention as
+ * `_kinds_forget`). */
+int64_t mojo_list_pop_at_boxed(MojoList *l, int64_t idx) {
+    if (!l || l->len == 0) return mojo_box_none();
+    idx = _norm_idx(l, idx);
+    if (idx < 0 || idx >= l->len) return mojo_box_none();
+    {
+        int64_t boxed = mojo_list_get_boxed(l, idx);
+        mojo_list_pop_at(l, idx);
+        return boxed;
+    }
 }
 
 int64_t mojo_list_pop(MojoList *l) {
@@ -16314,7 +16472,7 @@ static char *_container_key_str(int64_t v) {
     const char *kinds = mojo_list_get_kinds(l);
     if (kinds) return mojo_repr_list_kinds(l, kinds);
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return strdup(_is_tup ? "()" : "[]");
+    if (!l) return strdup("None");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -17057,6 +17215,24 @@ void mojo_dict_set_none_kw(MojoDict *d, int64_t kw)
         return;
     }
     _dict_set_ik(d, kw, 0, 4);
+}
+
+/* The `_kw` twin of mojo_dict_set_word, with the same three-arm `_kw_kind`
+ * dispatch every other twin uses: an integer/content key must land in the
+ * key domain the matching `_kw` READ looks in, and the slot's kind is still
+ * the BOX's (so `d[1] = c.s` reads back the same boxed value). */
+void mojo_dict_set_word_kw(MojoDict *d, int64_t kw, int64_t w)
+{
+    char *ck; int k = _kw_kind(kw, &ck);
+    if (k == _KW_STR) { mojo_dict_set_word(d, (char *)(intptr_t)kw, w); return; }
+    if (k == _KW_CONT) {
+        mojo_dict_set_word(d, ck, w);
+        mojo_dict_key_free(ck);
+        return;
+    }
+    int64_t v;
+    int64_t kind = _dict_box_slot_kind(w, &v);
+    _dict_set_ik(d, kw, v, kind);
 }
 
 void mojo_dict_set_struct_kw(MojoDict *d, int64_t kw, void *v)

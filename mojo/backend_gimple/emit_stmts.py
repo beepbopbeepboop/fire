@@ -1493,7 +1493,24 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                         tgt, 'int64_t',
                         gen._rt_call('int64_t', 'mojo_tagged_int', [f"(int64_t){v}", f"{i}"]))
                 return
+            _slot_tags = gen._tuple_slot_tagged.get(v)
+            if _slot_tags is None and isinstance(node.value, gimple_ctypes.CallExpr) \
+                    and isinstance(node.value.func, gimple_ctypes.IdentExpr):
+                _slot_tags = gen._return_ret_for(
+                    _as_str(node.value.func.name), (gen._return_slot_tagged,))
+            _skinds = gen._struct_slot_kinds.get(v)
             for i, tgt in enumerate(targets):
+                # A slot whose kind is `none` is the shared None box; the
+                # target NAME must keep it, so record the name before the
+                # bind (which would otherwise `mojo_unbox_plain` it to 0).
+                if (_skinds is not None and i < len(_skinds)
+                        and _skinds[i] in ('none', 'n')
+                        and isinstance(tgt, gimple_ctypes.IdentExpr)):
+                    _tnt = getattr(gen, '_tuple_none_targets', None)
+                    if _tnt is None:
+                        _tnt = set()
+                        gen._tuple_none_targets = _tnt
+                    _tnt.add(_as_str(tgt.name))
                 # _tuple_elem_value resolves an int64_t-boxed tuple handle
                 # (a call result — the codegen's own `-> tuple[str, str]`
                 # annotated methods return these) to its real MojoList*
@@ -1501,6 +1518,26 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 # of reading pointers as int64_t decimals.
                 et, ev = gen._tuple_elem_value(vtype, v, i)
                 gen._assign_target(tgt, et, ev)
+                # Stage 5c: a slot that held a closure whose lifted body
+                # returns a scalar beside None (`_return_slot_tagged`) makes
+                # the unpacked NAME a tagged callable, so a later `pop_a()`
+                # marks its result a tagged word.
+                if (_slot_tags and i < len(_slot_tags) and _slot_tags[i]
+                        and isinstance(tgt, gimple_ctypes.IdentExpr)):
+                    _stn = _as_str(tgt.name)
+                    _stn_c = _stn
+                    try:
+                        _stn_c = _as_str(gen._cname(_stn))
+                    except Exception:
+                        _stn_c = _stn
+                    if gimple_ctypes.TypeLattice.is_bound_method(et):
+                        gen._bound_method_tagged.add(_stn)
+                        if _stn_c != _stn:
+                            gen._bound_method_tagged.add(_stn_c)
+                    else:
+                        gen._callable_tagged.add(_stn)
+                        if _stn_c != _stn:
+                            gen._callable_tagged.add(_stn_c)
         return
     # `obj.prop = value` where the receiver's struct defines a `@prop.setter`
     # (renamed `__setprop_<prop>` by `_gmi_rename_property_setters`) is a CALL
@@ -1680,11 +1717,26 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # name would lose the kind every later consumer dispatches on. Unlike
         # the generator cases the RHS itself is proof for THIS store, so the
         # name-level "every binding is tagged" walk is not needed.
-        _call_tagged = (gimple_ctypes.TypeLattice.is_word(vtype)
-                        and isinstance(node.value, gimple_ctypes.CallExpr)
-                        and isinstance(node.value.func, gimple_ctypes.IdentExpr)
-                        and _as_str(node.value.func.name) in getattr(
-                            gen, '_ret_may_hold_mixed', ()))
+        _in_get_boxed = _as_str(v) in getattr(gen, '_dict_get_boxed_temps', ())
+        _call_tagged = (
+            gimple_ctypes.TypeLattice.is_word(vtype)
+            and isinstance(node.value, gimple_ctypes.CallExpr)
+            and not _in_get_boxed
+            and (gen._word_bind_tagged(v)
+                 or (isinstance(node.value.func, gimple_ctypes.IdentExpr)
+                     and _as_str(node.value.func.name)
+                     in getattr(gen, '_ret_may_hold_mixed', ()))))
+        # A ternary with a `None` branch and a word/scalar other branch lowers
+        # to the tagged word (`_lower_TernaryExpr` boxes the None branch when
+        # the joined type is a word). The RHS itself is proof for THIS store,
+        # exactly like a call to a mixed-return function, so the bind keeps the
+        # box: `x = v if c else None` then prints None, not 0.
+        _tern_none_rhs = (
+            isinstance(node.value, gimple_ctypes.TernaryExpr)
+            and (gen._is_none_literal(node.value.then_val)
+                 != gen._is_none_literal(node.value.else_val))
+            and gimple_ctypes.TypeLattice.is_word(vtype)
+            and gen._word_bind_tagged(v))
         # A receive-only name (`x = yield`, every binding of it) keeps the
         # resume word's box too: `x = yield` after `next(it)` is the None box,
         # and the name must render it as None (`tagged_recv_name`).
@@ -1692,7 +1744,8 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                             and (gen._word_bind_tagged(v)
                                  or _for_copy or _call_tagged)
                             and gimple_ctypes.TypeLattice.is_word(gen.var_types.get(tname, 'int64_t'))
-                            and (_call_tagged
+                            and (_call_tagged or _tern_none_rhs
+                                 or _as_str(tname) in getattr(gen, '_tuple_none_targets', ())
                                  or ginf.tagged_next_bind_name(gen, _as_str(tname))
                                  or ginf.tagged_recv_name(gen, _as_str(tname))))
         # A MIXED name (`x = 0` beside `x = v` over a tagged generator) is a
@@ -1941,6 +1994,15 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 if func_key and hasattr(gen, '_inferred_var_types'):
                     if func_key in gen._inferred_var_types and tname in gen._inferred_var_types[func_key]:
                         ctype = gen._inferred_var_types[func_key][tname]
+                        # Stage 5c: a name bound to a no-default `d.get(k)` on
+                        # a DOUBLE domain is the tagged word, not the `double`
+                        # the pre-pass inferred from the dict's value type.
+                        # The miss is the None box and a hit is a 'd' box, so
+                        # the slot must be the word; a `double` consumer
+                        # unboxes with `mojo_box_double`.
+                        if ginf.dict_get_call_is_tagged(gen, node.value) \
+                                and gimple_ctypes.TypeLattice.is_word(vtype):
+                            ctype = 'int64_t'
                         # The pre-pass's builtin table still lists the
                         # iterator-factory family (`enumerate`/`take`/...)
                         # as `MojoList *` (the old materialized pair-list
@@ -2546,9 +2608,33 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             # Stage 5c: a literal `None` stored into a MIXED field (a scalar
             # beside `None`) is the shared None box, so a later read tells it
             # from the integer 0. Every other store is the bare word.
-            if (ginf.is_none_literal_node(node.value)
+            _mixed_target = ginf.mixed_field_read(gen, struct_name, node.target.member)
+            # …and a BOX-HOLDING PARAMETER (`self.extra = extra`, where
+            # `extra` was classified by the field's own mixed decision) is
+            # already the box: the call site boxed its argument by kind, and
+            # `_lower_IdentExpr` unboxed it only for the body's ordinary
+            # reads. Storing that unboxed word here dropped the None box back
+            # to `0` (`classes/02_mixed_field_types`: the constructor gets
+            # `None`, the field read printed `0`). The raw parameter word IS
+            # the box.
+            if (_mixed_target
+                    and isinstance(node.value, gimple_ctypes.IdentExpr)
+                    and _as_str(node.value.name) in ginf.boxed_param_names(gen)):
+                # A plain copy, NOT `_to_int64`: that helper's job is to take
+                # a box apart for an integer consumer (`mojo_box_int`), which
+                # is what flattened this store back to 0. The fresh temp is
+                # also unmarked, so `_safe_coerce_emit`'s "boxed word into a
+                # pointer slot" arm does not `mojo_box_word` it either.
+                _raw_box = gen._new_temp('int64_t')
+                # `build.copy`, not `gen._copy`: the latter carries the
+                # source's box fact onto the temp (`carry_value_info`), and
+                # then `_safe_coerce_emit`'s pointer arm unboxes it right
+                # back. This statement is the box moving into its slot.
+                build.copy(gen, _raw_box, _as_str(node.value.name))
+                v, vtype = _raw_box, 'int64_t'
+            elif (ginf.is_none_literal_node(node.value)
                     and gimple_ctypes.TypeLattice.is_word(field_type)
-                    and ginf.mixed_field_read(gen, struct_name, node.target.member)):
+                    and _mixed_target):
                 v, vtype = ginf.box_word_value(gen, node.value, vtype, v)
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
             gimple_ctypes.presence_set_emit(gen, gen._struct_name_owner.get(struct_name), node.target.member, ov, op)
@@ -4012,6 +4098,13 @@ def _gen_stmt_ReturnStmt(gen, node):
         if gen.current_func_name and v in gen._bound_method_ret_types:
             gen._return_bound_method_ret_types[gen.current_func_name] = \
                 gen._bound_method_ret_types[v]
+        # Stage 5c: the tagged-word twin of the two carries above.
+        if gen.current_func_name and v in getattr(gen, '_bound_method_tagged', ()):
+            gen._return_bound_method_tagged[gen.current_func_name] = 1
+        if gen.current_func_name and v in getattr(gen, '_callable_tagged', ()):
+            gen._return_callable_tagged[gen.current_func_name] = 1
+        if gen.current_func_name and v in getattr(gen, '_tuple_slot_tagged', {}):
+            gen._return_slot_tagged[gen.current_func_name] = gen._tuple_slot_tagged[v]
         if gen.current_func_name and v in gen._func_value_names:
             gen._return_func_value_names[gen.current_func_name] = \
                 gen._func_value_names[v]

@@ -712,7 +712,38 @@ def test_every_declaration_is_seen():
     #       live rule: the receiver is a named container type, so box
     #       539 -> 543 and word stays 459; total 998 -> 1002. `--fix` wrote
     #       this rung and every quoted figure from the same scan.
-    for header, want in (('fire_runtime.h', 892),   # --fix writes the live figure
+    # 892 -> 896 (2026-11-27, landing the stage 5c container store fix): FOUR
+    # names, the box-holding-word dict stores. A mixed struct field's read (a
+    # scalar beside `None`) is an `int64_t` word whose kind is the box's, so
+    # the store has to ask the box instead of assuming an integer:
+    #   +1  `mojo_dict_set_word` (`MojoDict *`, `char *`, `int64_t` in, void
+    #       out) — the str-key store: the slot's `_DictSlot.kind` comes from
+    #       the box (`_dict_box_slot_kind`, the inverse of `_dict_slot_boxed`),
+    #       so `{'k': c.s}` says None where the int store said `0`.
+    #   +1  `mojo_dict_set_word_kw` (`MojoDict *`, two `int64_t` in) — its
+    #       integer/content-key twin, with the same three-arm `_kw_kind`
+    #       dispatch every other setter has.
+    #   +1  `mojo_dict_set_bytes_word` (`MojoDict *`, `MojoBytes *`,
+    #       `int64_t` in) — the bytes-key twin.
+    #   +1  `mojo_dict_set_none_key_word` (`MojoDict *`, `int64_t` in) — the
+    #       `d[None] = c.s` store, whose kind travels the same way.
+    # All four are BOX-shaped by the live rule (the receiver is a named
+    # container type), so box 543 -> 547 and word stays 459; total
+    # 1002 -> 1006. `--fix` wrote this rung's figure and every quoted one
+    # from the same scan.
+    # 896 -> 897 (2026-11-27, landing the stage 5c list-slot read fix): ONE
+    # name, `mojo_list_pop_at_boxed` (`MojoList *`, `int64_t` in, `int64_t`
+    # out) — `lst.pop(i)` on a list that describes its own slots answers the
+    # popped value as the tagged word its kind calls for, so a None/bool
+    # element stops reading as the integer its payload shares bits with. Box
+    # 547 -> 548, word stays 459; total 1006 -> 1007. `--fix` wrote this
+    # rung's figure and every quoted one from the same scan.
+    # 897 -> 898 (2026-11-27, the stage 5c equality read): ONE name,
+    # `mojo_box_eq` (`int64_t`, `int64_t` in, `int` out) — `==` where a side is
+    # a tagged word (`None == 0` False, `0.0 == 0` True, a str box by
+    # content). Box 548 -> 549, word stays 459; total 1007 -> 1008. `--fix`
+    # wrote this rung's figure and every quoted one from the same scan.
+    for header, want in (('fire_runtime.h', 898),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already

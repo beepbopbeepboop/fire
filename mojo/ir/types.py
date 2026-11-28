@@ -50,6 +50,19 @@ class Type:
     def is_ptr(self) -> bool:
         return self.kind == 'ptr'
 
+    def is_pointer(self) -> bool:
+        """The spelling CONTAINS a `*` (TypeLattice.is_pointer's test).
+
+        Deliberately not `is_ptr()`: a function-pointer spelling is a pointer
+        spelling to the backend but not a `ptr` Type. Keeping this at the
+        spelling edge lets stage 4 delegate without changing any answer.
+        """
+        return '*' in self.name
+
+    def ends_in_star(self) -> bool:
+        """The spelling ENDS in ` *` (TypeLattice.ends_in_star's test)."""
+        return self.name.endswith(' *')
+
     def is_void(self) -> bool:
         return self.kind == 'void'
 

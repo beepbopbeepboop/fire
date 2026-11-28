@@ -280,9 +280,52 @@ def check_type_vocabulary():
     return bad
 
 
+def check_type_inputs():
+    """Every predicate answers the same for a `Type` as for its spelling.
+
+    Stage 4 migrates side tables from C-type strings to `Type` objects. A
+    predicate that silently answered differently for the two forms would
+    change generated C at each migrated writer while the string callers kept
+    passing. The unsolved markers are excluded: they are string-only by
+    design (stage 4 decision D), not types.
+    """
+    from mojo.ir import types as T
+    bad = []
+    string_only = {'is_unsolved', 'is_word_or_unsolved',
+                   'is_int_word_or_unsolved', 'is_int_word_or_none',
+                   'is_word_or_none'}
+    probes = [p for p in PROBES if isinstance(p, str) and p and p != 'unknown']
+    for name in sorted(LEGACY):
+        if name in string_only:
+            continue
+        fn = getattr(TL, name, None)
+        if fn is None:
+            continue
+        for spelling in probes:
+            if T.spelled(spelling) is T.OPAQUE:
+                continue
+            ty = T.type_named(spelling)
+            got, want = bool(fn(ty)), bool(fn(spelling))
+            if got != want:
+                bad.append('%s(Type(%r))=%s but string=%s'
+                           % (name, spelling, got, want))
+    for spelling in probes:
+        ty = T.type_named(spelling)
+        if T.spelled(spelling) is T.OPAQUE:
+            continue
+        if ty.is_pointer() != ('*' in spelling):
+            bad.append('Type.is_pointer(%r) disagrees with the spelling test'
+                       % spelling)
+        if ty.ends_in_star() != spelling.endswith(' *'):
+            bad.append('Type.ends_in_star(%r) disagrees with the spelling test'
+                       % spelling)
+    return bad
+
+
 def main() -> int:
     bad = (check_answer_key() + check_codemod_table()
-           + check_legacy_equivalence() + check_type_vocabulary())
+           + check_legacy_equivalence() + check_type_vocabulary()
+           + check_type_inputs())
     for b in bad:
         print('  FAIL  ' + b)
     print('passed: %d failure(s)' % len(bad))

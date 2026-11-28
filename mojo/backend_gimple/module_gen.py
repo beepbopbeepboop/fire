@@ -903,9 +903,9 @@ def _list_literal_slot_kinds(gen, node, param_kinds=None) -> list:
     `TypeLattice.slot_kind_byte`, and the one-byte runtime alphabet
     (`'d'`/`'p'`/`'s'`/`'l'`/`'i'`, `mojo_list_set_kinds`'s) is translated to
     the long form `_struct_slot_kinds` uses. `'l'` (a nested container slot)
-    and `'n'` (`None`) fold to `'int'`: a raw word IS the right read for
-    both — the pointer, and 0 — and the alternative would be a per-slot
-    pointer type this table has never carried.
+    folds to `'int'` (a raw word IS the right read for the pointer); `None`
+    keeps its own `'none'` kind, because the boxed None must stay
+    distinguishable from the integer 0.
 
     Both spellings are translated through ONE `_long` table rather than by
     appending `param_kinds`' value and `slot_kind_byte(...)`'s value
@@ -926,7 +926,10 @@ def _list_literal_slot_kinds(gen, node, param_kinds=None) -> list:
         if (isinstance(_el, gimple_ctypes.NoneLiteral) or (
                 isinstance(_el, gimple_ctypes.IdentExpr)
                 and gimple_ctypes.TypeLattice.is_none_type(_el.name))):
-            out.append('int')
+            # The slot holds the shared None box (stage 5c): a 'none' kind
+            # keeps it distinguishable from the integer 0, which folding to
+            # 'int' did not (`(None, 1)` destructured/printed as `(0, 1)`).
+            out.append('none')
             continue
         if isinstance(_el, gimple_ctypes.IdentExpr) and param_kinds:
             _pk = param_kinds.get(_as_str(_el.name))
@@ -1019,7 +1022,10 @@ wrong-static-answer failure the whole table exists to avoid.
             _kinds.add(gimple_ctypes.TypeLattice.slot_kind_byte(
                 gen._quick_type(_el)))
             _saw_typed = True
-        return _saw_typed and len(_kinds) > 1
+        # A `None` slot keeps its kind even when EVERY slot is None
+        # (`return None, None`): the box must survive the return, or the
+        # caller destructures/prints the integer 0.
+        return _saw_typed and (len(_kinds) > 1 or 'n' in _kinds)
     if not isinstance(node, gimple_ctypes.CallExpr):
         return False
     f = node.func
@@ -3121,7 +3127,10 @@ def _emit_reflection_dispatch(self, parts):
                "  if (_kinds && !strchr(_kinds, 'o'))\n"
                "    return mojo_repr_list_kinds(lst, 0);\n"
                "  int _is_tup = lst && mojo_is_tuple(lst);\n"
-               "  if (!lst) return strdup(_is_tup ? \"()\" : \"[]\");\n"
+               # A NULL list is the None of a refs-only slot (a `.get`
+               # miss, an unset container field); an EMPTY list is a real
+               # `mojo_list_new()` and still prints `[]` / `()`.
+               "  if (!lst) return strdup(\"None\");\n"
                "  int64_t _n = mojo_list_len(lst);\n"
                "  char *_buf = strdup(_is_tup ? \"(\" : \"[\");\n"
                "  for (int64_t _i = 0; _i < _n; _i++) {\n"
@@ -3256,8 +3265,11 @@ def _emit_reflection_dispatch(self, parts):
                 "  if (_r) return _r;\n"
                 "  return _mojo_generic_elem_repr(v);\n"
                 "}\n"
+               # A NULL dict is the None of a refs-only slot (a `.get` miss,
+               # an unset container field); an EMPTY dict is a real
+               # `mojo_dict_new()` and still prints `{}`.
                "static char * _mojo_repr_dict (MojoDict *d) {\n"
-                "  if (!d) return strdup(\"{}\");\n"
+                "  if (!d) return strdup(\"None\");\n"
                 "  if (d->frozen && d->used == 0) return strdup(\"frozendict()\");\n"
                 "  char *_buf = d->frozen ? strdup(\"frozendict({\") : strdup(\"{\");\n"
                 "  int64_t *_order = mojo_dict_order_indices(d);\n"
@@ -3353,7 +3365,8 @@ def _emit_reflection_dispatch(self, parts):
                "  return mojo_str_cat_free(_buf, d->frozen ? \"})\" : \"}\");\n"
                "}\n"
                "static char * _mojo_repr_set (MojoSet *s) {\n"
-               "  if (!s || s->used == 0) return strdup(\"set()\");\n"
+               "  if (!s) return strdup(\"None\");\n"
+               "  if (s->used == 0) return strdup(\"set()\");\n"
                "  char *_buf = strdup(\"{\");\n"
                "  int64_t *_order = mojo_set_order_indices(s);\n"
                "  for (int64_t _oi = 0; _oi < s->used; _oi++) {\n"
@@ -10383,6 +10396,53 @@ def _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
             _pbf = _pbt.setdefault(_as_str(_pbk), {})
             for _pbn in _pbns:
                 _pbf[_as_str(_pbn)] = 'int64_t'
+    # Stage 5c: a parameter STORED INTO A MIXED field of its own struct
+    # (`emit_infra.collect_mixed_field_param_names`) is the tagged word for
+    # the same reason a `= None` parameter is — the call site must box a
+    # `None` argument so it is not the integer 0. This runs HERE, after the
+    # FIRST call site's `_param_value_obs` exists (`_gmp_collect_param_value_obs`,
+    # which `gen_module_impl` runs between this function's two invocations),
+    # because the rule reads each argument's value class. On the first
+    # invocation the table is absent, so the collector answers nothing and the
+    # second invocation adds the names to the freshly rebuilt table above.
+    import mojo.backend_gimple.emit_infra as _mfp_ein
+    _mfps = _mfp_ein.collect_mixed_field_param_names(
+        self, [_as_structdef_node(_s) for _s in all_structs_for_methods
+               if isinstance(_s, StructDef)])
+    if _mfps:
+        # `_param_ctype` resolves a METHOD parameter from
+        # `_inferred_param_types[node.name]` — the BARE method name, not the
+        # `<Struct>_<method>` key `_param_box_names` uses. Write both, so the
+        # declaration (`char * item` -> `int64_t item`) and the call-site table
+        # agree about the same slot.
+        _mf_bare: dict = {}
+        for _ms in all_structs_for_methods:
+            if isinstance(_ms, StructDef):
+                for _mm in _ms.methods:
+                    _mf_bare[f"{_as_str(_ms.name)}_{_as_str(_mm.name)}"] = _as_str(_mm.name)
+        for _mfk in _mfps:
+            _mfc = _as_str(_mfk)
+            _mfs = _mfc.find('\x1f')
+            if _mfs < 0:
+                continue
+            _mck = _mfc[:_mfs]
+            _mpn = _mfc[_mfs + 1:]
+            _mfcur = self._param_box_names.get(_mck)
+            _mflist: list = []
+            _mfseen = False
+            if _mfcur is not None:
+                for _mfx in _mfcur:
+                    _mflist.append(_as_str(_mfx))
+                    if _as_str(_mfx) == _mpn:
+                        _mfseen = True
+            if not _mfseen:
+                _mflist.append(_mpn)
+            self._param_box_names[_mck] = set(_mflist)
+            if _pbt is not None:
+                _pbf = _pbt.setdefault(_as_str(_mck), {})
+                _pbf[_mpn] = 'int64_t'
+                _pbb = _pbt.setdefault(_mf_bare.get(_mck, _mck), {})
+                _pbb[_mpn] = 'int64_t'
 
 
 def _gmh_reconcile_param_container_kinds(self):
@@ -14988,6 +15048,222 @@ def _gmp_propagate_generator_returns(self, _ret_changed: bool, _ret_defs: list) 
             if rt_prov not in (None, '<conflict>'):
                 self._fn_returns_generator[_rf.name] = rt_prov
                 _ret_changed = True
+
+
+def _gmp_collect_boxed_return_names(self, all_functions: list,
+                                    all_structs_for_methods: list,
+                                    lifted_pairs: list = None) -> None:
+    """Stage 5c: record every function/method whose RETURN SLOT holds a scalar
+    beside `None`, so `return None` is the shared box and a call site renders
+    the result by kind.
+
+    `_return_arms_are_int_or_none` (the inference pass) can only see a literal
+    / comparison / bare-name scalar arm. A field read (`return self.x`) and a
+    container element (`return self.entries[-1]`) are the same slot and stayed
+    the bare word, so `print(f())` said `0` where CPython says `None`
+    (measured: `classes/04_list_field_append`, `classes/38_...`, and the
+    reduction `/tmp/retnone.py`). The evidence is `value_class_of`, the ONE
+    classifier the field and parameter rules already use, so this pass runs
+    after `_gmp_collect_param_value_obs` has built its tables.
+
+    It records through the EXISTING two halves, introducing no new
+    representation: the body OBJECT IDENTITY in `_mixed_return_bodies` (what
+    the return emitter asks, `_is_mixed_return`) and the callee NAME in
+    `_ret_may_hold_mixed` (what a call site asks). Only a function with BOTH a
+    `None` arm and a proven-scalar arm joins; a references-only slot keeps the
+    NULL word, exactly as the DECISION rule says."""
+    import mojo.backend_gimple.emit_infra as _rbn_ein
+    _mixed = getattr(self, '_mixed_return_bodies', None)
+    if _mixed is None:
+        _mixed = set()
+        self._mixed_return_bodies = _mixed
+    _names = getattr(self, '_ret_may_hold_mixed', None)
+    if _names is None:
+        _names = set()
+        self._ret_may_hold_mixed = _names
+
+    def _arm_is_scalar(v, key, owner, body=None) -> bool:
+        _avc = _rbn_ein.value_class_of(self, v, key, owner, 0)
+        if _avc == 'scalar' or _avc == 'mixed':
+            # `'mixed'` (a field stored from a scalar beside a reference) is
+            # a box-holding word: its scalar half is one of the values the
+            # return slot can carry, so the None arm needs the box too.
+            return True
+        # A CALL whose result is the element/value of a container
+        # (`items.pop()`, `max(items)`): `value_class_of` is deliberately
+        # silent for an unknown callee, but the element is a value word and
+        # the tagged return slot renders every element kind (`mojo_repr_boxed`
+        # covers an int, a str box/pointer, a container). The `None` arm is
+        # what needs the box.
+        if isinstance(v, CallExpr) and isinstance(v.func, MemberExpr):
+            if _as_str(v.func.member) in ('pop', 'index', 'count', 'find',
+                                          'rfind', 'rindex'):
+                return True
+        if isinstance(v, CallExpr) and isinstance(v.func, IdentExpr):
+            if _as_str(v.func.name) in ('min', 'max'):
+                return True
+        if isinstance(v, TernaryExpr):
+            _tca = _rbn_ein.value_class_of(self, v.then_val, key, owner, 0)
+            _tcb = _rbn_ein.value_class_of(self, v.else_val, key, owner, 0)
+            if ((_tca == 'scalar' and _tcb == 'none')
+                    or (_tca == 'none' and _tcb == 'scalar')):
+                return True
+        # A LOCAL bound from a container element (`best = items[0]; return
+        # best`) or a FOR-LOOP target over any iterable (`for w in words:
+        # return w`) is the same value word. The binding is found by a
+        # whole-body walk that does not descend into nested defs.
+        if isinstance(v, IdentExpr) and body is not None:
+            _vn = _as_str(v.name)
+            _bound: list = []
+
+            def _visit(s):
+                if isinstance(s, AssignStmt) \
+                        and isinstance(s.target, IdentExpr) \
+                        and _as_str(s.target.name) == _vn:
+                    _bound.append(s.value)
+                elif isinstance(s, ForStmt):
+                    _tg = s.target
+                    # `ForStmt.target` is the NAME STRING for a simple target
+                    # (`for w in words`), an IdentExpr in some rewritten forms,
+                    # and a list/tuple for `for i, n in ...`.
+                    _tnames: list = []
+                    if isinstance(_tg, (list, tuple)):
+                        for _t in _tg:
+                            _tnames.append(_as_str(_t))
+                    elif isinstance(_tg, IdentExpr):
+                        _tnames.append(_as_str(_tg.name))
+                    else:
+                        _tnames.append(_as_str(_tg))
+                    for _tn in _tnames:
+                        if _tn == _vn:
+                            _bound.append('for')
+                            break
+            _rbn_ein._walk_func_stmts(body, _visit)
+            for _b in _bound:
+                if isinstance(_b, SubscriptExpr) or _b == 'for':
+                    return True
+        if not isinstance(v, SubscriptExpr):
+            return False
+        # A SUBSCRIPT of a container: a `self.<field>` one is asked of the
+        # struct's field table; a local/parameter one of the caller's inferred
+        # types. Either way the read is a value word, same argument as above.
+        _bt = ''
+        _base = v.obj
+        if isinstance(_base, MemberExpr) and isinstance(_base.obj, IdentExpr) \
+                and _as_str(_base.obj.name) == 'self' and owner:
+            _fields = _as_dict(self.struct_field_types.get(_as_str(owner)) or {})
+            _bt = _fields.get(_as_str(_base.member))
+        elif isinstance(_base, IdentExpr):
+            _bn = _as_str(_base.name)
+            _lt = _as_dict((getattr(self, '_inferred_var_types', None) or {}).get(_as_str(key)) or {})
+            _bt = _lt.get(_bn)
+            if not _bt:
+                _pt = _as_dict((getattr(self, '_inferred_param_types', None) or {}).get(_as_str(key)) or {})
+                _bt = _pt.get(_bn)
+            if not _bt:
+                # A `*args` parameter is a `MojoList *` the type tables do not
+                # name; a subscript of any plain name is a value word in valid
+                # code, so it is scalar evidence for the return slot.
+                return True
+        if _bt is None:
+            _bt = ''
+        return bool(_bt) and (gimple_ctypes.TypeLattice.is_list(_bt)
+                              or gimple_ctypes.TypeLattice.is_dict(_bt)
+                              or gimple_ctypes.TypeLattice.is_set(_bt))
+
+    def _one(body, key, owner, va_names=None) -> None:
+        if body is None:
+            return
+        acc: list = []
+        arms: list = []
+        try:
+            self._collect_return_types(body, acc, arms)
+        except Exception:
+            return
+        _has_none = False
+        _has_scalar = False
+        for _i in range(len(arms)):
+            _v = arms[_i]
+            if _v is None or isinstance(_v, NoneLiteral) or (
+                    isinstance(_v, IdentExpr)
+                    and gimple_ctypes.TypeLattice.is_none_type(_as_str(_v.name))):
+                _has_none = True
+                continue
+            # A `*args` element (`return args[0]`) is a VALUE WORD from a pack
+            # that can hold `None` (the pack boxes a None argument), so the
+            # return slot may be None as well as the element's own kind.
+            if va_names and isinstance(_v, SubscriptExpr) \
+                    and isinstance(_v.obj, IdentExpr) \
+                    and _as_str(_v.obj.name).lstrip('*') in va_names:
+                _has_none = True
+                _has_scalar = True
+                continue
+            # A return arm that IS a box-holding slot (a mixed field read,
+            # `return self.s`) already carries the scalar-and-None
+            # representation: the field's own decision is the return slot's
+            # evidence, and no literal `None` arm is needed for the caller to
+            # render/compare by kind (`x = c.get(); x is None`).
+            _arm_mixed = (_rbn_ein.value_class_of(self, _v, key, owner, 0)
+                          == 'mixed')
+            # `value_class_of` answers `unknown` for a field whose only
+            # non-`None` store comes from an unobserved parameter
+            # (`def __init__(self, v=None): self.v = v` + `set(3)`), while the
+            # field's own decision (`mixed_field_read`, which counts a `= None`
+            # default as None evidence) is `mixed`. The field IS the return
+            # slot's representation, so ask the same authority the read uses.
+            if (not _arm_mixed and owner
+                    and isinstance(_v, MemberExpr)
+                    and isinstance(_v.obj, IdentExpr)
+                    and _as_str(_v.obj.name) == 'self'):
+                _arm_mixed = _rbn_ein.mixed_field_read(
+                    self, _as_str(owner), _as_str(_v.member))
+            if _arm_mixed:
+                _has_none = True
+                _has_scalar = True
+                continue
+            if _arm_is_scalar(_v, key, owner, body):
+                _has_scalar = True
+        # Python's fall-off-the-end is `return None`: a proven scalar arm plus
+        # a path that can reach the end is the same rule-2 slot as an explicit
+        # `return None` (`only_some` in params/32_implicit_none_return).
+        if _has_scalar and _rbn_ein.body_may_fall_off(body):
+            _has_none = True
+        if _has_none and _has_scalar:
+            _mixed.add(id(body))
+            _names.add(_as_str(key))
+            _boxed = getattr(self, '_ret_boxed_names', None)
+            if _boxed is None:
+                _boxed = set()
+                self._ret_boxed_names = _boxed
+            _boxed.add(_as_str(key))
+
+    def _va_names(fn) -> list:
+        _out: list = []
+        for _pp in (getattr(fn, 'params', None) or []):
+            _pn = _as_str(_pp[0] if isinstance(_pp, (tuple, list)) else _pp)
+            if _pn.startswith('*') and not _pn.startswith('**'):
+                _out.append(_as_str(_pn.lstrip('*')))
+        return _out
+
+    for _fn in all_functions:
+        if isinstance(_fn, FunctionDef) and getattr(_fn, 'return_type', None) is None:
+            _one(getattr(_fn, 'body', None), _as_str(_fn.name), None,
+                 _va_names(_fn))
+    for _st in all_structs_for_methods:
+        if not isinstance(_st, StructDef):
+            continue
+        _sname = _as_str(_st.name)
+        for _m in _st.methods:
+            if getattr(_m, 'return_type', None) is None:
+                _one(getattr(_m, 'body', None),
+                     _sname + '_' + _as_str(_m.name), _sname, _va_names(_m))
+    # Nested `def`s/lambdas this compile lifts into their own functions: the
+    # same decision, recorded under the name the closure VALUE is created
+    # with (`_ret_boxed_names`). The closure-creation and call-through-value
+    # sites consult that name (see emit_exprs/emit_methods).
+    for _lp in (lifted_pairs or ()):
+        _one(getattr(_lp[1], 'body', None), _as_str(_lp[0]), None,
+             _va_names(_lp[1]))
 
 
 def _gmp_collect_param_value_obs(self, all_functions: list, all_structs_for_methods: list,
@@ -20350,6 +20626,11 @@ def gen_module_impl(self, stmts: list):
                 ginf.alias_multi_kind_locals(self, key, m)
     _gmh_record_param_box_names(self, all_functions, all_structs_for_methods,
                                 stmts)
+    # Stage 5c: the return-slot half of the same decision. Runs after the
+    # call-site value table above (`_gmp_collect_param_value_obs`) so
+    # `value_class_of` can prove a field/subscript arm scalar; unions into the
+    # `_mixed_return_bodies` / `_ret_may_hold_mixed` sets the return emitter
+    # and every call site already consult.
     _gmh_reconcile_param_container_kinds(self)
     _gmh_reconcile_augmented_param_types(
         self, all_functions, all_structs_for_methods)
@@ -20487,6 +20768,18 @@ def gen_module_impl(self, stmts: list):
     # code pointer, and discover_closures passes `ctx` explicitly.
     self.selfhost_param_ctype = _selfhost_gen_self_param_ctype
     _gmp_discover_closures(self, stmts)
+    # Stage 5c: the return-slot decision for functions, methods AND the lifted
+    # closures `_gmp_discover_closures` just recorded (`_all_closures`). Runs
+    # after the call-site value table (`_gmp_collect_param_value_obs`) and the
+    # closure discovery, both of which feed it.
+    _lift_pairs = []
+    for _lown in (getattr(self, '_all_closures', None) or {}):
+        for _lci in (self._all_closures[_lown] or {}).values():
+            _lidef = getattr(_lci, 'inner_def', None)
+            if _lidef is not None:
+                _lift_pairs.append((_as_str(getattr(_lci, 'lifted_name', '')), _lidef))
+    _gmp_collect_boxed_return_names(self, all_functions,
+                                    all_structs_for_methods, _lift_pairs)
 
     # `self._multi_kind_return_funcs` names the functions whose return slot
     # is the box because they hand back a container whose kind a caller cannot

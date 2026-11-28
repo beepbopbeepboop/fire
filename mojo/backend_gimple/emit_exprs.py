@@ -140,6 +140,20 @@ def lower_expr(gen, node) -> tuple[str, str]:
                     gen, '_ret_may_hold_mixed', ())):
             gen._word_mark_boxed(_rv)
             gen._word_mark_tagged(_rv)
+        # A call to a function this compile knows is VOID, used as a VALUE
+        # (`print(do_nothing())`, `x = obj.push(v)`, a dict/list element),
+        # is Python's None. The lowerer emitted the call and answered the
+        # placeholder `int` 0; replace it with the shared None box and mark it
+        # a tagged word, so print/is-None/truthiness dispatch by kind. A bare
+        # statement call does not come through here (`_gen_stmt_ExprStmt` uses
+        # `_lower_call` directly), so a value-discarding call allocates
+        # nothing.
+        if gimple_ctypes.TypeLattice.is_c_int(_rt) \
+                and ginf.call_is_void(gen, node):
+            _nv = gen._call_expr('int64_t', 'mojo_box_none', [])
+            gen._word_mark_boxed(_nv)
+            gen._word_mark_tagged(_nv)
+            return 'int64_t', _nv
         # A `yield` used as a VALUE (`x = yield`, `print((yield))`) reads the
         # resume word, which is the None box when the generator was resumed by
         # `next()` / `send(None)` (coro.py's trampoline). Mark it as a tagged
@@ -588,6 +602,12 @@ def _closure_value(gen, name: str, _ci) -> tuple:
     function (`_gen_stmt_FunctionDef`)."""
     lifted = _ci.lifted_name
     gen._funcptr_builtins_needed.add(lifted)
+    # Stage 5c: this lifted body's return slot is a scalar beside None
+    # (`_gmp_collect_boxed_return_names`). The CALLABLE VALUE carries the fact
+    # so a call through it marks its result a tagged word; the bound-method /
+    # function-pointer halves carry it across a factory return and a tuple
+    # unpack (`_return_*_tagged`).
+    _ret_boxed = _as_str(lifted) in getattr(gen, '_ret_boxed_names', ())
     fp = gen._new_val('void *', f'_funcptr_{lifted}')
     _repr_name = f"{gen.current_func_name or 'root'}.<locals>.{name}"
     if _ci.env_struct:
@@ -627,6 +647,8 @@ def _closure_value(gen, name: str, _ci) -> tuple:
             _vft = gen._cast('void *', _vf)
             gen._callable_ret_types[_vft] = gen.func_return_types.get(lifted, 'int64_t')
             gen._func_value_names[_vft] = _repr_name
+            if _ret_boxed:
+                gen._callable_tagged.add(_vft)
             return 'void *', _vft
         t = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
                             [('void *', fp), ('void *', env_void)])
@@ -653,8 +675,12 @@ def _closure_value(gen, name: str, _ci) -> tuple:
                                    [('MojoBoundMethod *', t), ('void *', _box_val)])
         gen._bound_method_ret_types[t] = gen.func_return_types.get(lifted, 'int64_t')
         gen._func_value_names[t] = _repr_name
+        if _ret_boxed:
+            gen._bound_method_tagged.add(t)
         return 'MojoBoundMethod *', t
     gen._func_value_names[fp] = _repr_name
+    if _ret_boxed:
+        gen._callable_tagged.add(fp)
     return 'void *', fp
 
 
@@ -1660,18 +1686,35 @@ def _lower_TernaryExpr(gen, node) -> tuple[str, str]:
     ct, cv = gen.lower_expr(node.condition)
     cv = gen._ensure_bool_cond(ct, cv)
     res_type = gimple_ctypes.TypeLattice.join(gen._quick_type(node.then_val), gen._quick_type(node.else_val))
-    result = gen._new_temp(res_type)
+    # A `None` branch of a WORD-typed ternary is the shared None box, not the
+    # integer 0: `a // b if b else None` returned 0 where CPython returns None
+    # (funcs/30_dispatch_dict_by_string). A refs-only slot keeps its NULL None
+    # (rule 1), so this is gated on the joined result being a word.
+    _tn_none = gen._is_none_literal(node.then_val)
+    _te_none = gen._is_none_literal(node.else_val)
+    if (_tn_none or _te_none) and gimple_ctypes.TypeLattice.is_word(res_type):
+        result = gen._new_temp(res_type)
+        gen._word_mark_boxed(result)
+        gen._word_mark_tagged(result)
+    else:
+        result = gen._new_temp(res_type)
     bb_then = gen._new_bb()
     bb_else = gen._new_bb()
     bb_merge = gen._new_bb()
     gen._cond_goto(f"{cv}", bb_then, bb_else)
     gen._emit_label(bb_then)
     tt, tv = gen.lower_expr(node.then_val)
-    gen._safe_coerce_emit(tt, res_type, tv, result)
+    if _tn_none and gimple_ctypes.TypeLattice.is_word(res_type):
+        gen._copy(result, gen._call_expr('int64_t', 'mojo_box_none', []))
+    else:
+        gen._safe_coerce_emit(tt, res_type, tv, result)
     gen._goto(bb_merge)
     gen._emit_label(bb_else)
     et, ev = gen.lower_expr(node.else_val)
-    gen._safe_coerce_emit(et, res_type, ev, result)
+    if _te_none and gimple_ctypes.TypeLattice.is_word(res_type):
+        gen._copy(result, gen._call_expr('int64_t', 'mojo_box_none', []))
+    else:
+        gen._safe_coerce_emit(et, res_type, ev, result)
     gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     # A ternary over two operands this codegen already KNOWS are integers
@@ -1770,12 +1813,28 @@ def _lme_struct_field(gen, node, field_map, op: str, ov, struct_name: str) -> tu
     # storage: guard the load on the instance's presence bit.
     gimple_ctypes.presence_check_emit(
         gen, gen._struct_name_owner.get(struct_name), node.member, ov, op, struct_name)
-    t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
+    # Stage 5c: a MIXED field (a scalar beside `None`, or values of more than
+    # one kind) is the tagged word; its DECLARED C type may still be a pointer
+    # from the usage inference (`Point.x` is `char *` because one call site
+    # passes a string), so the READ is typed `int64_t` and marked. Otherwise
+    # `repr(self.x)` on a field holding an int box called the str helper with
+    # the box's address (SIGSEGV in classes/21_str_and_repr).
+    _is_mixed_f = ginf.mixed_field_read(gen, struct_name, node.member)
+    _fref = f'{ov}{op}{gimple_ctypes._safe_field(node.member)}'
+    if _is_mixed_f:
+        # A component_ref of the DECLARED pointer type assigned to an int64_t
+        # temp is a non-trivial conversion GIMPLE rejects; cast explicitly.
+        if gimple_ctypes.TypeLattice.is_word(field_type):
+            t = gen._new_val(field_type, _fref)
+        else:
+            # `(int64_t)ptr` is an invalid GIMPLE unary; `_to_int64` routes a
+            # pointer through `void *` first.
+            t = gen._to_int64(field_type, _fref)
+        field_type = 'int64_t'
+    else:
+        t = gen._new_val(field_type, _fref)
     _mark_boxed_field_read(gen, struct_name, node.member, field_type, t)
-    # Stage 5c: a MIXED field (a scalar beside `None`) stores `None` as the
-    # shared box, so its read is a box and answers by the box's kind.
-    if (gimple_ctypes.TypeLattice.is_word(field_type)
-            and ginf.mixed_field_read(gen, struct_name, node.member)):
+    if _is_mixed_f:
         gen._word_mark_mixed_field(t)
     # PART 6 (2026-10-22, family C): record a READ of a tagged-Optional
     # field so the boolean-context conversions (_ensure_bool_cond /
@@ -1840,6 +1899,16 @@ def _lme_struct_field(gen, node, field_map, op: str, ov, struct_name: str) -> tu
         if t not in gen._struct_field_owners:
             gen._struct_field_owners[t] = []
         gen._struct_field_owners[t].append((struct_name, node.member))
+    # Stage 5c: a field whose LIST value carries a per-slot kinds row (a bool
+    # or None appended beside ints/strs) must be read BOXED, or `self.items[-1]`
+    # / `.pop()` reads the raw word and a None/bool box's payload 0 prints as
+    # the integer 0. The append site records the field (`note_field_slot_kinds`);
+    # the mark here is what `_ls_list` consults for the boxed accessor.
+    _fsk = getattr(gen, '_field_slot_kinds', None)
+    if _fsk:
+        _fsn = _fsk.get(_as_str(struct_name))
+        if _fsn and _as_str(node.member) in _fsn:
+            gen._word_mark_slot_kinds(t)
     return field_type, t
 
 
@@ -3886,6 +3955,22 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                 and ltype in gimple_ctypes._CONTAINER_KIND_TYPES
                 and _rq in gimple_ctypes._CONTAINER_KIND_TYPES):
             _mixed_word = True
+        # A CONTAINER/STR pointer beside a DIFFERENT pointer kind (`[] and
+        # "never"`, a list selected on one edge and a str on the other): the
+        # join picks one pointer type and the other operand is stored into it
+        # raw, so `print` read the list's memory as a string. Whichever was
+        # selected is a word of unknown kind, answered by the runtime -- the
+        # same reasoning as the two-container rule above.
+        if (not _bool_merge and not _mixed_word
+                and ltype != _rq
+                and gimple_ctypes.TypeLattice.ends_in_star(ltype)
+                and isinstance(_rq, str)
+                and gimple_ctypes.TypeLattice.ends_in_star(_rq)
+                and (ltype in gimple_ctypes._CONTAINER_KIND_TYPES
+                     or _rq in gimple_ctypes._CONTAINER_KIND_TYPES
+                     or gimple_ctypes.TypeLattice.is_cstr(ltype)
+                     or gimple_ctypes.TypeLattice.is_cstr(_rq))):
+            _mixed_word = True
         if _mixed_word:
             res_type = 'int64_t'
         # A BYTES operand against a str or a word (`os.path.split(b'a/b')[0] or
@@ -3899,6 +3984,17 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             (gimple_ctypes.TypeLattice.is_bytes(ltype) and gimple_ctypes.TypeLattice.is_word_or_cstr(_rq))
             or (gimple_ctypes.TypeLattice.is_bytes(_rq) and gimple_ctypes.TypeLattice.is_word_or_cstr(ltype))))
         if _bytes_mix:
+            res_type = 'int64_t'
+        # A `None` literal as an operand: when the operand is SELECTED as the
+        # result (`None and x` -> None, `True and None` -> None, `0 or None`
+        # -> None), Python answers None, not the integer 0 the literal lowers
+        # to. The truthiness test still uses the word 0; only the stored
+        # result is the shared box. `strings/17_str_repr_bool_none`.
+        _lnone = gen._is_none_literal(node.left)
+        _rnone = gen._is_none_literal(node.right)
+        if (_lnone or _rnone) and (gimple_ctypes.TypeLattice.is_word(res_type)
+                                    or gimple_ctypes.TypeLattice.is_c_int(res_type)
+                                    or gimple_ctypes.TypeLattice.is_bool(res_type)):
             res_type = 'int64_t'
         result = gen._new_temp(res_type)
         if _mixed_word or _bytes_mix:
@@ -3924,6 +4020,13 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             # constant, not as a cast of the `_Bool`: a pointer is never made
             # from a 1-bit value (gimple-lint's cast-narrow-int-to-ptr).
             gen._cast_into(result, res_type, '0')
+        elif _lnone and node.op == 'and' \
+                and gimple_ctypes.TypeLattice.is_word(res_type):
+            # `None and x`: the left is falsy, so the short-circuit edge IS
+            # the answer, and the answer is None.
+            gen._copy(result, gen._call_expr('int64_t', 'mojo_box_none', []))
+            gen._word_mark_boxed(result)
+            gen._word_mark_tagged(result)
         else:
             gen._safe_coerce_emit(ltype, res_type, lval, result)
         gen._goto(bb_merge)
@@ -3946,6 +4049,11 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         if _bool_merge:
             _rb = gen._ensure_bool_cond(rtype, rval)
             gen._copy(result, f"{_rb}")
+        elif _rnone and gimple_ctypes.TypeLattice.is_word(res_type):
+            # `x and None` / `falsy or None`: the right operand was selected.
+            gen._copy(result, gen._call_expr('int64_t', 'mojo_box_none', []))
+            gen._word_mark_boxed(result)
+            gen._word_mark_tagged(result)
         else:
             gen._safe_coerce_emit(rtype, res_type, rval, result)
         # A word result either of whose operands is a word of unknown kind is
@@ -5035,6 +5143,28 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         _arm_r = _lbt_boxed_none_compare(gen, op, left_node, lt, lv, right_node, rt, rv)
         if _arm_r is not None:
             return _arm_r
+    # `a == b` where a side is a TAGGED WORD and neither side is a `None`
+    # literal: the box's own kind decides the value equality (`None == 0` is
+    # False, `0.0 == 0` is True, a str box compares by content). The generic
+    # operand conversion below unwraps with `mojo_box_word`, which flattens the
+    # None box to 0 and keeps a double box as its address, so both answers
+    # were wrong (measured: `contains_zero` in
+    # flow/12_early_return_loop.py over `[None, 1]` and `[1, 0.0, 2]`).
+    if (op in ('==', '!=')
+            and (gimple_ctypes.TypeLattice.is_word(lt)
+                 or gimple_ctypes.TypeLattice.is_int_word_or_bool(lt))
+            and (gimple_ctypes.TypeLattice.is_word(rt)
+                 or gimple_ctypes.TypeLattice.is_int_word_or_bool(rt))
+            and (gen._word_may_be_box(lv) or gen._word_is_tagged(lv)
+                 or gen._word_may_be_box(rv) or gen._word_is_tagged(rv))):
+        _be_l = lv if gimple_ctypes.TypeLattice.is_word(lt) else gen._to_int64(lt, lv)
+        _be_r = rv if gimple_ctypes.TypeLattice.is_word(rt) else gen._to_int64(rt, rv)
+        _be_t = gen._call_expr('int', 'mojo_box_eq',
+                               [('int64_t', _be_l), ('int64_t', _be_r)])
+        _be_r = gen._new_temp('_Bool')
+        _be_c = '!= 0' if op == '==' else '== 0'
+        build.assign(gen, f'{_be_r}', f'{_be_t} {_be_c}')
+        return '_Bool', _be_r
     # `x is None` / `is not None` where `x` is PROVABLY an integer: the answer
     # is a constant False/True, because 0 is an integer and None is not it.
     # The generic identity arm below compares the words, and None is the word
@@ -6382,7 +6512,7 @@ def _lower_compare_chain(gen, node: gimple_ctypes.CompareChain) -> tuple[str, st
             cmp_type, cmp_val = gen._lower_in_dispatch(
                 lt, lv, rt, rv, negate=(op == 'not in'),
                 x_is_none=is_none_needle(gen, node.operands[i]),
-                x_is_word=_is_box_word_expr(gen, node.operands[i], lv))
+                x_is_word=ginf.is_box_word_expr(gen, node.operands[i], lv))
         else:
             cmp_type, cmp_val = gen._lower_binary_tail(op, left_node, lt, lv, right_node, rt, rv)
         cond = gen._ensure_bool_cond(cmp_type, cmp_val)
@@ -7218,7 +7348,7 @@ def _lower_in_impl(gen, node: gimple_ctypes.BinaryOp, negate: bool) -> tuple[str
         xv = gen._cast(xt, xv)
     return gen._lower_in_impl_values(xt, xv, node.right, negate,
                                      x_is_none=is_none_needle(gen, node.left),
-                                     x_is_word=_is_box_word_expr(gen, node.left, xv))
+                                     x_is_word=ginf.is_box_word_expr(gen, node.left, xv))
 
 
 def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool,
@@ -7942,7 +8072,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         # None -> an 'n' slot, a bool -> a bool slot), so every later read of
         # the literal — iteration, repr, a set constructor — sees the value,
         # not the address.
-        if gimple_ctypes.TypeLattice.is_word(et) and _is_box_word_expr(gen, el, ev):
+        if gimple_ctypes.TypeLattice.is_word(et) and ginf.is_box_word_expr(gen, el, ev):
             gen._emit_call('void', '', 'mojo_list_append_word',
                            [('MojoList *', t), ('int64_t', ev)])
             gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
@@ -8378,28 +8508,6 @@ def _is_scalar_elem_kind(elem: str) -> bool:
             or gimple_ctypes.TypeLattice.is_bytes(elem))
 
 
-def _is_box_word_expr(gen, el, ev) -> bool:
-    """Is this lowered `int64_t` value a BOX-HOLDING word, whose kind the
-    runtime tag carries rather than the C type?
-
-    Three producers: a mixed-kind LOCAL (`mixed_box_name` — a container beside
-    a scalar, or two scalar kinds), a parameter whose annotation the body
-    contradicts (`boxed_param_names`, one of the same names), and a value
-    already marked as a box/tagged word by its lowering (a call to a
-    mixed-return function, a `next()` off a mixed generator). Appending one
-    of these through the int accessor stores the box's own address; the
-    word-aware append keeps the value."""
-    if gen._word_may_be_box(ev) \
-            or gen._word_is_tagged(ev) \
-            or gen._word_is_dyn(ev):
-        return True
-    if isinstance(el, IdentExpr):
-        _n = _as_str(_as_ident_node(el).name)
-        try:
-            return ginf.mixed_box_name(gen, _n)
-        except Exception:
-            return False
-    return False
 
 
 def _provably_int_word(gen, el, ev: str) -> bool:
@@ -8413,6 +8521,19 @@ def _provably_int_word(gen, el, ev: str) -> bool:
     if (isinstance(el, UnaryOp) and _as_str(el.op) == '-'
             and isinstance(el.operand, IntLiteral)):
         return True
+    if (isinstance(el, MemberExpr) and not gen._word_is_mixed_field(ev)):
+        # A FIELD read whose declared ctype is an integer word is a real
+        # integer in THIS module unless the read is one of the box-holding
+        # mixed slots, which `_lower_MemberExpr` marks (`_word_is_mixed_field`,
+        # excluded above). Without this, `[node.key]` recorded no kinds row at
+        # all (the element is a MemberExpr, not an IdentExpr the word tracker
+        # knows), so the generic walker described the integer `0` as `None` --
+        # `classes/13_binary_tree_inorder` printed `[-2, None, ...]`.
+        # An IMPORTED struct is left unproven: its defining module made the
+        # mixed decision and this TU cannot see it.
+        _ft = gen._resolve_member_expr_type(el)
+        if isinstance(_ft, str) and gimple_ctypes.TypeLattice.is_int_word(_ft):
+            return True
     return gen._word_is_int_word(ev)
 
 
@@ -8898,6 +9019,20 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
                 continue
             _slot_ts.append(_as_str(_slt[1]))
         gen._tuple_slot_types[t] = _slot_ts
+        # Stage 5c: which slots hold a callable whose lifted body returns a
+        # scalar beside None (a factory `return push, pop, size`). Carried to
+        # the call site by the `_return_slot_tagged` twin of
+        # `_return_slot_types`, and re-keyed to the unpacked names there.
+        _slot_tag = []
+        for _slt in lowered:
+            if _is_star_spread(_slt[0]):
+                continue
+            _sv = _as_str(_slt[2])
+            _slot_tag.append(
+                1 if (_sv in getattr(gen, '_bound_method_tagged', ())
+                      or _sv in getattr(gen, '_callable_tagged', ())) else 0)
+        if any(_slot_tag):
+            gen._tuple_slot_tagged[t] = _slot_tag
     # Record prefix kinds before any spread extends the tuple.
     _prefix_tkinds = _literal_slot_kinds(gen, lowered)
     if _has_spread and _prefix_tkinds:
@@ -8918,6 +9053,30 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
         # identical `_is_star_spread` handling.
         if _is_star_spread(_el):
             _emit_star_spread(gen, t, et, ev)
+            continue
+        # A BOX-HOLDING word (a mixed struct field read, a mixed-kind local, a
+        # tagged word) is appended under its own runtime kind, exactly as the
+        # list literal's identical arm does: `(c.s,)` over a field holding
+        # `None` appended the box's address as an int slot and printed `(0,)`.
+        # `include_dyn=False`: a merely-dynamic word (a `uint32` read out of a
+        # `bitcast` list, a `hi, lo = (hilo[1], hilo[0])` element) is NOT a
+        # box, and boxing it made the destructured slots boxed words whose
+        # arithmetic added a box address (philox.mojo `_incrn`).
+        if gimple_ctypes.TypeLattice.is_word(et) and ginf.is_box_word_expr(gen, _el, ev, False):
+            gen._emit_call('void', '', 'mojo_list_append_word',
+                           [('MojoList *', t), ('int64_t', ev)])
+            gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
+            gen._word_mark_slot_kinds(t)
+            continue
+        # A literal `None` element is the shared None box under its own slot
+        # kind, so `(None, 1)` prints `(None, 1)` and a destructured slot reads
+        # back None (it was appended as the integer 0).
+        if gen._is_none_literal(_el):
+            _nn = gen._call_expr('int64_t', 'mojo_box_none', [])
+            gen._emit_call('void', '', 'mojo_list_append_word',
+                           [('MojoList *', t), ('int64_t', _nn)])
+            gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
+            gen._word_mark_slot_kinds(t)
             continue
         use = gimple_ctypes.TypeLattice.list_suffix(et) if per_element else suf
         ev_cast = gen._cast_for_list(et, ev, use)
