@@ -306,13 +306,13 @@ def group_constants():
           f'Lean runs with -j {L.LEAN_THREADS}, FORMAL.md §12 publishes -j 4')
 
     # §7 row 7: the CFG leaves that admit. Named in the document, and the
-    # document says seventeen; the generator stamps each name into the Lean, so a
+    # document says eighteen; the generator stamps each name into the Lean, so a
     # site added here is a site a reader is told about.
-    check(len(AP.CFG_LEAF_SITES) == 17,
+    check(len(AP.CFG_LEAF_SITES) == 18,
           f'CFG_LEAF_SITES has {len(AP.CFG_LEAF_SITES)} sites, FORMAL.md §7 row 7 '
-          f'publishes seventeen')
-    check('**seventeen named sites**' in text,
-          "FORMAL.md §7 row 7 states the CFG_LEAF_SITES count as 'seventeen'")
+          f'publishes eighteen')
+    check('**eighteen named sites**' in text,
+          "FORMAL.md §7 row 7 states the CFG_LEAF_SITES count as 'eighteen'")
 
     # §1: the runtime translation unit's size, which is the one figure in the
     # thesis paragraph and was 299 KB when written.
