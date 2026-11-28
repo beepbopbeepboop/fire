@@ -5161,6 +5161,15 @@ def value_class_of(gen, node, caller_key, caller_struct, depth) -> str:
         pnames = (getattr(gen, '_pv_param_names', None) or {}).get(_as_str(caller_key))
         if pnames and n in pnames:
             return param_value_class(gen, caller_key, n)
+        # A plain scalar local (`x = 5` bound once) proves a scalar kind from
+        # its body binding, where `_mixed_scalar_locals` deliberately stays
+        # silent (it only answers the multi-kind box case). Without this a call
+        # site `c.put(x)` over such a local went `unknown` and the field kept
+        # its refs-only word.
+        lk = ((getattr(gen, '_pv_local_scalar_kinds', None) or {})
+              .get(_as_str(caller_key), {}))
+        if n in lk:
+            return 'scalar'
         return _pv_type_class(_pv_var_type(gen, caller_key, n))
     if isinstance(node, gimple_ctypes.MemberExpr) \
             and isinstance(node.obj, gimple_ctypes.IdentExpr):
@@ -5393,6 +5402,33 @@ def collect_param_value_obs(gen, all_functions: list, all_structs: list,
         _pv_bind_local_structs(entry[2], structs, one)
         locs[_as_str(entry[0])] = one
     gen._pv_local_structs = locs
+    # Local name -> scalar binding kind ('int' / 'double' / 'str'), per caller
+    # key, from the last PROVABLE binding of each local in the caller's body.
+    # `_mixed_scalar_locals` deliberately refuses names bound once (over-counts
+    # are the safe answer); this table is the other view -- the name -> kind map
+    # that lets a call site passing a plain scalar local (`c.put(x)` where
+    # `x = 5`) answer `scalar` instead of going silent.
+    lks: dict = {}
+    for entry in caller_bodies:
+        _ck = _as_str(entry[0])
+        if _ck in lks:
+            continue
+        _dvt, _ann = _scalar_mixed_prescan(gen, entry[2])
+        _kinds: dict = {}
+
+        def _pv_lkind(name, value, _k=_kinds, _d=_dvt):
+            _kn = _mixed_scalar_binding_kind(gen, value, _d)
+            if _kn is not None:
+                _k[_as_str(name)] = _kn
+
+        def _pv_lvisit(s):
+            if isinstance(s, gimple_ctypes.AssignStmt) \
+                    and isinstance(s.target, gimple_ctypes.IdentExpr):
+                _pv_lkind(s.target.name, s.value)
+
+        _walk_func_stmts(entry[2], _pv_lvisit)
+        lks[_ck] = _kinds
+    gen._pv_local_scalar_kinds = lks
     gen._param_value_obs = {}
     for _round in range(3):
         table = _pv_collect_round(gen, caller_bodies, structs, defs, pnames)
