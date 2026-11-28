@@ -36,6 +36,8 @@ NO_CRASH = [
     'containers/05_mixed_list.py',
     'containers/09_list_remove_index_count.py',
     'funcs/32_recursion_accumulator.py',
+    'funcs/37_enumerate_zip_unpack.py',
+    'flow/14_try_else_finally.py',
 ]
 
 

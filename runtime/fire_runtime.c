@@ -962,6 +962,26 @@ void mojo_print(char *str) {
      * what `d.get(k)` lowers to — so `print(d.get("MISSING"))` has to say
      * `None` the way CPython does. Printing "(null)" for it made the value
      * recognisable as wrong only if you already knew it was wrong. */
+    /* Defensive dispatch for a word that reached this `char *` parameter
+     * without being unboxed: a mixed field/local/return still carries its
+     * kind in a MojoBox, and a small integer is not a char * at all. The
+     * generated call site casts the word before we get here, so this is the
+     * last place that can still tell the difference. printf on a box read
+     * its magic byte as text (a control character) and printf on a small
+     * integer was a wild read -- several corpus programs died here. */
+    int64_t _pw = (int64_t)(uintptr_t)str;
+    if (_pw > 0 && _pw < 0x10000) {
+        printf("%lld", (long long)_pw);
+        fflush(stdout);
+        return;
+    }
+    if (_pw && mojo_is_boxed(_pw)) {
+        char *_pr = mojo_repr_boxed(_pw);
+        fputs(_pr ? _pr : "None", stdout);
+        free(_pr);
+        fflush(stdout);
+        return;
+    }
     printf("%s", str ? str : "None");
     fflush(stdout);
 }
