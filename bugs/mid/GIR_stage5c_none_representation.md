@@ -1001,14 +1001,17 @@ definition's published signature (overriding `ret`/`params` when the arity
 lines up) and records word-returning `ret_class == 'refs'` symbols in
 `_imported_refs_ret_syms`; the method-call site marks the result
 `_word_mark_refs_none`, so the importing unit's spellings say `None` and a
-stored string prints as itself. Signature publication is **opt-in**
+stored string prints as itself. Signature publication by a compiled unit is **opt-in**
 (`compile_module_to_c(..., publish_signatures=True)`), because a process that
 compiles many INDEPENDENT modules (the stdlib sweep) must not leak one unit's
 signatures into the next one's import scan — two files sharing a basename
-(`utils`, `__init__`) would otherwise collide. The build's workers receive
-the call-kind evidence (snapshot) but publish no signatures, so a parallel
-dylib build gets the definer half and its importers keep today's text-scan
-fallback; `jobs=1`/the two-unit path get both.
+(`utils`, `__init__`) would otherwise collide. The parallel build's importer
+half is closed by the PARENT pre-pass instead: `publish_source_signatures`
+computes each method/function's `ret_class` from the module's own stores and
+the published call kinds, and the snapshot carries it into every worker (the
+C `ret`/`params` are deliberately not published there — the importer's text
+scan already has them, and a provisional C type would be an ABI claim). The
+fresh-process importer test below is the proof.
 
 **Acceptance.** `test_codegen_imported_method_none_return.py`'s refs-only
 fixture now runs the pre-pass over BOTH sources before either compiles and
@@ -1061,3 +1064,36 @@ CRASH lists are identical to the pre-bytes run, so only the new pin moved.
 `compile_stdlib.py -j 8`: 610 passed, 0 failed (0 expected, 0 unexpected).
 `test_gimple_runner.py`: **688 passed, 0 failed**. `test_pydiff_ratchet.py`:
 163 listed, 0 failures. The owner's `make bootstrap` remains the acceptance.
+
+## Status 2026-11-28 (H2 parallel importer half closed)
+
+`build_stdlib_dylib.build` compiles modules in worker PROCESSES, so a worker
+cannot see a sibling's compiled signatures and its importers kept the text
+scan (`ret_class` absent → a refs-only None printed `0`). The parent pre-pass
+now publishes the one fact the text scan cannot re-derive:
+
+- `cross_module.publish_source_signatures(sources)` parses each module and
+  computes, per method/function, `ret_class = 'refs'` when a return arm reads
+  a field whose stores are `None` plus references and no scalar (the rule-1
+  shape), using the parent's already-published call-kind evidence for a
+  parameter stored into the field; `'mixed'` is recorded the same way. The
+  C `ret`/`params` are NOT published there: the importer's scan already has
+  them, and a provisional C type would be an ABI claim while `ret_class` only
+  changes a spelling.
+- `snapshot()` now carries `ret_class` (it previously serialized only
+  `ret`/`params`), so every worker seeds it.
+- `build` runs the pass over all module sources before dispatching jobs and
+  hands the snapshot to each worker.
+
+**Proof of the multi-process shape:** `test_codegen_imported_method_none_return.py`
+now compiles the IMPORTER in a fresh subprocess seeded only from the parent's
+snapshot (the definer's in-process signatures are invisible there, exactly as
+in a worker). The refs-only case matches CPython (`None/True/x/True/True/None`)
+**and** its generated C is asserted to use `mojo_word_str_or_none` — the
+fact can only have arrived through the snapshot.
+
+Measured on the shared tree: corpus 288 programs — OK **163**, WRONG 107,
+CRASH 14, ERROR 2, GCC 2, REFUSED 0 (identical WRONG/CRASH lists to the
+pre-pass run). `compile_stdlib.py -j 8`: 610 passed, 0 failed (0 expected, 0
+unexpected). `test_gimple_runner.py`: **688 passed, 0 failed**. The owner's
+`make bootstrap` remains the acceptance.

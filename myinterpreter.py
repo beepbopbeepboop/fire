@@ -1658,8 +1658,8 @@ def _static_call_records(stmts, filename, source=''):
                 for cond in (clause if isinstance(clause, list) else [clause]):
                     rec = None
                     if _static_cond_false(cond, env):
-                        rec = where_violation_record(filename, c, (cfile, c.line),
-                                                     cond, n, bare)[1]
+                        _wmsg, rec = where_violation_record(filename, c, (cfile, c.line),
+                                                            cond, n, bare)
                     else:
                         rec = _predicate_call_record(filename, c, cfile, cond, env, n, bare)
                     if rec is not None:

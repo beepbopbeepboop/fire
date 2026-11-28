@@ -14603,14 +14603,20 @@ MojoList *mojo_list_copy(MojoList *l) {
 int mojo_list_all(MojoList *l) {
     if (!l) return 1;
     for (int64_t i = 0; i < l->len; i++)
-        if (!l->data[i]) return 0;
+        /* A slot's word is not always a truth value: an empty string is a
+         * NON-NULL pointer, a None box is a NON-ZERO address, and an empty
+         * list/tuple slot is a NON-NULL container. `all([""])` answered True
+         * and `any([0, "", None])` answered True with the bare non-zero test
+         * (containers/35). Ask the word what it is, the same dispatch `if x:`
+         * and `not in` already use. */
+        if (!mojo_truthy_word(l->data[i])) return 0;
     return 1;
 }
 
 int mojo_list_any(MojoList *l) {
     if (!l) return 0;
     for (int64_t i = 0; i < l->len; i++)
-        if (l->data[i]) return 1;
+        if (mojo_truthy_word(l->data[i])) return 1;
     return 0;
 }
 
@@ -14804,6 +14810,16 @@ void mojo_list_extend(MojoList *dst, MojoList *src) {
      * src would otherwise append nothing and return without ever reaching
      * the guard, so `t.extend([])` on a tuple would succeed. */
     mojo_require_mutable_list(dst, "extend");
+    if (dst == src) {
+        /* `ys.extend(ys)`: appending while walking the SAME list reads the
+         * growing length and never terminates (`containers/07`). Append a
+         * copy, which inherits the slots' kinds, so the destination's kinds
+         * row doubles with the slots. */
+        MojoList *cp = mojo_list_copy(src);
+        mojo_list_extend(dst, cp);
+        mojo_list_free(cp);
+        return;
+    }
     for (int64_t i = 0; i < src->len; i++)
         mojo_list_append_int(dst, src->data[i]);
     /* `dst` now holds every slot `src` held, so `src`'s element repr describes

@@ -1107,6 +1107,11 @@ class FuncState:
         self.fs_narrowed_exprs: dict = {}
         self.fs_param_struct_types: dict = {}
         self.fs_bound_method_ret_types: dict = {}
+        self.fs_bound_method_tagged: set = set()
+        self.fs_callable_tagged: set = set()
+        self.fs_tuple_slot_tagged: dict = {}
+        self.fs_container_callable_tagged: dict = {}
+        self.fs_tuple_none_targets: set = set()
         self.fs_callable_ret_types: dict = {}
         self.fs_container_callable_ret: dict = {}
         self.fs_builtin_method_values: dict = {}
@@ -1221,6 +1226,11 @@ def save_func_state(gen) -> FuncState:
     st.fs_narrowed_exprs = gen._narrowed_exprs
     st.fs_param_struct_types = gen._param_struct_types
     st.fs_bound_method_ret_types = gen._bound_method_ret_types
+    st.fs_bound_method_tagged = gen._bound_method_tagged
+    st.fs_callable_tagged = gen._callable_tagged
+    st.fs_tuple_slot_tagged = gen._tuple_slot_tagged
+    st.fs_container_callable_tagged = gen._container_callable_tagged
+    st.fs_tuple_none_targets = gen._tuple_none_targets
     st.fs_callable_ret_types = gen._callable_ret_types
     st.fs_container_callable_ret = gen._container_callable_ret
     st.fs_builtin_method_values = gen._builtin_method_values
@@ -1345,6 +1355,11 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._narrowed_exprs = st.fs_narrowed_exprs
     gen._param_struct_types = st.fs_param_struct_types
     gen._bound_method_ret_types = st.fs_bound_method_ret_types
+    gen._bound_method_tagged = st.fs_bound_method_tagged
+    gen._callable_tagged = st.fs_callable_tagged
+    gen._tuple_slot_tagged = st.fs_tuple_slot_tagged
+    gen._container_callable_tagged = st.fs_container_callable_tagged
+    gen._tuple_none_targets = st.fs_tuple_none_targets
     gen._callable_ret_types = st.fs_callable_ret_types
     gen._container_callable_ret = st.fs_container_callable_ret
     gen._builtin_method_values = st.fs_builtin_method_values
@@ -3278,6 +3293,13 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         atype = _as_str(_apair[0])
         aval = _as_str(_apair[1])
         ptype = _as_str(param_types[i]) if i < len(param_types) else atype
+        # An argument `_box_param_call_args` boxed for a TAGGED-word parameter
+        # is bound for the `int64_t` slot the definition declares, whatever the
+        # registered signature (recorded before the evidence that boxed the
+        # slot existed) still says: coercing it to that stale `int`/`double`
+        # type would narrow the box (`(int)value`, gimple_lint `arg-int-widen`).
+        if aval in _tagged_args and not gimple_ctypes.TypeLattice.ends_in_star(ptype):
+            ptype = 'int64_t'
         # Check if int64_t actually contains a pointer (stored in _actual_types or _global_var_types)
         actual_atype = atype
         if gimple_ctypes.TypeLattice.is_word(atype):

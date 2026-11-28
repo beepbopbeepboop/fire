@@ -2226,6 +2226,25 @@ def _plain_word_slot(gen, func, key, pname) -> bool:
     `int64_t` word (or still unresolved), i.e. the slot a tagged word may take.
     A slot usage inference or the call-site kind scan typed as a pointer or
     container keeps that type."""
+    # The signature the declaration pass registered (`func_param_types`,
+    # positional, receiver included) is the type the CALL SITES were compiled
+    # against. A slot it resolved to a pointer (`Scope(None)` beside
+    # `Scope(self.closure_scope)`: `Scope *`) keeps it even when the usage
+    # inference left the slot `int64_t` and the call-site pass could not prove
+    # the arguments' kind: boxing it would declare `int64_t parent` while every
+    # caller passes the `Scope *` (gimple_lint `arg-int-ptr`).
+    _reg = getattr(gen, 'func_param_types', None)
+    _reg_sig = _reg.get(_as_str(key)) if _reg is not None and hasattr(_reg, 'get') else None
+    if _reg_sig is not None and func is not None:
+        _fps: list = _as_list(getattr(func, 'params', None) or [])
+        for _fi in range(len(_fps)):
+            _fp: list = _as_list(_fps[_fi])
+            if _as_str(_fp[0]) == _as_str(pname):
+                if _fi < len(_reg_sig):
+                    _rct = _reg_sig[_fi]
+                    if isinstance(_rct, str) and gimple_ctypes.TypeLattice.ends_in_star(_rct):
+                        return False
+                break
     _all = getattr(gen, '_inferred_param_types', None) or {}
     _fn_types = _all.get(_as_str(key)) if hasattr(_all, 'get') else None
     _ct = _fn_types.get(_as_str(pname)) if hasattr(_fn_types, 'get') else None
