@@ -33,6 +33,7 @@ NO_CRASH = [
     'funcs/30_dispatch_dict_by_string.py',
     'params/40_dispatch_table_of_defs.py',
     'containers/11_in_list_needles.py',
+    'containers/05_mixed_list.py',
 ]
 
 
