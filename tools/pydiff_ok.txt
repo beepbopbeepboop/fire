@@ -27,6 +27,7 @@ classes/38_method_returns_none_and_list.py
 classes/41_none_field_reset.py
 containers/01_list_empty_fill.py
 containers/03_list_slices.py
+containers/06_nested_lists.py
 containers/08_list_insert_pop.py
 containers/10_list_reverse_sort.py
 containers/11_in_list_needles.py
@@ -36,6 +37,7 @@ containers/27_len_empty_kinds.py
 containers/28_list_equality_compare.py
 containers/32_slice_steps_bounds.py
 containers/33_list_mul_concat.py
+containers/35_any_all_lists.py
 containers/41_dict_get_container_values.py
 containers/42_dict_get_bytes_values.py
 flow/01_truthiness.py
@@ -68,6 +70,7 @@ funcs/20_gen_list_and_next.py
 funcs/21_gen_two_yields_return.py
 funcs/22_gen_with_args.py
 funcs/27_normal_plus_varargs.py
+funcs/32_recursion_accumulator.py
 funcs/33_mutual_recursion_even_odd.py
 funcs/38_dict_items_sorted_by_value.py
 funcs/39_pipeline_compose.py
