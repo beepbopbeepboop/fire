@@ -11676,7 +11676,8 @@ def _lnc_bool(gen, arg_pairs: list) -> tuple[str, str] | None:
             or (gimple_ctypes.TypeLattice.is_double(_bt) or gimple_ctypes.TypeLattice.is_c_float(_bt))
             or (gimple_ctypes.TypeLattice.is_word(_bt) and (
                 gen._word_is_dyn(_bv) or _bv in gen._dyn_word_locals
-                or _bv in getattr(gen, '_cur_untyped_params', ())))) :
+                or _bv in getattr(gen, '_cur_untyped_params', ())
+                or ginf.mixed_box_name(gen, _as_str(_bv))))) :
         # A string's truth is its length, a float's is `x != 0.0` (not
         # "its integer part is nonzero"), and a word of unknown kind's is
         # whatever the runtime finds there -- the one place that answers
@@ -12896,6 +12897,11 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # _CONTAINER_LEN_FN, but a bool() CALL was the one path that never
     # used it). Mirror that here so both paths agree.
     if gimple_ctypes.TypeLattice.is_cpp_bool(fname_raw) and len(arg_pairs) == 1:
+        # `bool(None)` is False, not the integer 0 the literal lowers to
+        # (stage 5c; `strings/17_str_repr_bool_none`). A None-valued NAME is
+        # covered by `_lnc_bool`'s mixed-box arm.
+        if node.args and gen._is_none_literal(node.args[0]):
+            return '_Bool', gen._new_val('_Bool', '0')
         _arm_r = _lnc_bool(gen, arg_pairs)
         if _arm_r is not None:
             return _arm_r

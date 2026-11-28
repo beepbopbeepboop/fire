@@ -7698,13 +7698,40 @@ def _lower_str_format_call(gen, tmpl: str, arg_pairs: list, kwargs,
                 _dsrc = gen._coerce_to_type('int64_t', 'MojoDict *', _fav)
             gen._rt_void('mojo_dict_update', [kd, _dsrc])
             continue
+        # `None` as a format argument is the shared None box, not the integer
+        # 0 the literal lowers to, or `"{}".format(None)` said `0` where
+        # CPython says `None` (strings/13, 14). The runtime renders the box
+        # by its kind (`_fmt_render_word` -> `mojo_cstr_or_int_str`).
+        if isinstance(_an, gimple_ctypes.NoneLiteral) or (
+                isinstance(_an, gimple_ctypes.IdentExpr)
+                and gimple_ctypes.TypeLattice.is_none_type(_as_str(_an.name))):
+            _nw = gen._call_expr('int64_t', 'mojo_box_none', [])
+            gen._rt_void('mojo_list_append_int', [lst, f"{_nw}"])
+            continue
+        if isinstance(_an, gimple_ctypes.BoolLiteral):
+            # A bool is the int 1/0 word; the runtime renders its own kind as
+            # True/False (`"{}".format(True)` said `1`).
+            _bw = gen._call_expr(
+                'int64_t', 'mojo_box_from_bool',
+                [('int64_t', gen._to_int64(_fat, _fav))])
+            gen._rt_void('mojo_list_append_int', [lst, f"{_bw}"])
+            continue
         _w = _format_arg_word(gen, _fat, _fav)
         gen._rt_void('mojo_list_append_int', [lst, f"{_w}"])
     if kd is None:
         kd = gen._rt_call('MojoDict *', 'mojo_dict_new', [])
     for _kp in (kwargs or []):
         _kt, _kv = gen.lower_expr(_kp[1])
-        _w = _format_arg_word(gen, _kt, _kv)
+        if isinstance(_kp[1], gimple_ctypes.NoneLiteral) or (
+                isinstance(_kp[1], gimple_ctypes.IdentExpr)
+                and gimple_ctypes.TypeLattice.is_none_type(_as_str(_kp[1].name))):
+            _w = gen._call_expr('int64_t', 'mojo_box_none', [])
+        elif isinstance(_kp[1], gimple_ctypes.BoolLiteral):
+            _w = gen._call_expr(
+                'int64_t', 'mojo_box_from_bool',
+                [('int64_t', gen._to_int64(_kt, _kv))])
+        else:
+            _w = _format_arg_word(gen, _kt, _kv)
         _kn = gen._new_val('char *', gen._intern_string(_as_str(_kp[0])))
         gen._rt_void('mojo_dict_set_int', [kd, _kn, f"{_w}"])
     return 'char *', gen._call_expr('char *', 'mojo_str_format_words',

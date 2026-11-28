@@ -3924,6 +3924,17 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             or (gimple_ctypes.TypeLattice.is_bytes(_rq) and gimple_ctypes.TypeLattice.is_word_or_cstr(ltype))))
         if _bytes_mix:
             res_type = 'int64_t'
+        # A `None` literal as an operand: when the operand is SELECTED as the
+        # result (`None and x` -> None, `True and None` -> None, `0 or None`
+        # -> None), Python answers None, not the integer 0 the literal lowers
+        # to. The truthiness test still uses the word 0; only the stored
+        # result is the shared box. `strings/17_str_repr_bool_none`.
+        _lnone = gen._is_none_literal(node.left)
+        _rnone = gen._is_none_literal(node.right)
+        if (_lnone or _rnone) and (gimple_ctypes.TypeLattice.is_word(res_type)
+                                    or gimple_ctypes.TypeLattice.is_c_int(res_type)
+                                    or gimple_ctypes.TypeLattice.is_bool(res_type)):
+            res_type = 'int64_t'
         result = gen._new_temp(res_type)
         if _mixed_word or _bytes_mix:
             gen._word_mark_dyn(result)
@@ -3948,6 +3959,12 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             # constant, not as a cast of the `_Bool`: a pointer is never made
             # from a 1-bit value (gimple-lint's cast-narrow-int-to-ptr).
             gen._cast_into(result, res_type, '0')
+        elif _lnone and node.op == 'and':
+            # `None and x`: the left is falsy, so the short-circuit edge IS
+            # the answer, and the answer is None.
+            gen._copy(result, gen._call_expr('int64_t', 'mojo_box_none', []))
+            gen._word_mark_boxed(result)
+            gen._word_mark_tagged(result)
         else:
             gen._safe_coerce_emit(ltype, res_type, lval, result)
         gen._goto(bb_merge)
@@ -3970,6 +3987,11 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         if _bool_merge:
             _rb = gen._ensure_bool_cond(rtype, rval)
             gen._copy(result, f"{_rb}")
+        elif _rnone and gimple_ctypes.TypeLattice.is_word(res_type):
+            # `x and None` / `falsy or None`: the right operand was selected.
+            gen._copy(result, gen._call_expr('int64_t', 'mojo_box_none', []))
+            gen._word_mark_boxed(result)
+            gen._word_mark_tagged(result)
         else:
             gen._safe_coerce_emit(rtype, res_type, rval, result)
         # A word result either of whose operands is a word of unknown kind is
