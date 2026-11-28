@@ -111,27 +111,18 @@ def classify_stem(stem: str, passed: bool, detail: str,
 
 
 EXPECTED_FAILURES = {
-    # The two decrement-while shapes whose loop test is an ORDER on the counter
-    # (`while n > 0`, `while n >= 1`), as opposed to `while n != 0`
-    # (`wdiff`, which passes).  Both are sound CODEGEN now — a signed `int`
-    # means a negative counter leaves the loop, which is what Python says —
-    # and both are refused because the generated MODEL still assumes the
-    # counter is a non-negative magnitude: `_gen_dec_while_block`'s
-    # `pred_iff` states the loop's "keep going" test as the UNSIGNED
-    # `0 < UInt64.ofNat m`, which is false for `m >= 2^63`, and the model
-    # itself returns 0 where a negative counter must be returned unchanged.
-    # So the obligation is genuinely unprovable, not merely unproved — which is
-    # the honest shape for a known gap and why the fix is a model change, not a
-    # tactic.  The SAME unsigned exit-side comparison is what a range loop's
-    # `loop_cond_flag` cannot close: `sum_range` reports it as an admitted hole
-    # whenever its contract is reached, and is refused before then for a
-    # different reason (a conditional back edge, its own entry below).
+    # The signed decrement-while shapes (`while n > 0`, `while n >= 1`) used to
+    # be refused because the generated MODEL treated the loop test as the
+    # UNSIGNED `0 < UInt64.ofNat m` (false for `m >= 2^63`) and returned 0
+    # where a signed-negative counter must be returned unchanged.  That model
+    # is now the signed `sKey` comparison and `prog_correct` handles the three
+    # cases (run / zero / signed-negative exit), so `countdown` PASSES.
+    # `wge` (`n >= 1`) is still refused, but now by the machine-level CFG
+    # leaves (`walk-terminal` / back-edge), not by `pred_iff`.
     # See signed dec-while loop model (fixed).
-    "countdown": "the decrement-while runF model treats the counter as a "
-                 "non-negative magnitude; a signed `int` means `n <= 0` exits "
-                 "immediately and returns n unchanged, which pred_iff and the "
-                 "model both deny",
-    "wge": "same as countdown, for the `n >= 1` spelling",
+    "wge": "the signed model now proves the handler; the remaining failure is "
+           "the machine-level loop leaves (`walk-terminal`/back-edge), not "
+           "`pred_iff`",
 
     # `a = [10,20,30]; i = 1; return a[i]` -- a subscript with a
     # runtime-variable index. The semantic model has no list domain and the

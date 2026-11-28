@@ -816,11 +816,12 @@ class TestRunnerClassification(unittest.TestCase):
             self.T.classify_stem("count", False, self.MEM, {"count"}),
             "KNOWN-GAP")
 
-    def test_the_seven_declared_stems_are_known_gaps(self):
-        # Regression for bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md:
-        # count, countdown, fib, subscript_var, wge, wide_recv must be in EXPECTED_FAILURES
-        # and classified as KNOWN-GAP when they fail to build/check (pow2 now passes with sorry holes).
-        declared = {"count", "countdown", "fib", "subscript_var", "wge", "wide_recv"}
+    def test_the_declared_stems_are_known_gaps(self):
+        # Regression for bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md.
+        # `countdown` now PASSES (the signed dec-while model is fixed), and
+        # `wide_recv` was removed from EXPECTED_FAILURES by fdac065f4, so the
+        # declared set is the runner's current gaps.
+        declared = {"count", "fib", "subscript_var", "wge"}
         self.assertTrue(declared.issubset(set(self.T.EXPECTED_FAILURES.keys())))
         rejected = "build: sum_proof.lean:2880:16: error: Tactic `rfl` failed"
         for stem in declared:
@@ -972,7 +973,7 @@ class TestABreachIsNeverPublished(unittest.TestCase):
         L.find_lean = lambda root=None: "/fake/lean"
         L.ensure_library = lambda lean, lib_dir: None
         L.library_census = lambda lean, lib_dir: {}
-        L.proof_verdict_key = lambda proof_path, lib_dir, lean: "proof/fixed"
+        L.proof_verdict_key = lambda proof_path, lib_dir, lean, mem_mb=None: "proof/fixed"
         # A cold cache, so the run below is the measurement rather than a replay.
         L.cas_lookup_verdict = lambda key: None
 
