@@ -34,6 +34,13 @@ NO_CRASH = [
     'params/40_dispatch_table_of_defs.py',
     'containers/11_in_list_needles.py',
     'containers/05_mixed_list.py',
+    'containers/09_list_remove_index_count.py',
+    'funcs/32_recursion_accumulator.py',
+    'funcs/37_enumerate_zip_unpack.py',
+    'flow/14_try_else_finally.py',
+    'flow/02_and_or_operands.py',
+    'flow/34_none_then_list.py',
+    'containers/36_dict_membership_views.py',
 ]
 
 

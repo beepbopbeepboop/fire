@@ -13,6 +13,19 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <execinfo.h>
+#include <signal.h>
+#include <unistd.h>
+static void _bm_segv(int sig) {
+    void *_bt[24]; int _n = backtrace(_bt, 24);
+    char _msg[64]; int _m = snprintf(_msg, sizeof(_msg), "BACKTRACE signal=%d\n", sig);
+    (void)!write(2, _msg, _m);
+    backtrace_symbols_fd(_bt, _n, 2);
+    _exit(128 + sig);
+}
+__attribute__((constructor)) static void _bm_install(void) {
+    signal(SIGSEGV, _bm_segv); signal(SIGBUS, _bm_segv); signal(SIGABRT, _bm_segv);
+}
 #include <fnmatch.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -949,6 +962,26 @@ void mojo_print(char *str) {
      * what `d.get(k)` lowers to — so `print(d.get("MISSING"))` has to say
      * `None` the way CPython does. Printing "(null)" for it made the value
      * recognisable as wrong only if you already knew it was wrong. */
+    /* Defensive dispatch for a word that reached this `char *` parameter
+     * without being unboxed: a mixed field/local/return still carries its
+     * kind in a MojoBox, and a small integer is not a char * at all. The
+     * generated call site casts the word before we get here, so this is the
+     * last place that can still tell the difference. printf on a box read
+     * its magic byte as text (a control character) and printf on a small
+     * integer was a wild read -- several corpus programs died here. */
+    int64_t _pw = (int64_t)(uintptr_t)str;
+    if (_pw > 0 && _pw < 0x10000) {
+        printf("%lld", (long long)_pw);
+        fflush(stdout);
+        return;
+    }
+    if (_pw && mojo_is_boxed(_pw)) {
+        char *_pr = mojo_repr_boxed(_pw);
+        fputs(_pr ? _pr : "None", stdout);
+        free(_pr);
+        fflush(stdout);
+        return;
+    }
     printf("%s", str ? str : "None");
     fflush(stdout);
 }
@@ -11395,7 +11428,7 @@ char *mojo_repr_list_doubles(MojoList *l) {
      * trailing comma, [..] otherwise) but reads each slot via
      * mojo_list_get_double and formats it with mojo_repr_float. */
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11436,7 +11469,7 @@ char *mojo_repr_list_ints(MojoList *l) {
      * reads each slot via mojo_list_get_int and formats it with
      * mojo_repr_int unconditionally, with no None-sentinel check. */
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11467,7 +11500,7 @@ char *mojo_repr_list_bools(MojoList *l) {
      * exact structure but formats each slot with mojo_repr_bool
      * unconditionally, with no None-sentinel check. */
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11496,7 +11529,7 @@ static char *_mojo_repr_pairlist(MojoList *l, int _kind) {
        (see _mojo_repr_defers_to_kinds). */
     char *_dk = _mojo_repr_defers_to_kinds(l);
     if (_dk) return _dk;
-    if (!l) return "[]";
+    if (!l) return strdup("[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup("[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11572,7 +11605,7 @@ static char *_mojo_repr_intlists(MojoList *l) {
     char *_dk = _mojo_repr_defers_to_kinds(l);
     if (_dk) return _dk;
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11643,7 +11676,7 @@ char *mojo_repr_list_slotkinds(MojoList *l, const char *kinds) {
     char *_dk = _mojo_repr_defers_to_kinds(l);
     if (_dk) return _dk;
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11673,7 +11706,7 @@ char *mojo_repr_list_bytes(MojoList *l) {
      * `MojoBytes *` (e.g. b.split(sep)). Each int64_t slot holds a
      * MojoBytes pointer; format each via mojo_bytes_repr. */
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11719,6 +11752,14 @@ char *mojo_repr_slot_kind(char kind, int64_t v)
          * variable", and its NULL is how this runtime spells Optional[str]'s
          * None. repr of a NULL char * would otherwise be read as a string. */
         if (!v) return strdup("None");
+        /* A kinds row can outlive the value it described -- a list literal
+         * re-stored through an int slot, or a uniform 'p' annotation put on
+         * a mixed list -- so a slot named 'p' may hold a small integer or a
+         * tagged BOX rather than a char *. Reading that as a char * is a
+         * wild pointer (containers/09, /30 and funcs/32 all died in
+         * strlen here). Answer by the word's own kind instead. */
+        if (mojo_is_boxed(v)) return mojo_repr_boxed(v);
+        if ((uint64_t)v < 0x10000ULL) return mojo_repr_int(v);
         return mojo_repr_str((char *)(intptr_t)v);
     case MOJO_KIND_BYTES:
         return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
@@ -11803,7 +11844,7 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
      * trailing comma, [..] otherwise). */
     if (!kinds) kinds = mojo_list_get_kinds(l);
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -13930,8 +13971,22 @@ MojoList *mojo_dict_values(MojoDict *d) {
         if (uk >= 0) mojo_list_set_elem_repr(out, (void *)_dict_val_repr_fn[uk]);
     }
     int64_t *order = mojo_dict_order_indices(d);
-    for (int64_t oi = 0; oi < d->used; oi++)
-        mojo_list_append_int(out, d->slots[order[oi]].val);
+    /* Describe each VALUE slot so a consumer that walks this list with the
+     * string accessor skips ints/None instead of strcmp'ing them. A dict can
+     * hold int, str, float and None values at once; without a row here,
+     * `"" in inventory.values()` handed an int word to mojo_list_contains_str
+     * and died in libc (containers/36). The row is owned by the kinds table,
+     * which stores the pointer without freeing it, like the interned rows. */
+    char *kbuf = d->used > 0 ? (char *)malloc((size_t)d->used + 1) : NULL;
+    for (int64_t oi = 0; oi < d->used; oi++) {
+        int64_t _vi = order[oi];
+        mojo_list_append_int(out, d->slots[_vi].val);
+        if (kbuf) {
+            char _kb = mojo_dict_kind_byte(d->slots[_vi].kind);
+            kbuf[oi] = _kb ? _kb : 'i';
+        }
+    }
+    if (kbuf) { kbuf[d->used] = '\0'; mojo_list_set_kinds(out, kbuf); }
     free(order);
     return out;
 }
