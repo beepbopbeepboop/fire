@@ -30,6 +30,8 @@ NO_CRASH = [
     'flow/04_ternary_mixed_types.py',
     'flow/33_mixed_type_variable.py',
     'params/10_none_or_value_arg.py',
+    'funcs/30_dispatch_dict_by_string.py',
+    'params/40_dispatch_table_of_defs.py',
 ]
 
 

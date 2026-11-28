@@ -2742,7 +2742,7 @@ def _is_none_return_arm(node) -> bool:
             and gimple_ctypes.TypeLattice.is_none_type(_as_str(node.name)))
 
 
-def _return_arms_need_boxed_word(acc: list, arms: list, joined: str = None) -> bool:
+def _return_arms_need_boxed_word(acc: list, arms: list, joined: str = None, gen=None) -> bool:
     """Does an unannotated function whose arms joined to a POINTER really mix
     a pointer with a scalar, so its return type must be the boxed word?
 
@@ -2814,6 +2814,20 @@ def _return_arms_need_boxed_word(acc: list, arms: list, joined: str = None) -> b
                     and isinstance(_node, gimple_ctypes.SubscriptExpr)
                     and isinstance(_node.obj, gimple_ctypes.IdentExpr)):
                 return True
+            # A dispatch through a FUNCTION-VALUED local/parameter (`fn(a, b)`
+            # where fn came from a dict of defs) returns whatever that callee
+            # returned -- int, None or str. Its `int64_t` is an erased word,
+            # not scalar evidence; casting it to the joined `char *` handed
+            # printf a box header or a small integer. The callee is not a
+            # known function name, so the arm is a dispatch and must widen.
+            if (gimple_ctypes.TypeLattice.is_cstr(_joined)
+                    and isinstance(_node, gimple_ctypes.CallExpr)
+                    and isinstance(_node.func, gimple_ctypes.IdentExpr)):
+                _fnn = _as_str(_node.func.name)
+                _rets = getattr(gen, 'func_return_types', None) or {}
+                _vars = getattr(gen, 'var_types', None) or {}
+                if _fnn not in _rets and _fnn in _vars:
+                    return True
     return False
 
 
@@ -3019,7 +3033,7 @@ def _infer_return_type_core(gen, body: list) -> str:
         # exactly the functions this decision widened, rather than re-deriving
         # the mix from a differently-seeded type table.
         if (gimple_ctypes.TypeLattice.is_pointer(_rt)
-                and _return_arms_need_boxed_word(acc, arms, _rt)) \
+                and _return_arms_need_boxed_word(acc, arms, _rt, gen)) \
                 or (gimple_ctypes.TypeLattice.is_int_word(_rt)
                     and _return_arms_are_int_or_none(acc, arms, body)):
             _mixed = getattr(gen, '_mixed_return_bodies', None)
