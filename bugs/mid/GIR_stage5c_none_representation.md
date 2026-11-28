@@ -376,7 +376,10 @@ the bare 0 and `self.s = x` stores the box through.
 - `test_gimple_runner.py`: 688 passed, 0 failed.
 
 **Still open.**
-- **Return-value slots** (the DECISION's fifth slot): a function/method whose arms are `None` and a
+- **Return-value slots** (the DECISION's fifth slot): CLOSED 2026-11-27 — the arm evidence is
+  `value_class_of` plus `mixed_field_read`, and a method whose body falls off its end is the same
+  rule-2 slot (`_gmp_collect_boxed_return_names`; `classes/04`, `38` and a returned mixed field are
+  OK). The text below describes the state that round found: a function/method whose arms are `None` and a
   scalar reached through a FIELD or SUBSCRIPT (`return self.x`, `return self.entries[-1]`), or a
   method with only an implicit `return` (`Inventory.add`), still spells `None` as the bare 0, and the
   caller prints `0`. `_return_arms_are_int_or_none` accepts only a literal/comparison/IdentExpr scalar
@@ -480,10 +483,12 @@ added (the `test_type_string_ratchet.py` counts are unchanged).
   corpus run: on the committed tree, reported with the commit.
 
 **Still open.**
-- `dict.get(k)` on a DOUBLE value domain keeps its `double` miss (0.0): the
+- ~~`dict.get(k)` on a DOUBLE value domain keeps its `double` miss (0.0): the
   local bound to it is inferred `double`, and boxing the miss without migrating
   those readers handed them the box address, so that arm was reverted and the
-  item stays open. The container value domain's `.get` miss is likewise open.
+  item stays open. The container value domain's `.get` miss is likewise
+  open.~~ CLOSED: double domain in `febff74f9`, container domain in
+  `be9844ab3`/`ca4591884` (the last Status entries).
 - A nested function / lambda whose arms are `None` and a scalar
   (`funcs/05_two_stacks_no_sharing.py`, `funcs/07_lambda_in_list.py`): the
   return pass walks the module's top-level functions and struct methods, not
