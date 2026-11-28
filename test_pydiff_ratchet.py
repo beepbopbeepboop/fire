@@ -38,6 +38,8 @@ NO_CRASH = [
     'funcs/32_recursion_accumulator.py',
     'funcs/37_enumerate_zip_unpack.py',
     'flow/14_try_else_finally.py',
+    'flow/02_and_or_operands.py',
+    'flow/34_none_then_list.py',
 ]
 
 

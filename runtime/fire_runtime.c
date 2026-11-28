@@ -11428,7 +11428,7 @@ char *mojo_repr_list_doubles(MojoList *l) {
      * trailing comma, [..] otherwise) but reads each slot via
      * mojo_list_get_double and formats it with mojo_repr_float. */
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11469,7 +11469,7 @@ char *mojo_repr_list_ints(MojoList *l) {
      * reads each slot via mojo_list_get_int and formats it with
      * mojo_repr_int unconditionally, with no None-sentinel check. */
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11500,7 +11500,7 @@ char *mojo_repr_list_bools(MojoList *l) {
      * exact structure but formats each slot with mojo_repr_bool
      * unconditionally, with no None-sentinel check. */
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11529,7 +11529,7 @@ static char *_mojo_repr_pairlist(MojoList *l, int _kind) {
        (see _mojo_repr_defers_to_kinds). */
     char *_dk = _mojo_repr_defers_to_kinds(l);
     if (_dk) return _dk;
-    if (!l) return "[]";
+    if (!l) return strdup("[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup("[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11605,7 +11605,7 @@ static char *_mojo_repr_intlists(MojoList *l) {
     char *_dk = _mojo_repr_defers_to_kinds(l);
     if (_dk) return _dk;
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11676,7 +11676,7 @@ char *mojo_repr_list_slotkinds(MojoList *l, const char *kinds) {
     char *_dk = _mojo_repr_defers_to_kinds(l);
     if (_dk) return _dk;
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11706,7 +11706,7 @@ char *mojo_repr_list_bytes(MojoList *l) {
      * `MojoBytes *` (e.g. b.split(sep)). Each int64_t slot holds a
      * MojoBytes pointer; format each via mojo_bytes_repr. */
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
@@ -11844,7 +11844,7 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
      * trailing comma, [..] otherwise). */
     if (!kinds) kinds = mojo_list_get_kinds(l);
     int _is_tup = l && mojo_is_tuple(l);
-    if (!l) return _is_tup ? "()" : "[]";
+    if (!l) return strdup(_is_tup ? "()" : "[]");
     int64_t _n = mojo_list_len(l);
     char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
