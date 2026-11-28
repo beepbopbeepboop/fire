@@ -1981,6 +1981,15 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 if func_key and hasattr(gen, '_inferred_var_types'):
                     if func_key in gen._inferred_var_types and tname in gen._inferred_var_types[func_key]:
                         ctype = gen._inferred_var_types[func_key][tname]
+                        # Stage 5c: a name bound to a no-default `d.get(k)` on
+                        # a DOUBLE domain is the tagged word, not the `double`
+                        # the pre-pass inferred from the dict's value type.
+                        # The miss is the None box and a hit is a 'd' box, so
+                        # the slot must be the word; a `double` consumer
+                        # unboxes with `mojo_box_double`.
+                        if ginf.dict_get_call_is_tagged(gen, node.value) \
+                                and gimple_ctypes.TypeLattice.is_word(vtype):
+                            ctype = 'int64_t'
                         # The pre-pass's builtin table still lists the
                         # iterator-factory family (`enumerate`/`take`/...)
                         # as `MojoList *` (the old materialized pair-list

@@ -3317,6 +3317,17 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             _ub = gen._new_temp('int64_t')
             gen._rt_into(_ub, 'mojo_box_int', [f"{aval}"])
             aval = _ub
+        if (gimple_ctypes.TypeLattice.is_double(ptype)
+                and gimple_ctypes.TypeLattice.is_word(atype)
+                and gen._word_may_be_box(aval)
+                and not rt_call.is_runtime_function(_as_str(fname))):
+            # A boxed word handed to a `double` parameter (`math.sqrt(d.get(k))`):
+            # the generic unbox below returns the box's BITS, not the double.
+            # `mojo_box_double` reads a 'd' box's value and casts anything else.
+            _db = gen._new_temp('double')
+            gen._rt_into(_db, 'mojo_box_double', [f"{aval}"])
+            aval = _db
+            atype = 'double'
         if (gimple_ctypes.TypeLattice.is_word(atype) and gen._word_may_be_box(aval)
                 and not _is_pointer_view_helper(fname)
                 and not rt_call.is_runtime_function(_as_str(fname))
@@ -4378,7 +4389,9 @@ def dict_get_call_is_tagged(gen, node) -> bool:
         _vt = _as_str(gen._dict_val_of(_as_str(obj.name)))
     except Exception:
         return False
-    return (not (gimple_ctypes.TypeLattice.is_list(_vt) or gimple_ctypes.TypeLattice.is_cstr(_vt) or gimple_ctypes.TypeLattice.is_dict(_vt) or gimple_ctypes.TypeLattice.is_c_float(_vt) or gimple_ctypes.TypeLattice.is_set(_vt) or gimple_ctypes.TypeLattice.is_double(_vt)))
+    # A double DOMAIN is boxed too (the box carries 'd'); only the str and
+    # container domains keep their own C type.
+    return (not (gimple_ctypes.TypeLattice.is_list(_vt) or gimple_ctypes.TypeLattice.is_cstr(_vt) or gimple_ctypes.TypeLattice.is_dict(_vt) or gimple_ctypes.TypeLattice.is_set(_vt)))
 
 
 def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:

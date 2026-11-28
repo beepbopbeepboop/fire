@@ -2151,6 +2151,14 @@ def _lmc_scalar_receiver(gen, node: gimple_ctypes.CallExpr, func, method: str, o
             _largs = []
             for _pi, _pa in enumerate(node.args):
                 _at, _av = gen.lower_expr(_pa)
+                # A boxed word (a no-default `d.get(k)` on a double domain)
+                # handed to a libm `double` parameter: unbox its value, not
+                # its address.
+                if gimple_ctypes.TypeLattice.is_double(_params[_pi]) \
+                        and gimple_ctypes.TypeLattice.is_word(_at) \
+                        and gen._word_may_be_box(_av):
+                    _av = gen._rt_call('double', 'mojo_box_double', [_av])
+                    _at = 'double'
                 _largs.append((_params[_pi],
                                gen._coerce_to_type(_at, _params[_pi], _av)))
             # `_emit_call` writes into a result NAME (it does not return
@@ -6617,15 +6625,11 @@ def _ldm_get(gen, ov: str, args: list) -> tuple:
     # emitted right after its call, so a spare raw read first would free the
     # key before this one ran and this one always missed.
     # A str value domain keeps its `char *` result (the NULL miss is the
-    # nullable-pointer convention); a DOUBLE or container domain is left as it
-    # was. A double result's C type is what its consumers (`math.sqrt`,
-    # arithmetic) read, and the local bound to a no-default `.get` is typed
-    # `double` by inference; boxing the miss without migrating those readers
-    # would hand them the box's address (measured: `x = df.get("a")` then
-    # `print(x)` printed the address). The miss of a double-domain `.get` is
-    # therefore still 0.0, and that remains on the stage-5c list.
+    # nullable-pointer convention); a CONTAINER domain keeps its container C
+    # type. A DOUBLE domain joins the boxed read: the box carries the value's
+    # kind ('d'), the local bound to it is declared the word (the assignment's
+    # hint override), and a `double` consumer unboxes with `mojo_box_double`.
     if default_val is None and not gimple_ctypes.TypeLattice.is_cstr(val_type) \
-            and not gimple_ctypes.TypeLattice.is_double(val_type) \
             and not (gimple_ctypes.TypeLattice.is_set(val_type) or gimple_ctypes.TypeLattice.is_dict(val_type) or gimple_ctypes.TypeLattice.is_list(val_type)):
         if gen._is_none_literal(args[0]):
             _boxed = gen._call_expr('int64_t', 'mojo_dict_get_boxed_none',
