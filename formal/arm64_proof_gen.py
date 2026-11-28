@@ -15378,27 +15378,43 @@ def _gen_dec_while_block(fname: str, param: str, cond_op: str = "GT") -> str:
     _op = {"GT": ">", "NE": "!=", "GE": ">="}[cond_op]
     _rhs = "1" if cond_op == "GE" else "0"
     cond = f'MojoExpr.binop "{_op}" (MojoExpr.var "{param}") (MojoExpr.int {_rhs})'
-    _PRED = {"GT": "m % 18446744073709551616 < 9223372036854775808 ∧ 0 < UInt64.ofNat m",
+    _PRED = {"GT": "sKey (UInt64.ofNat m) > sKey 0",
              "NE": "m % 18446744073709551616 < 9223372036854775808 ∧ UInt64.ofNat m \u2260 0",
-             "GE": "m % 18446744073709551616 < 9223372036854775808 ∧ 1 \u2264 UInt64.ofNat m"}[cond_op]
+             "GE": "sKey (UInt64.ofNat m) \u2265 sKey 1"}[cond_op]
     _HPRED = {
         "NE": "exact Iff.rfl",
-        "GT": ("rw [UInt64.lt_iff_toNat_lt]\n"
-               "  rw [show ((0 : UInt64)).toNat = 0 from rfl]\n"
+        "GT": ("rw [sKey_gt_sKey_zero_iff]\n"
+               "  have hto : (UInt64.ofNat m).toNat = m % 18446744073709551616 := by simp\n"
+               "  have hlt64 : (0x8000000000000000 : UInt64).toNat = 9223372036854775808 := by decide\n"
+               "  rw [UInt64.lt_iff_toNat_lt, hlt64, hto]\n"
                "  constructor\n"
-               "  \u00b7 intro h h0; rw [h0] at h; simp at h\n"
-               "  \u00b7 intro h\n"
-               "    have : (UInt64.ofNat m).toNat \u2260 0 := by\n"
-               "      intro h0; exact h (UInt64.toNat_inj.mp (by rw [h0]; rfl))\n"
-               "    sorry"),
-        "GE": ("rw [UInt64.le_iff_toNat_le]\n"
-               "  rw [show ((1 : UInt64)).toNat = 1 from rfl]\n"
+               "  \u00b7 rintro \u27e8hne, hlt\u27e9\n"
+               "    refine \u27e8?_, hlt\u27e9\n"
+               "    intro h0\n"
+               "    apply hne\n"
+               "    apply UInt64.toNat_inj.mp\n"
+               "    rw [hto, h0]; rfl\n"
+               "  \u00b7 rintro \u27e8hne, hlt\u27e9\n"
+               "    refine \u27e8?_, hlt\u27e9\n"
+               "    intro hq\n"
+               "    apply hne\n"
+               "    rw [\u2190 hto, hq]; rfl"),
+        "GE": ("rw [sKey_ge_sKey_one_iff]\n"
+               "  have hto : (UInt64.ofNat m).toNat = m % 18446744073709551616 := by simp\n"
+               "  have hlt64 : (0x8000000000000000 : UInt64).toNat = 9223372036854775808 := by decide\n"
+               "  rw [UInt64.lt_iff_toNat_lt, hlt64, hto]\n"
                "  constructor\n"
-               "  \u00b7 intro h h0; rw [h0] at h; simp at h\n"
-               "  \u00b7 intro h\n"
-               "    have : (UInt64.ofNat m).toNat \u2260 0 := by\n"
-               "      intro h0; exact h (UInt64.toNat_inj.mp (by rw [h0]; rfl))\n"
-               "    sorry"),
+               "  \u00b7 rintro \u27e8hne, hlt\u27e9\n"
+               "    refine \u27e8?_, hlt\u27e9\n"
+               "    intro h0\n"
+               "    apply hne\n"
+               "    apply UInt64.toNat_inj.mp\n"
+               "    rw [hto, h0]; rfl\n"
+               "  \u00b7 rintro \u27e8hne, hlt\u27e9\n"
+               "    refine \u27e8?_, hlt\u27e9\n"
+               "    intro hq\n"
+               "    apply hne\n"
+               "    rw [\u2190 hto, hq]; rfl"),
     }[cond_op]
     decexpr = 'MojoExpr.binop "-" (MojoExpr.var "' + param + '") (MojoExpr.int 1)'
     dec = 'MojoStmt.assign "' + param + '" (' + decexpr + ')'
@@ -15424,7 +15440,7 @@ def envOf (m : Nat) : String → UInt64 :=
   fun name => if name == "@P@" then UInt64.ofNat m else 0
 
 /-- The source predicate is exactly "counter nonzero". -/
-theorem pred_iff (m : Nat) : @PRED@ \u2194 UInt64.ofNat m \u2260 0 := by
+theorem pred_iff (m : Nat) : @PRED@ \u2194 (m % @S@ \u2260 0 \u2227 m % @S@ < 9223372036854775808) := by
   @HPRED@
 
 /-- Loop condition holds iff counter value nonzero. -/
@@ -15433,36 +15449,18 @@ theorem cond_val (m : Nat) :
       (envOf m) \u2260 0) \u2194 (m % @S@ \u2260 0 \u2227 m % @S@ < 9223372036854775808) := by
   have hv : evalExpr handler noCall2 (@COND@)
       (envOf m) = if @PRED@ then 1 else 0 := by
-    simp [evalExpr, envOf, sKey, MojoExpr, UInt64.ofNat, UInt64.ofNat_toNat,
-          Nat.mod_eq_of_lt]
-    <;>
-    aesop
-  have ht : (UInt64.ofNat m).toNat = m % @S@ := by simp
+    simp [evalExpr, envOf, sKey]
+  rw [hv]
   constructor
-  \u00b7 intro hne
-    rw [hv] at hne
-    constructor
-    \u00b7 intro hz
-      have hzz : UInt64.ofNat m = 0 := by
-        apply eq_of_toNat_eq
-        rw [ht, hz]
-        simp
-      rw [if_neg (fun hp => (pred_iff m).mp hp hzz)] at hne
-      simp at hne
-    \u00b7 sorry
+  \u00b7 intro h
+    by_cases hp : @PRED@
+    \u00b7 exact (pred_iff m).mp hp
+    \u00b7 rw [if_neg hp] at h; exact absurd rfl h
   \u00b7 intro hmz
-    have hpr : @PRED@ := (pred_iff m).mpr (by
-      intro h0
-      have h2 : (UInt64.ofNat m).toNat = 0 := by rw [h0]; simp
-      rw [ht] at h2
-      exact hmz.1 h2)
-    rw [hv]
-    show \u00ac ((if @PRED@ then 1 else 0) = 0)
-    intro hcon
-    rw [if_pos hpr] at hcon
-    exact absurd hcon (by simp)
+    have hp : @PRED@ := (pred_iff m).mpr hmz
+    rw [if_pos hp]; simp
 
-theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 →
+theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 \u2192
     runF fuel handler prog (envOf m) =
       some (RunRes.ret (@FN@_go (m % @S@))) := by
   intro m
@@ -15473,109 +15471,12 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
         MojoStmt.while ((@COND@))
           ([@DEC@])
           :: [MojoStmt.return (MojoExpr.var "@P@")] := rfl
-    rcases Nat.eq_zero_or_pos (m % @S@) with hz | hp
-    \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
-      rw [hP]
-      have hvz : evalExpr handler noCall2 (@COND@) (envOf m)
-          = if @PRED@ then 1 else 0 := by
-        simp only [evalExpr, envOf, sKey, MojoExpr, UInt64.ofNat, UInt64.ofNat_toNat,
-                   Nat.mod_eq_of_lt]
-        <;>
-        (try decide) <;>
-        (try aesop) <;>
-        (try
-          {
-            constructor <;>
-            (try
-              {
-                intro h
-                simp_all [UInt64.lt_iff_toNat_lt]
-                <;>
-                norm_num at * <;>
-                omega
-              }) <;>
-            (try
-              {
-                aesop
-              })
-          }) <;>
-        rfl
-      have ht2 : (UInt64.ofNat m).toNat = m % @S@ := by simp
-      have hneg : \u00ac (@PRED@) := by
-        rw [pred_iff m]
-        intro hne
-        exact hne (by apply eq_of_toNat_eq; rw [ht2]; simp [hz])
-      have hce : evalExpr handler noCall2 (@COND@) (envOf m) = 0 := by
-        rw [hvz, if_neg hneg]
-      have h1 := runF_while_false g handler (@COND@)
-          ([@DEC@])
-          [MojoStmt.return (MojoExpr.var "@P@")] (envOf m) hce
-      rw [h1]
-      obtain \u27e8gg, rfl\u27e9 : \u2203 gg, g = gg + 1 := \u27e8g - 1, by omega\u27e9
-      have h2 : runF (gg + 1) handler [MojoStmt.return (MojoExpr.var "@P@")] (envOf m) noCall2 = some (.ret (evalExpr handler noCall2 (MojoExpr.var "@P@") (envOf m))) := runF_return_eq gg handler (MojoExpr.var "@P@") (envOf m)
-      rw [h2]
-      have hv0 : evalExpr handler noCall2 (MojoExpr.var "@P@") (envOf m) = 0 := by
-        have hx : evalExpr handler noCall2 (MojoExpr.var "@P@") (envOf m)
-            = UInt64.ofNat m := by
-          simp only [evalExpr, envOf, MojoExpr, UInt64.ofNat, UInt64.ofNat_toNat]
-          <;>
-          rfl
-        rw [hx]
-        apply eq_of_toNat_eq
-        rw [ht2]
-        simp [hz]
-      rw [hv0]
-      have hzlt : m % @S@ < 9223372036854775808 := by
-        rw [hz]
-        simp
-      simp [@FN@_go_zero, hzlt]
-    \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
-      have hcond : evalExpr handler noCall2 (@COND@) (envOf m) ≠ 0 := by
-        have hne : m % @S@ ≠ 0 := Nat.ne_of_gt hp
-        -- Case split on whether m % S is signed-positive (< MAX) or high-bit (≥ MAX)
-        have hlt : m % @S@ < 9223372036854775808 := by
-          by_cases h : m % @S@ < 9223372036854775808
-          · exact h
-          · -- m % S ≥ MAX: this is the high-bit (signed-negative) case
-            -- The loop condition `n > 0` with signed comparison is FALSE here,
-            -- so this branch of prog_correct should not be reached.
-            -- We derive a contradiction from the fact that cond_val would be 0.
-            exfalso
-            have hge : 9223372036854775808 ≤ m % @S@ := by omega
-            have hP : ¬(@PRED@) := by
-              rw [pred_iff m]
-              intro hpr
-              exact absurd hpr.1 (by omega)
-            -- Since @PRED@ is false, cond_val would give 0, contradicting hne
-            have hcv : (evalExpr handler noCall2 (@COND@) (envOf m) ≠ 0) ↔ (m % @S@ ≠ 0 ∧ m % @S@ < 9223372036854775808) := cond_val m
-            have hz : evalExpr handler noCall2 (@COND@) (envOf m) = 0 := by
-              have hvz : evalExpr handler noCall2 (@COND@) (envOf m) = if @PRED@ then 1 else 0 := by
-                simp only [evalExpr, envOf, sKey, MojoExpr, UInt64.ofNat, UInt64.ofNat_toNat,
-                           Nat.mod_eq_of_lt]
-                <;>
-                (try decide) <;>
-                (try aesop) <;>
-                (try
-                  {
-                    constructor <;>
-                    (try
-                      {
-                        intro h'
-                        simp_all [UInt64.lt_iff_toNat_lt]
-                        <;>
-                        norm_num at * <;>
-                        omega
-                      }) <;>
-                    (try
-                      {
-                        aesop
-                      })
-                  }) <;>
-                rfl
-              rw [hvz, if_neg hP]
-              <;> simp
-            simp_all
-        exact (cond_val m).mpr ⟨hne, hlt⟩
+    have ht2 : (UInt64.ofNat m).toNat = m % @S@ := by simp
+    by_cases hrun : m % @S@ < 9223372036854775808 \u2227 m % @S@ \u2260 0
+    \u00b7 -- the signed test holds: run the body, then recurse on the decremented counter
+      obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
+      have hcond : evalExpr handler noCall2 (@COND@) (envOf m) \u2260 0 :=
+        (cond_val m).mpr \u27e8hrun.2, hrun.1\u27e9
       have hpred : UInt64.ofNat m - 1 =
           UInt64.ofNat (m % @S@ - 1) := by
         apply eq_of_toNat_eq
@@ -15623,9 +15524,45 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
       rw [hP] at hrec
       rw [hstep, henv, hrec]
       apply congrArg
-      have hltm : m % @S@ < 9223372036854775808 := (cond_val m).mp hcond |>.right
+      have hltm : m % @S@ < 9223372036854775808 := hrun.1
       have hltk : (m % @S@ - 1) % @S@ < 9223372036854775808 := by omega
       rw [@FN@_go_zero _ hltk, @FN@_go_zero _ hltm]
+    \u00b7 -- the signed test is false: the loop exits, returning the counter value
+      obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
+      have hv : evalExpr handler noCall2 (@COND@) (envOf m) = if @PRED@ then 1 else 0 := by
+        simp [evalExpr, envOf, sKey]
+      have hnpr : \u00ac (@PRED@) := by
+        intro hp
+        exact hrun \u27e8((pred_iff m).mp hp).2, ((pred_iff m).mp hp).1\u27e9
+      have hcond0 : evalExpr handler noCall2 (@COND@) (envOf m) = 0 := by
+        rw [hv, if_neg hnpr]
+      rw [hP]
+      have h1 := runF_while_false g handler (@COND@)
+          ([@DEC@])
+          [MojoStmt.return (MojoExpr.var "@P@")] (envOf m) hcond0
+      rw [h1]
+      obtain \u27e8gg, rfl\u27e9 : \u2203 gg, g = gg + 1 := \u27e8g - 1, by omega\u27e9
+      have h2 : runF (gg + 1) handler [MojoStmt.return (MojoExpr.var "@P@")] (envOf m) noCall2 =
+          some (.ret (evalExpr handler noCall2 (MojoExpr.var "@P@") (envOf m))) :=
+        runF_return_eq gg handler (MojoExpr.var "@P@") (envOf m)
+      rw [h2]
+      have hv0 : evalExpr handler noCall2 (MojoExpr.var "@P@") (envOf m) = UInt64.ofNat m := by
+        simp [evalExpr, envOf]
+      rw [hv0]
+      have hof : UInt64.ofNat m = UInt64.ofNat (m % @S@) := by
+        apply eq_of_toNat_eq
+        rw [ht2, ofNat_toNat_mod _ (by omega)]
+      rw [hof]
+      by_cases hz : m % @S@ = 0
+      \u00b7 have hlt : m % @S@ < 9223372036854775808 := by omega
+        rw [@FN@_go_zero _ hlt]
+        simp [hz]
+      \u00b7 have hge : 9223372036854775808 \u2264 m % @S@ := by
+          by_cases hlt : m % @S@ < 9223372036854775808
+          \u00b7 exact absurd \u27e8hlt, hz\u27e9 hrun
+          \u00b7 omega
+        rw [@FN@_go_neg _ hge (Nat.mod_lt m (show 0 < @S@ by decide))]
+        rw [Nat.mod_eq_of_lt (Nat.mod_lt m (show 0 < @S@ by decide))]
 
 /-- TRUST BOUNDARY eliminated: the fuel-bounded full interpreter applied to
 the formal AST equals the structural model, by strong induction. -/

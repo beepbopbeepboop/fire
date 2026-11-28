@@ -1156,6 +1156,25 @@ closes the bridge instead of leaving a signed/unsigned pair to be noticed by
 `bv_decide` as a "spurious counterexample". -/
 def sKey (x : UInt64) : UInt64 := x ^^^ 0x8000000000000000
 
+/-- `sKey q > sKey 0` is the SIGNED comparison `q > 0`: it holds exactly when
+    `q` is a positive signed 64-bit value.  This is what the source's `>`
+    becomes in `evalExpr`, and it is the missing bridge between the bit-level
+    `sKey` and the `m % 2^64` arithmetic the loop proofs reason in.  Proved by
+    `bv_decide` because it is a bitvector fact (core Lean has no `omega` over
+    `UInt64`). -/
+theorem sKey_gt_sKey_zero_iff (q : UInt64) :
+    sKey q > sKey 0 ↔ (q ≠ 0 ∧ q < 0x8000000000000000) := by
+  unfold sKey
+  bv_decide
+
+/-- The `>=` counterpart: `sKey q ≥ sKey 1` is the signed comparison `q ≥ 1`,
+    which over the signed integers is the same "positive nonzero" predicate as
+    `q > 0`. -/
+theorem sKey_ge_sKey_one_iff (q : UInt64) :
+    sKey q ≥ sKey 1 ↔ (q ≠ 0 ∧ q < 0x8000000000000000) := by
+  unfold sKey
+  bv_decide
+
 mutual
 
 /-- Source semantics: evaluate expressions with a call handler for recursion.
