@@ -640,3 +640,23 @@ OK). `flow/02` and `flow/34` (`None -> []`) are OK.
   per-file path.
 - `test_gimple_runner.py` / `compile_stdlib.py` / the corpus re-runs on the
   final commit are the closing evidence.
+
+## Status 2026-11-27 (a None in a returned tuple survives; double-domain `.get`)
+
+**A `None` in a returned tuple.** `_list_literal_slot_kinds` keeps a `None`
+element's kind as `'none'` (it folded to `'int'`), `_returns_kinds_valued`
+records the kinds even when every slot is None (`return None, None`), and
+`_tuple_elem_value` reads a `'none'` slot boxed. The unpack marks such a
+target (`_tuple_none_targets`), so the bind keeps the box instead of
+`mojo_unbox_plain`-ing it to 0. `params/35_tuple_with_none_items.py` is OK;
+`params/13_return_tuple_unpack.py`'s None lines are OK (its last line is a
+tuple slot-kind corner on `swap(None, 0)[0] is None`).
+
+**The double-domain `.get`** (previous entry) is verified with its readers.
+
+Also fixed, both found as runner regressions from the mixed-kind/`*args`
+work: `_float_param_arith` materialises a non-word operand as an `int64_t`
+temp before the integer answer (`a[0] * 2` beside a tagged word emitted
+`int64_t * int`, a GIMPLE type mismatch), and `mojo_list_get_boxed` raises
+IndexError for an out-of-range index like the checked accessors (`lambda *a:
+a[0]` on an empty pack).
