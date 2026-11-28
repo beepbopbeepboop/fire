@@ -161,3 +161,20 @@ small term per layer instead of one big one; (b) state the merged state's
 field values as named lemmas per block (the invariant), proved once by `simp`, and
 rewrite with them; (c) replace `simp` by `rfl`/`decide` where the layer is closed
 arithmetic. Test on `ifs4` then `bigbody` (`_WP_MIN_PATHS` is still disabled).
+
+### Update 2026-11-27 (very last): the kernel wall is proof-term DEPTH, not just size
+
+`ifs4` re-run with the generated-proof ceiling lifted (`-M 24000`, 30 GB memcap):
+it does not pass either, it fails with `(kernel) deep recursion detected` after
+121 s and 10.3 GB. So raising the memory budget is NOT a way out: the one-theorem
+chain of per-layer `simp` rewrites nests too deeply for the kernel. The split has
+to be real, one top-level declaration per layer, which means each layer's
+statement must be writable by the generator WITHOUT running `simp`. That needs
+a per-block invariant stated in closed form (what each merged state's register
+and stack-slot values are, as functions of `n`), e.g. emitted from the same
+per-block effect the run certificates already carry (`…_qS/qT` over a symbolic
+entry whose fields are named hypotheses), and then `V_k : Inv_k s -> Inv_next
+(M_k (e s))` proved once per block by `simp`. This is the "contract-shaped"
+design from the first guide; the measurements above are why it is required
+rather than optional. Do not retry bigger budgets, `maxSteps`, or one-theorem
+normalization.
