@@ -15433,7 +15433,29 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
     \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
       rw [hP]
       have hvz : evalExpr handler noCall2 (@COND@) (envOf m)
-          = if @PRED@ then 1 else 0 := by sorry
+          = if @PRED@ then 1 else 0 := by
+        simp only [evalExpr, envOf, sKey, MojoExpr, UInt64.ofNat, UInt64.ofNat_toNat,
+                   Nat.mod_eq_of_lt]
+        <;>
+        (try decide) <;>
+        (try aesop) <;>
+        (try
+          {
+            constructor <;>
+            (try
+              {
+                intro h
+                simp_all [UInt64.lt_iff_toNat_lt]
+                <;>
+                norm_num at * <;>
+                omega
+              }) <;>
+            (try
+              {
+                aesop
+              })
+          }) <;>
+        rfl
       have ht2 : (UInt64.ofNat m).toNat = m % @S@ := by simp
       have hneg : \u00ac (@PRED@) := by
         rw [pred_iff m]
@@ -15450,7 +15472,10 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
       rw [h2]
       have hv0 : evalExpr handler noCall2 (MojoExpr.var "@P@") (envOf m) = 0 := by
         have hx : evalExpr handler noCall2 (MojoExpr.var "@P@") (envOf m)
-            = UInt64.ofNat m := by sorry
+            = UInt64.ofNat m := by
+          simp only [evalExpr, envOf, MojoExpr, UInt64.ofNat, UInt64.ofNat_toNat]
+          <;>
+          rfl
         rw [hx]
         apply eq_of_toNat_eq
         rw [ht2]
@@ -15463,7 +15488,49 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
     \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
       have hcond : evalExpr handler noCall2 (@COND@) (envOf m) ≠ 0 := by
         have hne : m % @S@ ≠ 0 := Nat.ne_of_gt hp
-        have hlt : m % @S@ < 9223372036854775808 := by sorry
+        -- Case split on whether m % S is signed-positive (< MAX) or high-bit (≥ MAX)
+        have hlt : m % @S@ < 9223372036854775808 := by
+          by_cases h : m % @S@ < 9223372036854775808
+          · exact h
+          · -- m % S ≥ MAX: this is the high-bit (signed-negative) case
+            -- The loop condition `n > 0` with signed comparison is FALSE here,
+            -- so this branch of prog_correct should not be reached.
+            -- We derive a contradiction from the fact that cond_val would be 0.
+            exfalso
+            have hge : 9223372036854775808 ≤ m % @S@ := by omega
+            have hP : ¬(@PRED@) := by
+              rw [pred_iff m]
+              intro hpr
+              exact absurd hpr.1 (by omega)
+            -- Since @PRED@ is false, cond_val would give 0, contradicting hne
+            have hcv : (evalExpr handler noCall2 (@COND@) (envOf m) ≠ 0) ↔ (m % @S@ ≠ 0 ∧ m % @S@ < 9223372036854775808) := cond_val m
+            have hz : evalExpr handler noCall2 (@COND@) (envOf m) = 0 := by
+              have hvz : evalExpr handler noCall2 (@COND@) (envOf m) = if @PRED@ then 1 else 0 := by
+                simp only [evalExpr, envOf, sKey, MojoExpr, UInt64.ofNat, UInt64.ofNat_toNat,
+                           Nat.mod_eq_of_lt]
+                <;>
+                (try decide) <;>
+                (try aesop) <;>
+                (try
+                  {
+                    constructor <;>
+                    (try
+                      {
+                        intro h'
+                        simp_all [UInt64.lt_iff_toNat_lt]
+                        <;>
+                        norm_num at * <;>
+                        omega
+                      }) <;>
+                    (try
+                      {
+                        aesop
+                      })
+                  }) <;>
+                rfl
+              rw [hvz, if_neg hP]
+              <;> simp
+            simp_all
         exact (cond_val m).mpr ⟨hne, hlt⟩
       have hpred : UInt64.ofNat m - 1 =
           UInt64.ofNat (m % @S@ - 1) := by
