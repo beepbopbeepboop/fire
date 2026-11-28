@@ -2930,6 +2930,62 @@ def _return_arms_are_int_or_none(acc: list, arms: list, body: list = None) -> bo
     return _has_none and _has_scalar
 
 
+def _boxed_local_binding_kinds(gen, body: list) -> dict:
+    """Local name -> the set of provable value-kinds bound to it in `body`.
+
+    A local bound to two incompatible kinds is a BOX word at emission time
+    (the store paths tag each value), so a `return <that local>` arm carries
+    the box word whatever `_quick_type` guessed from one of its bindings.
+    """
+    out: dict = {}
+    for n in _each_binding(body or []):
+        nm = ''
+        val = None
+        if isinstance(n, gimple_ctypes.AssignStmt) \
+                and isinstance(n.target, gimple_ctypes.IdentExpr):
+            nm = _as_str(n.target.name)
+            val = n.value
+        elif isinstance(n, gimple_ctypes.VarDecl):
+            nm = _as_str(getattr(n, 'name', ''))
+            val = getattr(n, 'value', None)
+        if not nm:
+            continue
+        k = _param_value_binding_kind(gen, val)
+        if k is not None:
+            out.setdefault(nm, set()).add(k)
+    return out
+
+
+def _return_arm_is_boxed_local(gen, arms: list, body: list) -> bool:
+    """True when a returned name is bound to two incompatible kinds here."""
+    kinds = _boxed_local_binding_kinds(gen, body)
+    for arm in (arms or []):
+        if isinstance(arm, gimple_ctypes.IdentExpr):
+            ks = kinds.get(_as_str(arm.name), set())
+            if len(ks) > 1 and not ks <= {'int', 'bool', 'float'}:
+                return True
+        if isinstance(arm, gimple_ctypes.TernaryExpr):
+            branches = [getattr(arm, 'then_val', None), getattr(arm, 'else_val', None)]
+            bs = set()
+            for br in branches:
+                k = _param_value_binding_kind(gen, br)
+                if k is None and gimple_exprtypes.scalar_shape_arm_kind(br) is not None:
+                    k = 'int'
+                if k is None and br is not None \
+                        and not isinstance(br, (gimple_ctypes.NoneLiteral,
+                                                gimple_ctypes.StringLiteral,
+                                                gimple_ctypes.ListExpr,
+                                                gimple_ctypes.TupleExpr,
+                                                gimple_ctypes.DictExpr,
+                                                gimple_ctypes.SetExpr)):
+                    k = 'unknown_scalar'
+                if k is not None:
+                    bs.add(k)
+            if len(bs) > 1 and not bs <= {'int', 'bool', 'float', 'unknown_scalar'}:
+                return True
+    return False
+
+
 def _infer_return_type_core(gen, body: list) -> str:
     """Infer return type by scanning body for ReturnStmt nodes."""
     acc: list[str] = []
@@ -2937,6 +2993,17 @@ def _infer_return_type_core(gen, body: list) -> str:
     gen._collect_return_types(body, acc, arms)
     if acc:
         _rt = gimple_ctypes.TypeLattice.join_all(acc)
+        # A returned LOCAL bound to two incompatible kinds IS the tagged word
+        # at emission time (each store boxes by kind), whatever its declared
+        # C type says. Returning it as a pointer cast the box header to char*
+        # and printf read its magic byte as text (`print(describe(True))`
+        # printed a control byte or segfaulted). Widen the ABI to the word;
+        # do NOT add the body to `_mixed_return_bodies` -- these arms are
+        # already boxed by their stores, and re-boxing them here would box a
+        # box.
+        if (_return_arm_is_boxed_local(gen, arms, body)
+                and not gimple_ctypes.TypeLattice.is_word(_rt)):
+            return 'int64_t'
         # A pointer beside a scalar has no arm type that can hold both; see
         # `_return_arms_need_boxed_word`. The function returns the TAGGED WORD
         # instead, and body identity is recorded so the return emitter boxes

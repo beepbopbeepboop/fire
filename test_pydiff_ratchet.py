@@ -21,6 +21,16 @@ import pydiff  # noqa: E402
 CORPUS = os.path.join(HERE, 'tools', 'pydiff_corpus')
 OK_LIST = os.path.join(HERE, 'tools', 'pydiff_ok.txt')
 
+# Programs still under active repair that must at least STOP CRASHING. They
+# are deliberately NOT in pydiff_ok.txt: their stdout still differs from
+# CPython, so adding them there would make the ratchet red. This is the pin
+# for the narrower promise "the compiled program reaches its end", which is
+# the regression the mixed-return ABI fixes closed.
+NO_CRASH = [
+    'flow/04_ternary_mixed_types.py',
+    'flow/33_mixed_type_variable.py',
+]
+
 
 def corpus_files() -> list:
     out = []
@@ -52,6 +62,13 @@ def main(argv: list) -> int:
     todo = corpus_files() if update else want
     results = run_all([r for r in todo if r not in missing])
     bad = [r for r in want if r in results and results[r]['verdict'] != 'OK']
+    no_crash = [r for r in NO_CRASH if r not in results]
+    if no_crash:
+        results.update(run_all(no_crash))
+    for r in NO_CRASH:
+        if results.get(r, {}).get('verdict') == 'CRASH':
+            print('  CRASH %s: compiled program still dies' % r)
+            bad.append(r)
     for r in missing:
         print('  FAIL  %s: listed but not in the corpus' % r)
     for r in bad:

@@ -5406,9 +5406,11 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # `x = "s"; x = 1.5` printed a control byte before the `!`), and made
         # `x + "!"` read a kind-'p' box as a pointer to its own header.
         _lhs_boxed = (gen._word_may_be_box(lv)
-                      or gen._is_dyn_word(left_node, lv))
+                      or gen._is_dyn_word(left_node, lv)
+                      or lv in ginf.mixed_value_locals(gen))
         _rhs_boxed = (gen._word_may_be_box(rv)
-                      or gen._is_dyn_word(right_node, rv))
+                      or gen._is_dyn_word(right_node, rv)
+                      or rv in ginf.mixed_value_locals(gen))
         if right_is_lit and gimple_ctypes.TypeLattice.is_cstr(rt) and gimple_ctypes.TypeLattice.is_int_word(lt) and not _lhs_boxed:
             ip = gen._new_temp('int64_t')
             cp = gen._new_temp('char *')
@@ -5446,11 +5448,13 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # in the same sense (`_is_may_hold_str_param`): the runtime decides.
         if gimple_ctypes.TypeLattice.is_cstr(lt2) and gimple_ctypes.TypeLattice.is_word(rt2) and (
                 gen._is_dyn_word(right_node, rv2)
+                or rv2 in ginf.mixed_value_locals(gen)
                 or ginf._is_may_hold_str_param(gen, right_node)):
             sv = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', rv2)])
             return 'char *', gen._emit_str_cat(lv2, sv, gen._is_fresh_operand(left_node, lv2), False)
         if gimple_ctypes.TypeLattice.is_cstr(rt2) and gimple_ctypes.TypeLattice.is_word(lt2) and (
                 gen._is_dyn_word(left_node, lv2)
+                or lv2 in ginf.mixed_value_locals(gen)
                 or ginf._is_may_hold_str_param(gen, left_node)):
             sv = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', lv2)])
             return 'char *', gen._emit_str_cat(sv, rv2, False, gen._is_fresh_operand(right_node, rv2))
