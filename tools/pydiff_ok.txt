@@ -26,8 +26,10 @@ classes/35_add_sub_operators.py
 classes/38_method_returns_none_and_list.py
 classes/41_none_field_reset.py
 containers/01_list_empty_fill.py
+containers/02_list_index_neg.py
 containers/03_list_slices.py
 containers/06_nested_lists.py
+containers/07_list_append_extend.py
 containers/08_list_insert_pop.py
 containers/10_list_reverse_sort.py
 containers/11_in_list_needles.py
@@ -35,6 +37,7 @@ containers/13_dict_empty.py
 containers/14_dict_str_int.py
 containers/27_len_empty_kinds.py
 containers/28_list_equality_compare.py
+containers/31_zip_range_negstep.py
 containers/32_slice_steps_bounds.py
 containers/33_list_mul_concat.py
 containers/35_any_all_lists.py
@@ -50,9 +53,11 @@ flow/10_nested_break.py
 flow/11_range_step_countdown.py
 flow/12_early_return_loop.py
 flow/13_try_except_builtin.py
+flow/14_try_else_finally.py
 flow/18_exception_propagation.py
 flow/21_bit_ops.py
 flow/22_float_round_format.py
+flow/27_list_comp_condition.py
 flow/28_nested_comprehension.py
 flow/30_comprehension_over_string.py
 flow/32_state_machine.py
@@ -126,6 +131,7 @@ params/09_empty_vs_full_list.py
 params/11_return_int_or_none.py
 params/12_return_str_or_none.py
 params/14_list_of_strings_vs_ints.py
+params/16_bool_and_or_chain.py
 params/17_recursion_factorial.py
 params/18_recursion_fib.py
 params/21_early_returns.py
