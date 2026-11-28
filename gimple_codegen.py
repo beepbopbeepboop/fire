@@ -1775,6 +1775,14 @@ class GimpleGen:
         # caller's `g = mk(...)` must carry the return type into
         # `_bound_method_ret_types` for `g(...)` to narrow its box.
         self._return_bound_method_ret_types: dict[str, str] = {}
+        # The tagged-word twin of the two maps above (stage 5c): a callable
+        # value whose lifted body's return slot is a scalar beside None. The
+        # value-keyed halves are `_bound_method_tagged` / `_callable_tagged`
+        # (per function); these carry the fact across a factory's return to
+        # the caller, exactly as the type maps do.
+        self._return_bound_method_tagged: dict[str, int] = {}
+        self._return_callable_tagged: dict[str, int] = {}
+        self._return_slot_tagged: dict[str, list] = {}
         self._return_func_value_names: dict[str, str] = {}
         # Function name -> per-slot C types of a MULTI-VALUE return's
         # tuple handle (`return cfg, Model(cfg)`). Deliberately module

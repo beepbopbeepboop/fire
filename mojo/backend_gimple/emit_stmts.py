@@ -1493,6 +1493,11 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                         tgt, 'int64_t',
                         gen._rt_call('int64_t', 'mojo_tagged_int', [f"(int64_t){v}", f"{i}"]))
                 return
+            _slot_tags = gen._tuple_slot_tagged.get(v)
+            if _slot_tags is None and isinstance(node.value, gimple_ctypes.CallExpr) \
+                    and isinstance(node.value.func, gimple_ctypes.IdentExpr):
+                _slot_tags = gen._return_ret_for(
+                    _as_str(node.value.func.name), (gen._return_slot_tagged,))
             for i, tgt in enumerate(targets):
                 # _tuple_elem_value resolves an int64_t-boxed tuple handle
                 # (a call result — the codegen's own `-> tuple[str, str]`
@@ -1501,6 +1506,26 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                 # of reading pointers as int64_t decimals.
                 et, ev = gen._tuple_elem_value(vtype, v, i)
                 gen._assign_target(tgt, et, ev)
+                # Stage 5c: a slot that held a closure whose lifted body
+                # returns a scalar beside None (`_return_slot_tagged`) makes
+                # the unpacked NAME a tagged callable, so a later `pop_a()`
+                # marks its result a tagged word.
+                if (_slot_tags and i < len(_slot_tags) and _slot_tags[i]
+                        and isinstance(tgt, gimple_ctypes.IdentExpr)):
+                    _stn = _as_str(tgt.name)
+                    _stn_c = _stn
+                    try:
+                        _stn_c = _as_str(gen._cname(_stn))
+                    except Exception:
+                        _stn_c = _stn
+                    if gimple_ctypes.TypeLattice.is_bound_method(et):
+                        gen._bound_method_tagged.add(_stn)
+                        if _stn_c != _stn:
+                            gen._bound_method_tagged.add(_stn_c)
+                    else:
+                        gen._callable_tagged.add(_stn)
+                        if _stn_c != _stn:
+                            gen._callable_tagged.add(_stn_c)
         return
     # `obj.prop = value` where the receiver's struct defines a `@prop.setter`
     # (renamed `__setprop_<prop>` by `_gmi_rename_property_setters`) is a CALL
@@ -4027,6 +4052,13 @@ def _gen_stmt_ReturnStmt(gen, node):
         if gen.current_func_name and v in gen._bound_method_ret_types:
             gen._return_bound_method_ret_types[gen.current_func_name] = \
                 gen._bound_method_ret_types[v]
+        # Stage 5c: the tagged-word twin of the two carries above.
+        if gen.current_func_name and v in getattr(gen, '_bound_method_tagged', ()):
+            gen._return_bound_method_tagged[gen.current_func_name] = 1
+        if gen.current_func_name and v in getattr(gen, '_callable_tagged', ()):
+            gen._return_callable_tagged[gen.current_func_name] = 1
+        if gen.current_func_name and v in getattr(gen, '_tuple_slot_tagged', {}):
+            gen._return_slot_tagged[gen.current_func_name] = gen._tuple_slot_tagged[v]
         if gen.current_func_name and v in gen._func_value_names:
             gen._return_func_value_names[gen.current_func_name] = \
                 gen._func_value_names[v]

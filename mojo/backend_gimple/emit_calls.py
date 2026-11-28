@@ -3344,6 +3344,13 @@ def _lc_non_ident_callee(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _vt = gen._global_container_callable_ret.get(node.func.obj.name)
             if not _vt:
                 _vt = 'int64_t'
+            # Stage 5c: a container holding a callable whose lifted body
+            # returns a scalar beside None. Mark the element VALUE so
+            # `_lower_fnptr_call_value` marks the call result a tagged word
+            # (`ops[3](7, 0)` -> None, not 0).
+            if (getattr(gen, '_container_callable_tagged', None) or {}).get(
+                    node.func.obj.name):
+                gen._callable_tagged.add(_as_str(_callee_v))
             return gen._lower_fnptr_call_value(_callee_t, _callee_v, node, _vt)
     if isinstance(node.func, gimple_ctypes.SubscriptExpr):
         # A bracket-parametrized call to a function that needs
@@ -10868,7 +10875,14 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
         return 'double', t
     raw_t = gen._rt_call('int64_t', helper, call_args)
     if gimple_ctypes.TypeLattice.is_word(ret_type):
-        gen._word_mark_dyn(raw_t)   # nothing says what the callee returns: a word of unknown kind
+        if _as_str(fp_raw) in getattr(gen, '_callable_tagged', ()):
+            # Stage 5c: the callee's lifted body returns a scalar beside None,
+            # so the word is a tagged box (None on one path), not an unknown
+            # plain word.
+            gen._word_mark_boxed(raw_t)
+            gen._word_mark_tagged(raw_t)
+        else:
+            gen._word_mark_dyn(raw_t)   # nothing says what the callee returns: a word of unknown kind
     # Calling a HIGHER-ORDER PARAMETER whose declared default is a compiled
     # generator of this compile (`def walk_tree(root, *, walk=_walk_tree)`
     # — Tools/c-analyzer/c_common/fsutil.py's whole idiom, and the shape

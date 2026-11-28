@@ -829,6 +829,9 @@ def _auto_invoke_bound_method_value(gen, bm_val: str) -> tuple[str, str]:
     raw_t = gen._call_expr('int64_t', 'mojo_bound_method_call_0',
                             [('MojoBoundMethod *', bm_val)])
     if gimple_ctypes.TypeLattice.is_word(ret_type):
+        if _as_str(bm_val) in getattr(gen, '_bound_method_tagged', ()):
+            gen._word_mark_boxed(raw_t)
+            gen._word_mark_tagged(raw_t)
         return 'int64_t', raw_t
     if gimple_ctypes.TypeLattice.is_void(ret_type):
         return 'int', gen._new_val('int', '0')
@@ -1103,6 +1106,10 @@ def _lower_maybe_bound_call(gen, fname_raw: str,
     raw_t = gen._call_expr('int64_t', helper, lead +
                              [('int64_t', w) for w in widened[:8]])
     if gimple_ctypes.TypeLattice.is_int_word(ret_type):
+        if fname_raw in getattr(gen, '_bound_method_tagged', ()) \
+                or fname_raw in getattr(gen, '_callable_tagged', ()):
+            gen._word_mark_boxed(raw_t)
+            gen._word_mark_tagged(raw_t)
         return ret_type, raw_t
     if gimple_ctypes.TypeLattice.is_void(ret_type):
         return 'int', gen._new_val('int', '0')
@@ -7178,7 +7185,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             # instead of the `(int64_t)4` temp the Python reference builds
             # (byte-parity drift on `list_append`). `mojo_list_append_int`'s
             # 2nd param is always int64_t, so this is unconditionally correct.
-            if gimple_ctypes.TypeLattice.is_word(at) and gen._word_may_be_box(av):
+            if gimple_ctypes.TypeLattice.is_word(at) and ginf.is_box_word_expr(gen, args[0], av):
                 # A TAGGED word -- the loop variable of a generator whose yields
                 # are mixed kinds (`for v in g(): out.append(v)`). Append it under
                 # the kind it carries (a None box as a None slot, a float as a

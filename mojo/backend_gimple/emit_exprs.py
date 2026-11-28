@@ -602,6 +602,12 @@ def _closure_value(gen, name: str, _ci) -> tuple:
     function (`_gen_stmt_FunctionDef`)."""
     lifted = _ci.lifted_name
     gen._funcptr_builtins_needed.add(lifted)
+    # Stage 5c: this lifted body's return slot is a scalar beside None
+    # (`_gmp_collect_boxed_return_names`). The CALLABLE VALUE carries the fact
+    # so a call through it marks its result a tagged word; the bound-method /
+    # function-pointer halves carry it across a factory return and a tuple
+    # unpack (`_return_*_tagged`).
+    _ret_boxed = _as_str(lifted) in getattr(gen, '_ret_boxed_names', ())
     fp = gen._new_val('void *', f'_funcptr_{lifted}')
     _repr_name = f"{gen.current_func_name or 'root'}.<locals>.{name}"
     if _ci.env_struct:
@@ -641,6 +647,8 @@ def _closure_value(gen, name: str, _ci) -> tuple:
             _vft = gen._cast('void *', _vf)
             gen._callable_ret_types[_vft] = gen.func_return_types.get(lifted, 'int64_t')
             gen._func_value_names[_vft] = _repr_name
+            if _ret_boxed:
+                gen._callable_tagged.add(_vft)
             return 'void *', _vft
         t = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
                             [('void *', fp), ('void *', env_void)])
@@ -667,8 +675,12 @@ def _closure_value(gen, name: str, _ci) -> tuple:
                                    [('MojoBoundMethod *', t), ('void *', _box_val)])
         gen._bound_method_ret_types[t] = gen.func_return_types.get(lifted, 'int64_t')
         gen._func_value_names[t] = _repr_name
+        if _ret_boxed:
+            gen._bound_method_tagged.add(t)
         return 'MojoBoundMethod *', t
     gen._func_value_names[fp] = _repr_name
+    if _ret_boxed:
+        gen._callable_tagged.add(fp)
     return 'void *', fp
 
 
@@ -8961,6 +8973,20 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
                 continue
             _slot_ts.append(_as_str(_slt[1]))
         gen._tuple_slot_types[t] = _slot_ts
+        # Stage 5c: which slots hold a callable whose lifted body returns a
+        # scalar beside None (a factory `return push, pop, size`). Carried to
+        # the call site by the `_return_slot_tagged` twin of
+        # `_return_slot_types`, and re-keyed to the unpacked names there.
+        _slot_tag = []
+        for _slt in lowered:
+            if _is_star_spread(_slt[0]):
+                continue
+            _sv = _as_str(_slt[2])
+            _slot_tag.append(
+                1 if (_sv in getattr(gen, '_bound_method_tagged', ())
+                      or _sv in getattr(gen, '_callable_tagged', ())) else 0)
+        if any(_slot_tag):
+            gen._tuple_slot_tagged[t] = _slot_tag
     # Record prefix kinds before any spread extends the tuple.
     _prefix_tkinds = _literal_slot_kinds(gen, lowered)
     if _has_spread and _prefix_tkinds:

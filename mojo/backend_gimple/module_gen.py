@@ -15034,7 +15034,8 @@ def _gmp_propagate_generator_returns(self, _ret_changed: bool, _ret_defs: list) 
 
 
 def _gmp_collect_boxed_return_names(self, all_functions: list,
-                                    all_structs_for_methods: list) -> None:
+                                    all_structs_for_methods: list,
+                                    lifted_pairs: list = None) -> None:
     """Stage 5c: record every function/method whose RETURN SLOT holds a scalar
     beside `None`, so `return None` is the shared box and a call site renders
     the result by kind.
@@ -15172,6 +15173,11 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
         if _has_none and _has_scalar:
             _mixed.add(id(body))
             _names.add(_as_str(key))
+            _boxed = getattr(self, '_ret_boxed_names', None)
+            if _boxed is None:
+                _boxed = set()
+                self._ret_boxed_names = _boxed
+            _boxed.add(_as_str(key))
 
     for _fn in all_functions:
         if isinstance(_fn, FunctionDef) and getattr(_fn, 'return_type', None) is None:
@@ -15184,6 +15190,12 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
             if getattr(_m, 'return_type', None) is None:
                 _one(getattr(_m, 'body', None),
                      _sname + '_' + _as_str(_m.name), _sname)
+    # Nested `def`s/lambdas this compile lifts into their own functions: the
+    # same decision, recorded under the name the closure VALUE is created
+    # with (`_ret_boxed_names`). The closure-creation and call-through-value
+    # sites consult that name (see emit_exprs/emit_methods).
+    for _lp in (lifted_pairs or ()):
+        _one(getattr(_lp[1], 'body', None), _as_str(_lp[0]), None)
 
 
 def _gmp_collect_param_value_obs(self, all_functions: list, all_structs_for_methods: list,
@@ -20549,8 +20561,6 @@ def gen_module_impl(self, stmts: list):
     # `value_class_of` can prove a field/subscript arm scalar; unions into the
     # `_mixed_return_bodies` / `_ret_may_hold_mixed` sets the return emitter
     # and every call site already consult.
-    _gmp_collect_boxed_return_names(self, all_functions,
-                                    all_structs_for_methods)
     _gmh_reconcile_param_container_kinds(self)
     _gmh_reconcile_augmented_param_types(
         self, all_functions, all_structs_for_methods)
@@ -20688,6 +20698,18 @@ def gen_module_impl(self, stmts: list):
     # code pointer, and discover_closures passes `ctx` explicitly.
     self.selfhost_param_ctype = _selfhost_gen_self_param_ctype
     _gmp_discover_closures(self, stmts)
+    # Stage 5c: the return-slot decision for functions, methods AND the lifted
+    # closures `_gmp_discover_closures` just recorded (`_all_closures`). Runs
+    # after the call-site value table (`_gmp_collect_param_value_obs`) and the
+    # closure discovery, both of which feed it.
+    _lift_pairs = []
+    for _lown in (getattr(self, '_all_closures', None) or {}):
+        for _lci in (self._all_closures[_lown] or {}).values():
+            _lidef = getattr(_lci, 'inner_def', None)
+            if _lidef is not None:
+                _lift_pairs.append((_as_str(getattr(_lci, 'lifted_name', '')), _lidef))
+    _gmp_collect_boxed_return_names(self, all_functions,
+                                    all_structs_for_methods, _lift_pairs)
 
     # `self._multi_kind_return_funcs` names the functions whose return slot
     # is the box because they hand back a container whose kind a caller cannot

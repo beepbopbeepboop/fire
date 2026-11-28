@@ -802,6 +802,13 @@ def _reset_func(gen, body: list = None, params: list = None,
     # Reset per function for the same reason _actual_types is: temp
     # names (_tN) recycle across functions. See _lower_bound_method_value.
     gen._bound_method_ret_types: dict[str, str] = {}
+    # Stage 5c: the same value-keyed sets for "this callable's lifted body
+    # returns a scalar beside None". Reset per function for the same reason;
+    # the cross-function half is `_return_bound_method_tagged` /
+    # `_return_callable_tagged` / `_return_slot_tagged` (module scope).
+    gen._bound_method_tagged: set = set()
+    gen._callable_tagged: set = set()
+    gen._tuple_slot_tagged: dict = {}
     # Any callable VALUE (a lambda's `_funcptr_X` static, a bound-method
     # handle, a struct method taken as a value) -> that callee's real return
     # type. The `mojo_fnptr_call_N` / `mojo_maybe_bound_call_N` helpers are
@@ -862,6 +869,9 @@ def _reset_func(gen, body: list = None, params: list = None,
     # stored, where the store site actually knows.
     # Reset per function for the same reason as the maps above.
     gen._container_callable_ret = {}
+    # Stage 5c: containers holding a callable whose lifted body's return slot
+    # is a scalar beside None (`_ret_boxed_names`), keyed like the map above.
+    gen._container_callable_tagged = {}
     # Seeded from self._global_container_callable_ret (Phase 1.7, never reset)
     # for the same reason `_elem_types` is seeded from `_global_elem_types`
     # just above: a module-level dict of callables means the same thing in
@@ -2360,6 +2370,16 @@ def carry_callable_ret_from_call(gen, value_node, dst: str) -> None:
     _brt = gen._return_ret_for(_fname, (gen._return_bound_method_ret_types,))
     if _brt:
         gen._bound_method_ret_types[dst] = _brt
+    # Stage 5c: the same hop for the tagged-word flag. A factory that returns a
+    # closure whose body's return slot is a scalar beside None (a direct
+    # closure, or a tuple of them) hands the fact to the name it is bound to.
+    if gen._return_ret_for(_fname, (gen._return_bound_method_tagged,)):
+        gen._bound_method_tagged.add(dst)
+    if gen._return_ret_for(_fname, (gen._return_callable_tagged,)):
+        gen._callable_tagged.add(dst)
+    _rst = gen._return_ret_for(_fname, (gen._return_slot_tagged,))
+    if _rst:
+        gen._tuple_slot_tagged[dst] = _rst
 
     _rn = getattr(gen, '_return_func_value_names', {}).get(_fname)
     if _rn is None and _fname in getattr(gen, '_closure_envs', ()):
@@ -2622,6 +2642,12 @@ def carry_value_info(gen, dst: str, src: str) -> None:
         gen._callable_ret_types[dst] = gen._callable_ret_types[src]
     if src in gen._bound_method_ret_types and dst not in gen._bound_method_ret_types:
         gen._bound_method_ret_types[dst] = gen._bound_method_ret_types[src]
+    if src in gen._bound_method_tagged and dst not in gen._bound_method_tagged:
+        gen._bound_method_tagged.add(dst)
+    if src in gen._callable_tagged and dst not in gen._callable_tagged:
+        gen._callable_tagged.add(dst)
+    if src in gen._tuple_slot_tagged and dst not in gen._tuple_slot_tagged:
+        gen._tuple_slot_tagged[dst] = gen._tuple_slot_tagged[src]
     if src in gen._container_callable_ret and dst not in gen._container_callable_ret:
         gen._container_callable_ret[dst] = gen._container_callable_ret[src]
     if src in gen._func_value_names and dst not in gen._func_value_names:
@@ -8909,6 +8935,18 @@ def note_container_callable_ret(gen, container_val: str, value_text: str,
         _rt = 'int64_t'
     if not _rt:
         return
+    # Stage 5c: a stored callable whose lifted body returns a scalar beside
+    # None makes the CONTAINER a tagged-callable source; the subscript-callee
+    # gate marks the element value so the call result is a tagged word.
+    _tag = (value_text in getattr(gen, '_bound_method_tagged', ())
+            or value_text in getattr(gen, '_callable_tagged', ()))
+    if not _tag and isinstance(value_node, gimple_ctypes.CallExpr) \
+            and isinstance(value_node.func, gimple_ctypes.IdentExpr):
+        _tag = bool(gen._return_ret_for(
+            _as_str(value_node.func.name),
+            (gen._return_bound_method_tagged, gen._return_callable_tagged)))
+    if _tag:
+        gen._container_callable_tagged[container_val] = 1
     _cur = gen._container_callable_ret.get(container_val)
     if _cur is None:
         gen._container_callable_ret[container_val] = _rt
