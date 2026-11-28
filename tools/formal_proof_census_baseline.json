@@ -448,20 +448,20 @@
     "native_decide": 25
    },
    "decide_total": 27,
-   "lean_cpu_s": 57.0,
-   "lean_peak_gb": 5.16,
-   "lean_wall_s": 37.5,
+   "lean_cpu_s": 65.1,
+   "lean_peak_gb": 5.21,
+   "lean_wall_s": 41.6,
    "n_admitted": 0,
-   "n_sorries": 2,
-   "peak_gb": 5.16,
+   "n_sorries": 1,
+   "peak_gb": 5.21,
    "phase": "check",
-   "proof_lines": 5128,
+   "proof_lines": 5142,
    "reason": "",
    "source_sha256": "f2b287bd577dc7fa741ab2680ac520b1ecf6e26ec484071e99886221220ddf29",
    "status": "sorry",
    "stem": "countdown",
    "timed_on": "2026-11-28",
-   "wall_s": 38.0
+   "wall_s": 491.1
   },
   "csinv_ternary": {
    "arch": "arm64",
@@ -2129,5 +2129,5 @@
  "tag": "formal-proof-census-v2",
  "time_factor": 2.0,
  "timed_rows": 64,
- "written": "2026-11-28T10:53:21Z"
+ "written": "2026-11-28T11:15:46Z"
 }
