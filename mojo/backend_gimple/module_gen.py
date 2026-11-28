@@ -3127,7 +3127,10 @@ def _emit_reflection_dispatch(self, parts):
                "  if (_kinds && !strchr(_kinds, 'o'))\n"
                "    return mojo_repr_list_kinds(lst, 0);\n"
                "  int _is_tup = lst && mojo_is_tuple(lst);\n"
-               "  if (!lst) return strdup(_is_tup ? \"()\" : \"[]\");\n"
+               # A NULL list is the None of a refs-only slot (a `.get`
+               # miss, an unset container field); an EMPTY list is a real
+               # `mojo_list_new()` and still prints `[]` / `()`.
+               "  if (!lst) return strdup(\"None\");\n"
                "  int64_t _n = mojo_list_len(lst);\n"
                "  char *_buf = strdup(_is_tup ? \"(\" : \"[\");\n"
                "  for (int64_t _i = 0; _i < _n; _i++) {\n"
@@ -3262,8 +3265,11 @@ def _emit_reflection_dispatch(self, parts):
                 "  if (_r) return _r;\n"
                 "  return _mojo_generic_elem_repr(v);\n"
                 "}\n"
+               # A NULL dict is the None of a refs-only slot (a `.get` miss,
+               # an unset container field); an EMPTY dict is a real
+               # `mojo_dict_new()` and still prints `{}`.
                "static char * _mojo_repr_dict (MojoDict *d) {\n"
-                "  if (!d) return strdup(\"{}\");\n"
+                "  if (!d) return strdup(\"None\");\n"
                 "  if (d->frozen && d->used == 0) return strdup(\"frozendict()\");\n"
                 "  char *_buf = d->frozen ? strdup(\"frozendict({\") : strdup(\"{\");\n"
                 "  int64_t *_order = mojo_dict_order_indices(d);\n"
@@ -3359,7 +3365,8 @@ def _emit_reflection_dispatch(self, parts):
                "  return mojo_str_cat_free(_buf, d->frozen ? \"})\" : \"}\");\n"
                "}\n"
                "static char * _mojo_repr_set (MojoSet *s) {\n"
-               "  if (!s || s->used == 0) return strdup(\"set()\");\n"
+               "  if (!s) return strdup(\"None\");\n"
+               "  if (s->used == 0) return strdup(\"set()\");\n"
                "  char *_buf = strdup(\"{\");\n"
                "  int64_t *_order = mojo_set_order_indices(s);\n"
                "  for (int64_t _oi = 0; _oi < s->used; _oi++) {\n"

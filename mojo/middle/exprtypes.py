@@ -2062,6 +2062,12 @@ def dict_value_kind(gen, node):
         return 'double'
     if TypeLattice.is_cstr(_vt):
         return 'char *'
+    # A CONTAINER value kind (`{'a': [1]}`, `{'a': {'n': 1}}`) is its own
+    # answer: the dict stores the pointer and a `.get`/`d[k]` read must know
+    # the reader (len/subscript/repr), not treat it as an int64 word.
+    if _vt and (TypeLattice.is_list(_vt) or TypeLattice.is_dict(_vt)
+                or TypeLattice.is_set(_vt) or TypeLattice.is_bytes(_vt)):
+        return _vt
     if _vt and TypeLattice.ends_in_star(_vt) and gen.struct_field_types.get(_vt[:-2].strip()):
         return _vt
     return None
