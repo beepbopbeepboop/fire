@@ -6610,8 +6610,13 @@ def _ldm_get(gen, ov: str, args: list) -> tuple:
     # emitted right after its call, so a spare raw read first would free the
     # key before this one ran and this one always missed.
     # A str value domain keeps its `char *` result (the NULL miss is the
-    # nullable-pointer convention); a double/container domain is left as it
-    # was, since those results cannot carry the None box in their C type.
+    # nullable-pointer convention); a DOUBLE or container domain is left as it
+    # was. A double result's C type is what its consumers (`math.sqrt`,
+    # arithmetic) read, and the local bound to a no-default `.get` is typed
+    # `double` by inference; boxing the miss without migrating those readers
+    # would hand them the box's address (measured: `x = df.get("a")` then
+    # `print(x)` printed the address). The miss of a double-domain `.get` is
+    # therefore still 0.0, and that remains on the stage-5c list.
     if default_val is None and not gimple_ctypes.TypeLattice.is_cstr(val_type) \
             and not gimple_ctypes.TypeLattice.is_double(val_type) \
             and not (gimple_ctypes.TypeLattice.is_set(val_type) or gimple_ctypes.TypeLattice.is_dict(val_type) or gimple_ctypes.TypeLattice.is_list(val_type)):
@@ -7142,6 +7147,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             gen._emit_call('void', '', 'mojo_list_append_double_kinded',
                            [('MojoList *', ov), ('double', av), ('char', "'" + _prior + "'")])
             gen._word_mark_slot_kinds(ov)
+            ginf.note_field_slot_kinds(gen, ov)
         elif gimple_exprtypes.is_python_bool_expr(gen, args[0]):
             # A Python bool is the same 0/1 word as an int (`_Bool` lowers to
             # `int`), so the value alone cannot tell the printer which spelling
@@ -7162,6 +7168,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                            [('MojoList *', ov), ('int64_t', av),
                             ('char', "'b'"), ('char', "'" + _prior + "'")])
             gen._word_mark_slot_kinds(ov)
+            ginf.note_field_slot_kinds(gen, ov)
         else:
             # Coerce a bare `int`/`_Bool` literal to `int64_t` HERE rather
             # than leaving it to `_emit_call`'s param-type lookup: in the
@@ -7181,6 +7188,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                 gen._emit_call('void', '', 'mojo_list_append_word',
                                [('MojoList *', ov), ('int64_t', av)])
                 gen._word_mark_slot_kinds(ov)
+                ginf.note_field_slot_kinds(gen, ov)
             else:
                 # A pointer element on a list that already carries a kinds row
                 # must extend that row, or the kinds-aware repr reads the slot
@@ -7282,6 +7290,15 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             # int-then-cast two-step used elsewhere in this file.
             neg1 = gen._new_val('int', '-1')
             idx64 = gen._cast('int64_t', neg1)
+        if gen._word_has_slot_kinds(ov):
+            # The list describes its own slots (a bool/None/str element beside
+            # ints), so the popped value must carry its kind out: the raw
+            # accessor answers the slot word, and a None/bool box's payload 0
+            # then printed as the integer 0.
+            t = gen._call_expr('int64_t', 'mojo_list_pop_at_boxed',
+                               [('MojoList *', ov), ('int64_t', idx64)])
+            gen._word_mark_boxed(t)
+            return 'int64_t', t
         raw = gen._call_expr('int64_t', 'mojo_list_pop_at', [('MojoList *', ov), ('int64_t', idx64)])
         elem = gen._elem_of(ov)
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -9626,6 +9643,20 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     if _mret_api is not None:
         ret_type = 'MojoGenerator *'
     t = gen._call_expr(ret_type, mangled, all_arg_pairs)
+    # Stage 5c: a METHOD whose return slot is a scalar beside `None`
+    # (`_gmp_collect_boxed_return_names`) returns the tagged word, exactly as a
+    # free function in `_ret_may_hold_mixed` does. Mark the result so a caller
+    # that binds or prints it renders by the box's kind instead of the integer
+    # 0 the None arm shares its bits with. Both the bare `Struct_method` key
+    # the pass records and the qualified C symbol are asked: the bare key is
+    # what an in-file method has, the qualified one covers a reflected/imported
+    # struct registered under its module symbol.
+    if gimple_ctypes.TypeLattice.is_word(ret_type) \
+            and (_as_str(struct_name) + '_' + _as_str(method)
+                 in getattr(gen, '_ret_may_hold_mixed', ())
+                 or _as_str(mangled) in getattr(gen, '_ret_may_hold_mixed', ())):
+        gen._word_mark_boxed(t)
+        gen._word_mark_tagged(t)
     if _mret_api is not None:
         gen._generator_var_api[t] = _mret_api
         gen._actual_types[t] = 'MojoGenerator *'

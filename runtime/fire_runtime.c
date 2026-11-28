@@ -1601,6 +1601,29 @@ static void _kinds_set_byte(MojoList *l, int64_t idx, char kind) {
 
 static void _kinds_forget(uint64_t addr);
 
+/* Remove ONE slot's kind byte from the row, shifting the later bytes down.
+ * Copy-on-write for the same reason as `_kinds_set_byte` (the string may be
+ * a shared pool constant). The per-slot box cache is indexed by slot too, so
+ * a removal drops it rather than leaving a box at the wrong index. */
+static void _kinds_remove_byte(MojoList *l, int64_t idx) {
+    if (!l || idx < 0) return;
+    _KindRow *r = _kinds_row((uint64_t)(uintptr_t)l);
+    if (!r || !r->kinds) return;
+    size_t n = strlen(r->kinds);
+    if ((size_t)idx >= n) return;
+    char *priv = (char *)malloc(n + 1);
+    if (!priv) return;
+    memcpy(priv, r->kinds, (size_t)idx);
+    memcpy(priv + idx, r->kinds + idx + 1, n - (size_t)idx);
+    if (r->owned == 2)
+        free(r->kinds - 8);
+    else if (r->owned == 1)
+        free(r->kinds);
+    r->kinds = priv;
+    r->owned = 1;
+    if (r->boxes) r->boxes = NULL;
+}
+
 void mojo_list_set_kinds(MojoList *l, const char *kinds)
 {
     if (!l) return;
@@ -8311,6 +8334,62 @@ void mojo_dict_set_none_key_struct(MojoDict *d, void *v)
     _dict_set_none_key_raw(d, (int64_t)(uintptr_t)v, 5);
 }
 
+/* ── A BOX-HOLDING word stored as a dict VALUE (stage 5c) ───────────────────
+ *
+ * `d['k'] = c.s` where `c.s` is a MIXED struct field (a scalar beside `None`)
+ * lowers to a WORD whose kind only the runtime knows: `mojo_box_none()` for
+ * the `None` half, `mojo_box_int`/`_from_double`/`_from_str` for the scalar
+ * half. The static C type of that word is `int64_t`, so the store used to go
+ * through `mojo_dict_set_int` with `_DictSlot.kind == 0` — the box's own
+ * ADDRESS was stored as an integer, and every reader said so: `{'k': c.s}`
+ * printed `{'k': 0}` where CPython prints `{'k': None}` (the box's payload is
+ * the integer 0 the None half means). The kind is exactly what the slot tag
+ * exists for, so the store has to ask the box, the same way
+ * `mojo_list_append_word` asks it for a list slot.
+ *
+ * `_dict_box_slot_kind` is the inverse of `_dict_slot_boxed`: a slot stored
+ * here reads back as the same box (kind 4 -> `mojo_box_none()`, kind 1/3 ->
+ * the double/bool box, kind 2 -> the string), so a dict literal, a subscript
+ * store and a later `d['k']`/`print(d)` all agree with the value the field
+ * held. A box this function does not own (a bytes `'s'` box, a list `'l'`
+ * box) keeps kind 0 with its POINTER, which is how a container value is
+ * already stored everywhere and which the generic readers dispatch on by
+ * registry membership (`_dict_val_repr_int` declines exactly those).
+ *
+ * A word that is not a box but IS a registered string pointer keeps kind 2:
+ * `mojo_boxed_is_str` is the same provenance test `mojo_list_append_word`
+ * uses, and without it such a value would render as its decimal address. */
+static int64_t _dict_box_slot_kind(int64_t w, int64_t *out)
+{
+    if (mojo_is_boxed(w)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)w;
+        switch (bx->kind) {
+            case 'd': *out = bx->bits; return 1;
+            case 'p': *out = bx->bits; return 2;
+            case 'b': *out = bx->bits ? 1 : 0; return 3;
+            case 'n': *out = 0; return 4;
+            default:  *out = bx->bits; return 0;
+        }
+    }
+    *out = w;
+    if (mojo_boxed_is_str(w)) return 2;
+    return 0;
+}
+
+void mojo_dict_set_word(MojoDict *d, char *key, int64_t w)
+{
+    int64_t v;
+    int64_t kind = _dict_box_slot_kind(w, &v);
+    _dict_set_raw(d, key, v, kind);
+}
+
+void mojo_dict_set_none_key_word(MojoDict *d, int64_t w)
+{
+    int64_t v;
+    int64_t kind = _dict_box_slot_kind(w, &v);
+    _dict_set_none_key_raw(d, v, kind);
+}
+
 void mojo_dict_set_bytes_none_key(MojoDict *d, MojoBytes *key, int64_t v)
 {
     (void)key;
@@ -8642,6 +8721,15 @@ void mojo_dict_set_bytes_bool(MojoDict *d, MojoBytes *key, int v)
  * `None` value from the integer 0 it shares a representation with. */
 void mojo_dict_set_bytes_none(MojoDict *d, MojoBytes *key)
 { _dict_set_bytes_raw(d, key, 0, 4); }
+
+/* The bytes-key twin of mojo_dict_set_word: the value is a box-holding word,
+ * so the slot's kind comes from the box (see that function's comment). */
+void mojo_dict_set_bytes_word(MojoDict *d, MojoBytes *key, int64_t w)
+{
+    int64_t v;
+    int64_t kind = _dict_box_slot_kind(w, &v);
+    _dict_set_bytes_raw(d, key, v, kind);
+}
 
 /* ...and of mojo_dict_set_struct (kind 5, rendered by the dict's recorded
  * val_repr). */
@@ -13971,22 +14059,8 @@ MojoList *mojo_dict_values(MojoDict *d) {
         if (uk >= 0) mojo_list_set_elem_repr(out, (void *)_dict_val_repr_fn[uk]);
     }
     int64_t *order = mojo_dict_order_indices(d);
-    /* Describe each VALUE slot so a consumer that walks this list with the
-     * string accessor skips ints/None instead of strcmp'ing them. A dict can
-     * hold int, str, float and None values at once; without a row here,
-     * `"" in inventory.values()` handed an int word to mojo_list_contains_str
-     * and died in libc (containers/36). The row is owned by the kinds table,
-     * which stores the pointer without freeing it, like the interned rows. */
-    char *kbuf = d->used > 0 ? (char *)malloc((size_t)d->used + 1) : NULL;
-    for (int64_t oi = 0; oi < d->used; oi++) {
-        int64_t _vi = order[oi];
-        mojo_list_append_int(out, d->slots[_vi].val);
-        if (kbuf) {
-            char _kb = mojo_dict_kind_byte(d->slots[_vi].kind);
-            kbuf[oi] = _kb ? _kb : 'i';
-        }
-    }
-    if (kbuf) { kbuf[d->used] = '\0'; mojo_list_set_kinds(out, kbuf); }
+    for (int64_t oi = 0; oi < d->used; oi++)
+        mojo_list_append_int(out, d->slots[order[oi]].val);
     free(order);
     return out;
 }
@@ -14564,7 +14638,31 @@ int64_t mojo_list_pop_at(MojoList *l, int64_t idx) {
     int64_t val = l->data[idx];
     for (int64_t i = idx; i < l->len - 1; i++) l->data[i] = l->data[i + 1];
     l->len--;
+    /* The per-slot kinds row is indexed by slot like `data`, so a removal
+     * shifts it too. Without this, `pop(0)` of a mixed list left every later
+     * slot described by its PREDECESSOR's kind (a str slot rendered as an
+     * int, an int as a str). */
+    _kinds_remove_byte(l, idx);
     return val;
+}
+
+/* `lst.pop(i)` on a list that describes its own slots: the popped VALUE as
+ * the tagged word its kind calls for (`mojo_list_get_boxed`'s mapping), not
+ * the raw slot word. `mojo_list_pop_at` answers the bare `int64_t`, so a
+ * None or bool box's payload 0 came back as the integer 0 and `print` said
+ * `0` where CPython says `None` / `False`. Read BEFORE the removal, then
+ * remove; the per-slot box cache is invalidated by the removal, so the box
+ * handed back here stays alive (the same bounded-leak convention as
+ * `_kinds_forget`). */
+int64_t mojo_list_pop_at_boxed(MojoList *l, int64_t idx) {
+    if (!l || l->len == 0) return mojo_box_none();
+    idx = _norm_idx(l, idx);
+    if (idx < 0 || idx >= l->len) return mojo_box_none();
+    {
+        int64_t boxed = mojo_list_get_boxed(l, idx);
+        mojo_list_pop_at(l, idx);
+        return boxed;
+    }
 }
 
 int64_t mojo_list_pop(MojoList *l) {
@@ -17057,6 +17155,24 @@ void mojo_dict_set_none_kw(MojoDict *d, int64_t kw)
         return;
     }
     _dict_set_ik(d, kw, 0, 4);
+}
+
+/* The `_kw` twin of mojo_dict_set_word, with the same three-arm `_kw_kind`
+ * dispatch every other twin uses: an integer/content key must land in the
+ * key domain the matching `_kw` READ looks in, and the slot's kind is still
+ * the BOX's (so `d[1] = c.s` reads back the same boxed value). */
+void mojo_dict_set_word_kw(MojoDict *d, int64_t kw, int64_t w)
+{
+    char *ck; int k = _kw_kind(kw, &ck);
+    if (k == _KW_STR) { mojo_dict_set_word(d, (char *)(intptr_t)kw, w); return; }
+    if (k == _KW_CONT) {
+        mojo_dict_set_word(d, ck, w);
+        mojo_dict_key_free(ck);
+        return;
+    }
+    int64_t v;
+    int64_t kind = _dict_box_slot_kind(w, &v);
+    _dict_set_ik(d, kw, v, kind);
 }
 
 void mojo_dict_set_struct_kw(MojoDict *d, int64_t kw, void *v)

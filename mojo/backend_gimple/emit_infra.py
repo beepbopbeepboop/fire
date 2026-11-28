@@ -124,7 +124,8 @@ def _is_exc_class_name(gen, name: str) -> bool:
 
 def _reset_func(gen, body: list = None, params: list = None,
                 allow_lambda_reduction: bool = True,
-                default_none_params: set = None):
+                default_none_params: set = None,
+                mixed_field_params: set = None):
     # The enclosing AST body, kept so a later pass can answer "how is this
     # local USED?" — specifically the lambda beta-reduction, which may only
     # inline a `lambda`'s body at its call sites when the local holding it
@@ -294,6 +295,23 @@ def _reset_func(gen, body: list = None, params: list = None,
             gen._word_mark_boxed(_as_str(_dnpc))
             gen._word_mark_tagged(_as_str(_dnpc))
             gen._dyn_word_locals.add(_as_str(_dnpc))
+    # An UNANNOTATED parameter stored into a MIXED field of its own struct
+    # (`collect_mixed_field_param_names`): the call site boxes every argument
+    # by its kind, so the body receives a tagged word and must read it by
+    # kind (a `print(x)` inside the method is `mojo_repr_boxed`, and an
+    # arithmetic use goes through the box helpers). NOT `tagged`: these are
+    # scalar/None boxes, not a kind-mixed generator word, so `dyn` would make
+    # every read ask the runtime for a type it already knows.
+    gen._cur_mixed_field_params = set(mixed_field_params or ())
+    for _mfp in gen._cur_mixed_field_params:
+        _mfps = _as_str(_mfp)
+        gen._word_mark_boxed(_mfps)
+        try:
+            _mfpc = gen._cname(_mfps)
+        except Exception:
+            _mfpc = None
+        if _mfpc:
+            gen._word_mark_boxed(_as_str(_mfpc))
     # `_tagged_word_vals` is the subset of `_boxed_vals` temps that are a
     # TAGGED generator word (a yield-kind box from `next(g)` on a mixed-kind
     # generator). Same scope and reason as `_boxed_vals`: temp names restart
@@ -1004,6 +1022,7 @@ class FuncState:
         self.fs_cur_func_params: set = set()
         self.fs_cur_untyped_params: set = set()
         self.fs_cur_default_none_params: set = set()
+        self.fs_cur_mixed_field_params: set = set()
         self.fs_cur_param_ann: dict = {}
         self.fs_cur_param_decl_ann: dict = {}
         self.fs_cur_boxed_params: object = None
@@ -1117,6 +1136,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_cur_func_params = gen._cur_func_params
     st.fs_cur_untyped_params = gen._cur_untyped_params
     st.fs_cur_default_none_params = gen._cur_default_none_params
+    st.fs_cur_mixed_field_params = gen._cur_mixed_field_params
     st.fs_cur_param_ann = gen._cur_param_ann
     st.fs_cur_param_decl_ann = gen._cur_param_decl_ann
     st.fs_cur_boxed_params = gen._cur_boxed_params
@@ -1238,6 +1258,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._cur_func_params = st.fs_cur_func_params
     gen._cur_untyped_params = st.fs_cur_untyped_params
     gen._cur_default_none_params = st.fs_cur_default_none_params
+    gen._cur_mixed_field_params = st.fs_cur_mixed_field_params
     gen._cur_param_ann = st.fs_cur_param_ann
     gen._cur_param_decl_ann = st.fs_cur_param_decl_ann
     gen._cur_boxed_params = st.fs_cur_boxed_params
@@ -3799,6 +3820,11 @@ _KW_DICT_FNS = frozenset([
     # set's spelling.
     'mojo_dict_set_bool', 'mojo_dict_set_none', 'mojo_dict_set_struct',
     'mojo_dict_set_other_struct',
+    # The BOX-HOLDING store (stage 5c): a mixed struct field read, a mixed-kind
+    # local. Same rule as the three above — without the twin an integer key
+    # stores in the str domain while the `_kw` read looks in the content-keyed
+    # one, so `d[1] = c.s` would be one assignment and two entries.
+    'mojo_dict_set_word',
 ])
 
 
@@ -4989,6 +5015,10 @@ def boxed_param_names(gen) -> set:
     # A parameter declared `= None` is a box-holding word too (see
     # `_reset_func`): its reads dispatch on the box's kind.
     out |= set(getattr(gen, '_cur_default_none_params', ()) or ())
+    # A parameter stored into a MIXED field of its own struct
+    # (`collect_mixed_field_param_names`): the call site boxes its argument by
+    # kind, so the body's slot holds a box and every read must dispatch on it.
+    out |= set(getattr(gen, '_cur_mixed_field_params', ()) or ())
     gen._cur_boxed_params = out
     return out
 
@@ -5017,6 +5047,19 @@ _PV_REFS = 1       # a struct pointer, str, list, dict, set, bytes, ...
 _PV_SCALAR = 2     # an int, float or bool
 _PV_UNKNOWN = 4    # an argument whose kind nothing here proves
 _PV_SEP = '\x1f'
+# Builtins whose RESULT is always a number or bool, whatever the argument is.
+# `value_class_of` uses these so `return len(xs)` beside `return None` proves
+# the scalar half of the slot (doc/GIR.md stage 5c's "next, in order" item 1).
+# A builtin that can return a str (`chr`, `bin`, `hex`, `oct`, `str`, `repr`,
+# `min`/`max` over strings) is deliberately absent.
+_PV_SCALAR_BUILTINS = frozenset({
+    'len', 'int', 'float', 'bool', 'abs', 'ord', 'hash', 'id', 'round', 'sum',
+})
+# The arithmetic operators whose two proven-scalar operands are a scalar; `/`
+# is always a scalar (Python's true division answers a float).
+_PV_SCALAR_BINOPS = frozenset({
+    '+', '-', '*', '/', '//', '%', '**', '&', '|', '^', '<<', '>>',
+})
 
 
 def param_value_key(func_name, param_name) -> str:
@@ -5146,13 +5189,44 @@ def value_class_of(gen, node, caller_key, caller_struct, depth) -> str:
                          gimple_ctypes.DictExpr, gimple_ctypes.SetExpr,
                          gimple_ctypes.TupleExpr, gimple_ctypes.Comprehension)):
         return 'refs'
+    # Shapes that are provably a scalar with NO type information: a comparison
+    # and `not x` are bools, `/` is a float, and a ternary with two scalar
+    # branches is a scalar. These widen the evidence for a return/field/param
+    # slot whose other arm is `None` (doc/GIR.md stage 5c's item 1).
+    if isinstance(node, gimple_ctypes.CompareChain):
+        return 'scalar'
+    if isinstance(node, gimple_ctypes.UnaryOp):
+        _op = _as_str(node.op)
+        if _op in ('-', '+') and isinstance(
+                node.operand, (gimple_ctypes.IntLiteral,
+                               gimple_ctypes.FloatLiteral)):
+            return 'scalar'
+        if _op == 'not':
+            return 'scalar'
     if gen is None:
+        return 'unknown'
+    if isinstance(node, gimple_ctypes.BinaryOp):
+        _op = _as_str(node.op)
+        if _op == '/':
+            return 'scalar'
+        if _op in _PV_SCALAR_BINOPS \
+                and value_class_of(gen, node.left, caller_key, caller_struct, depth) == 'scalar' \
+                and value_class_of(gen, node.right, caller_key, caller_struct, depth) == 'scalar':
+            return 'scalar'
+        return 'unknown'
+    if isinstance(node, gimple_ctypes.TernaryExpr):
+        if value_class_of(gen, node.then_val, caller_key, caller_struct, depth) == 'scalar' \
+                and value_class_of(gen, node.else_val, caller_key, caller_struct, depth) == 'scalar':
+            return 'scalar'
         return 'unknown'
     structs = getattr(gen, '_pv_structs', None) or {}
     if isinstance(node, gimple_ctypes.CallExpr):
-        if isinstance(node.func, gimple_ctypes.IdentExpr) \
-                and _as_str(node.func.name) in structs:
-            return 'refs'
+        if isinstance(node.func, gimple_ctypes.IdentExpr):
+            _cn = _as_str(node.func.name)
+            if _cn in _PV_SCALAR_BUILTINS:
+                return 'scalar'
+            if _cn in structs:
+                return 'refs'
         return 'unknown'
     if isinstance(node, gimple_ctypes.IdentExpr):
         n = _as_str(node.name)
@@ -5307,6 +5381,60 @@ def _pv_resolve_callee(gen, call, caller_name, caller_struct, structs, defs):
     return None
 
 
+def _pv_is_tagged_literal(node) -> bool:
+    """Is this call argument a literal whose value shares its bits with an
+    integer — `None` (the 0 word) or `True`/`False` (the 1/0 words)?
+
+    `param_value_class` ignores `None` on purpose (it says nothing about the
+    non-None kind), so a parameter that receives one still looks like a plain
+    scalar slot. But the CALL SITE must box such an argument or the callee
+    cannot tell `None` from 0 / `False` from 0: the same rule
+    `callsite_tagged_literal_params` applies to free functions, here applied
+    to the method call sites `_pv_resolve_callee` already resolves."""
+    if isinstance(node, (gimple_ctypes.NoneLiteral, gimple_ctypes.BoolLiteral)):
+        return True
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        return _as_str(node.name) in ('None', 'True', 'False')
+    return False
+
+
+def _pv_collect_tagged(gen, bodies: list, structs: dict, defs: dict,
+                       pnames: dict) -> dict:
+    """The flat `{callee\\x1fparam: 1}` of parameters that receive a `None` or
+    bool LITERAL at any call site (see `_pv_is_tagged_literal`)."""
+    out: dict = {}
+    for entry in bodies:
+        caller_name = _as_str(entry[0])
+        caller_struct = entry[1]
+        calls: list = []
+        gen._calls_in_stmts(entry[2], calls)
+        for call in calls:
+            callee = _pv_resolve_callee(gen, call, caller_name, caller_struct,
+                                        structs, defs)
+            if callee is None:
+                continue
+            names = pnames[callee]
+            spread = False
+            for a in call.args:
+                if isinstance(a, gimple_ctypes.UnaryOp) and _as_str(a.op) in ('*', '**'):
+                    spread = True
+            for kw in (getattr(call, 'kwargs', None) or []):
+                if isinstance(kw[1], gimple_ctypes.UnaryOp) and _as_str(kw[1].op) == '**':
+                    spread = True
+            if spread:
+                continue
+            for i in range(len(call.args)):
+                if i >= len(names):
+                    break
+                if _pv_is_tagged_literal(call.args[i]):
+                    out[param_value_key(callee, names[i])] = 1
+            for kw in (getattr(call, 'kwargs', None) or []):
+                kn = _as_str(kw[0])
+                if kn in names and _pv_is_tagged_literal(kw[1]):
+                    out[param_value_key(callee, kn)] = 1
+    return out
+
+
 def _pv_collect_round(gen, bodies: list, structs: dict, defs: dict, pnames: dict) -> dict:
     """One pass over every call site, into a fresh table."""
     table: dict = {}
@@ -5455,6 +5583,12 @@ def collect_param_value_obs(gen, all_functions: list, all_structs: list,
         gen._param_value_obs = table
         if same:
             break
+    # The literal-kind half, independent of the refs/scalar classification:
+    # a parameter receiving `None` / `True` / `False` at any call site must be
+    # the tagged word even when its non-None values are one consistent scalar
+    # kind (`push(False)` / `push(None)` beside `push(1)`).
+    gen._pv_tagged_param_obs = _pv_collect_tagged(gen, caller_bodies, structs,
+                                                 defs, pnames)
 
 
 def mixed_field_read(gen, struct_name, member) -> bool:
@@ -5530,6 +5664,98 @@ def mixed_field_names(struct, gen=None) -> frozenset:
     return frozenset(out)
 
 
+def collect_mixed_field_param_names(gen, all_structs) -> dict:
+    """Record, per callee key, the UNANNOTATED scalar parameters stored into a
+    MIXED field of their own struct: `self.<f> = <param>` where `<f>` is in
+    `mixed_field_names`.
+
+    Such a parameter needs the tagged word for the reason the field is mixed
+    at all: the field's `None` is the shared None box (`mojo_box_none()`), so
+    the integer 0 and `None` are only distinguishable if the CALL SITE boxes
+    each argument by its kind. Without that, `c.put(None)` reached the callee
+    as the bare word 0, `self.<f> = x` stored that 0, and every read — the
+    field itself, `{'k': c.f}`, `f'{c.f}'` — answered `0` where CPython answers
+    `None` (measured on `/tmp/matrix.py`, `classes/02/04/38`).
+
+    Only a parameter whose call-site values are ALL scalars joins: a
+    references-only parameter already spells `None` as NULL, and its values
+    are pointers that must keep their own spelling. An ANNOTATED parameter is
+    excluded too — `_param_ctype` honours the annotation, so a box in an
+    annotated `int` slot would be truncated.
+
+    The answer is one flat dict (`<callee>\\x1f<param>` -> 1), the same shape
+    `mixed_field_read` uses for its cache and for the same measured reason: a
+    set held as a dict VALUE is a boxed word on the self-hosted path. The
+    CALL-SITE half (`gen._param_box_names`) is merged by the caller
+    (`module_gen._gmh_record_param_box_names`, which rebuilds that table);
+    `param_mixed_field_names` is the BODY-side reader."""
+    gen._param_mixed_field_names = {}
+    own = _as_set(getattr(gen, '_pv_own_structs', None) or set())
+    if len(own) == 0 or not getattr(gen, '_param_value_obs', None):
+        return {}
+    out: dict = {}
+    for st in all_structs or []:
+        if not isinstance(st, gimple_ctypes.StructDef):
+            continue
+        sname = _as_str(st.name)
+        if sname not in own:
+            continue
+        _mixed = _as_list(list(mixed_field_names(st, gen)))
+        if len(_mixed) == 0:
+            continue
+        for m in (st.methods or []):
+            ckey = sname + '_' + _as_str(m.name)
+            pset: list = []
+            for p in (m.params or []):
+                pn = _as_str(p[0])
+                if pn.startswith('*') or pn == 'self' or pn == 'cls':
+                    continue
+                if isinstance(p, (tuple, list)) and len(p) > 1 and p[1] is not None:
+                    continue
+                pset.append(pn)
+            if len(pset) == 0:
+                continue
+            found: list = []
+            _self_field_stores(getattr(m, 'body', []), found)
+            for i in range(len(found)):
+                fname = _as_str(found[i][0])
+                if fname not in _mixed:
+                    continue
+                vnode = found[i][1]
+                if not isinstance(vnode, gimple_ctypes.IdentExpr):
+                    continue
+                vn = _as_str(vnode.name)
+                if vn not in pset:
+                    continue
+                if _as_str(param_value_class(gen, ckey, vn)) != 'scalar':
+                    continue
+                out[ckey + _PV_SEP + vn] = 1
+    # Literal-kind evidence from every method call site (`push(None)`,
+    # `push(False)`): the argument must be boxed by its kind even when the
+    # parameter's non-None values are one scalar kind, or the callee cannot
+    # tell None from 0 / False from 0. `_pv_collect_tagged` has the same
+    # method-call resolution this pass uses, so the two agree by construction.
+    _tagged = _as_dict(getattr(gen, '_pv_tagged_param_obs', None) or {})
+    for _tk in _tagged:
+        out[_as_str(_tk)] = 1
+    gen._param_mixed_field_names = out
+    return out
+
+
+def param_mixed_field_names(gen, callee_key) -> set:
+    """The body-side reader of `collect_mixed_field_param_names`: the
+    parameters of `callee_key` stored into a mixed field, as a fresh set (the
+    stored flat dict is never handed out, so no caller can mutate it)."""
+    tbl = _as_dict(getattr(gen, '_param_mixed_field_names', None) or {})
+    pre = _as_str(callee_key) + _PV_SEP
+    got: set = set()
+    for k in tbl:
+        _k = _as_str(k)
+        if _k.startswith(pre):
+            got.add(_k[len(pre):])
+    return got
+
+
 def mixed_box_name(gen, name) -> bool:
     """True iff `name` is a BOX-HOLDING local of this function: declared as the
     `int64_t` box, every store into it a box of its own kind, every read by
@@ -5546,6 +5772,156 @@ def mixed_box_name(gen, name) -> bool:
     return (_n in mixed_scalar_locals(gen) or _n in mixed_value_locals(gen)
             or _n in boxed_param_names(gen)
             or tagged_mixed_name(gen, _n))
+
+
+def note_field_slot_kinds(gen, ov) -> None:
+    """Record that the STRUCT FIELD behind the container temp `ov` carries a
+    per-slot kinds row (`mojo_list_append_kinded` / `_append_word`).
+
+    The row lives on the runtime list; the compile-time fact has to travel by
+    FIELD, because every later read of `self.<field>` lowers to a fresh temp
+    whose facts start empty. `_lower_MemberExpr` consults
+    `gen._field_slot_kinds` and marks that temp, which is what makes
+    `_ls_list` take the `mojo_list_get_boxed` arm instead of the raw int
+    accessor (a None/bool box's payload then read as 0)."""
+    owners = (getattr(gen, '_struct_field_owners', None) or {}).get(_as_str(ov))
+    if not owners:
+        return
+    tbl = getattr(gen, '_field_slot_kinds', None)
+    if tbl is None:
+        tbl = {}
+        gen._field_slot_kinds = tbl
+    for _pair in owners:
+        _sn = _as_str(_pair[0])
+        _fn = _as_str(_pair[1])
+        _fm = tbl.get(_sn)
+        if _fm is None:
+            _fm = {}
+            tbl[_sn] = _fm
+        _fm[_fn] = 1
+
+
+def body_may_fall_off(body) -> bool:
+    """Can execution reach the end of `body` without a `return` / `raise`?
+
+    Python's fall-off-the-end IS `return None`. A function whose other arms
+    return a scalar therefore has the `None` half of a rule-2 slot even with
+    no explicit `return None` (measured: `only_some` in
+    `params/32_implicit_none_return`, `print(only_some(0))` said `0`).
+
+    A conservative syntactic answer: the last statement must be one that
+    cannot complete normally. `if` needs every branch terminal (including an
+    `else`), `try` needs its body/else and every handler terminal. A loop and
+    `match` are treated as able to fall off (a `while True:` is not modelled);
+    that can only ADD the epilogue to a function that already returns on every
+    real path, where the extra `return` is unreachable."""
+    if not body:
+        return True
+    s = body[-1]
+    if isinstance(s, (gimple_ctypes.ReturnStmt, gimple_ctypes.RaiseStmt,
+                      gimple_ctypes.ContinueStmt, gimple_ctypes.BreakStmt)):
+        return False
+    if isinstance(s, gimple_ctypes.IfStmt):
+        if not s.else_body:
+            return True
+        if body_may_fall_off(s.then_body) or body_may_fall_off(s.else_body):
+            return True
+        for _c, _eb in (getattr(s, 'elifs', None) or ()):
+            if body_may_fall_off(_eb):
+                return True
+        return False
+    if isinstance(s, gimple_ctypes.TryStmt):
+        if s.else_body is not None:
+            if body_may_fall_off(s.body) or body_may_fall_off(s.else_body):
+                return True
+        elif body_may_fall_off(s.body):
+            return True
+        for h in (getattr(s, 'handlers', None) or ()):
+            if body_may_fall_off(getattr(h, 'body', None)):
+                return True
+        return False
+    return True
+
+
+def call_is_void(gen, node) -> bool:
+    """Is this `CallExpr` the call of a function this compile knows returns
+    `void` — i.e. Python's implicit `None`?
+
+    A void call used as a VALUE (`r = inv.add(...)`, `print(f())`) is `None`
+    in Python, but the lowerer answers the placeholder `int` 0, so the bind
+    stored the integer 0 and `print(r)` said `0`. The call site is where the
+    answer belongs; it asks the registered return type instead of re-lowering
+    (lowering emits statements and would run the call twice). Only a KNOWN
+    void callee answers True: an unknown callee keeps the old word."""
+    if not isinstance(node, gimple_ctypes.CallExpr):
+        return False
+    _rt = None
+    _f = node.func
+    _frts = getattr(gen, 'func_return_types', None) or {}
+    if isinstance(_f, gimple_ctypes.IdentExpr):
+        _nm = _as_str(_f.name)
+        _rt = _frts.get(_nm)
+        if _rt is None:
+            _ks = getattr(gen, '_KNOWN_SIGS', None) or {}
+            if _nm in _ks:
+                _rt = _ks[_nm][0]
+    elif isinstance(_f, gimple_ctypes.MemberExpr):
+        _ot = ''
+        try:
+            _ot = _as_str(gen._quick_type(_f.obj))
+        except Exception:
+            _ot = ''
+        _sn = _as_str(gimple_exprtypes._struct_name_of(_ot)) \
+            if gimple_ctypes.TypeLattice.ends_in_star(_ot) else ''
+        if _sn and _sn in (getattr(gen, 'struct_field_types', None) or {}):
+            _meth = _as_str(_f.member)
+            _rt = _frts.get(_sn + '_' + _meth)
+            if _rt is None:
+                try:
+                    _rt = _frts.get(_as_str(
+                        gen._struct_method_csym(_sn, _meth, '')))
+                except Exception:
+                    _rt = None
+    return _rt is not None and gimple_ctypes.TypeLattice.is_void(_rt)
+
+
+def is_box_word_expr(gen, el, ev, include_dyn: bool = True) -> bool:
+    """Is this lowered `int64_t` value a BOX-HOLDING word, whose kind the
+    runtime tag carries rather than the C type?
+
+    Three producers: a mixed-kind LOCAL (`mixed_box_name` — a container beside
+    a scalar, or two scalar kinds), a parameter whose annotation the body
+    contradicts (`boxed_param_names`, one of the same names), and a value
+    already marked as a box/tagged word by its lowering (a call to a
+    mixed-return function, a `next()` off a mixed generator, a READ of a mixed
+    struct field — stage 5c's `_word_mark_mixed_field`). Storing or appending
+    one of these through the int accessor stores the box's own address; the
+    word-aware accessor keeps the value.
+
+    `include_dyn=False` is the narrower question a TUPLE literal asks: a
+    merely DYNAMIC word (a kind only the runtime knows, e.g. a `uint32` read
+    out of a `bitcast` list) is not a box, and appending it through the
+    word-aware accessor boxes it — which turned the tuple's slots into boxed
+    slots, so `hi, lo = (hilo[1], hilo[0])` destructured BOXES and
+    `self._counter[1] += hi` then added a box address (measured: philox.mojo's
+    `_incrn`, a GIMPLE type mismatch). A real box (`may_be_box`, `tagged`, a
+    mixed-field read, a mixed-kind name) still counts.
+
+    The ONE spelling, shared by the list literal's append, the tuple literal's
+    append, the dict store and the arithmetic operand test — a second copy in
+    the expression module is what made the tuple literal disagree with the list
+    literal about the same element."""
+    if gen._word_may_be_box(ev) \
+            or gen._word_is_tagged(ev) \
+            or (include_dyn and gen._word_is_dyn(ev)):
+        return True
+    if isinstance(el, gimple_ctypes.IdentExpr):
+        _n = _as_str(_as_ident_node(el).name)
+        try:
+            return mixed_box_name(gen, _n)
+        except Exception:
+            return False
+    return False
 
 
 def box_word_value(gen, value_node, vtype: str, v: str) -> tuple:
@@ -8582,6 +8958,14 @@ def emit_dict_none_key_store(gen, dict_val: str, val_ctype: str, val: str, val_n
         gen._emit_call('void', '', 'mojo_dict_set_none_key_struct',
                        [('MojoDict *', dict_val), (val_ctype, val)])
         return
+    # The BOX-HOLDING word arm, the same one `emit_dict_int_value_store`
+    # takes: `d[None] = c.s` must keep the box's kind (see
+    # `mojo_dict_set_word`'s comment).
+    if gimple_ctypes.TypeLattice.is_word(val_ctype) \
+            and is_box_word_expr(gen, val_node, val):
+        gen._emit_call('void', '', 'mojo_dict_set_none_key_word',
+                       [('MojoDict *', dict_val), ('int64_t', val)])
+        return
     vv64 = gen._to_int64(val_ctype, val)
     if gimple_exprtypes.is_python_bool_expr(gen, val_node):
         gen._emit_call('void', '', 'mojo_dict_set_none_key_bool',
@@ -8722,6 +9106,19 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
         gen._emit_call('void', '', 'mojo_dict_set_' + _bs + _st,
                        [('MojoDict *', dict_val), (key_ctype, key_val),
                         (val_ctype, val)])
+        return
+    # A BOX-HOLDING word (stage 5c): a READ of a mixed struct field (`c.s`
+    # beside `None`), a mixed-kind local, or a tagged generator word. Its C
+    # type is `int64_t` and says nothing about what it holds — the kind is the
+    # box's — so the store asks the runtime (`mojo_dict_set_word`, the dict
+    # twin of `mojo_list_append_word`). The plain int arm below stored the
+    # box's ADDRESS, which is why `{'k': c.s}` printed `{'k': 0}` for a field
+    # holding `None` and `{'k': <address>}` for one holding a string.
+    if gimple_ctypes.TypeLattice.is_word(val_ctype) \
+            and is_box_word_expr(gen, val_node, val):
+        gen._emit_call('void', '', 'mojo_dict_set_' + _bs + 'word',
+                       [('MojoDict *', dict_val), (key_ctype, key_val),
+                        ('int64_t', val)])
         return
     vv64 = gen._to_int64(val_ctype, val)
     _suffix = 'bool' if gimple_exprtypes.is_python_bool_expr(gen, val_node) else 'int'

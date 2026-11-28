@@ -1655,6 +1655,11 @@ void        mojo_dict_set_str_kw(MojoDict *d, int64_t kw, char *v);
  * a different key DOMAIN from the `_kw` read that looks it up. */
 void        mojo_dict_set_bool_kw(MojoDict *d, int64_t kw, int64_t v);
 void        mojo_dict_set_none_kw(MojoDict *d, int64_t kw);
+/* The `_kw` twin of `mojo_dict_set_word`: a BOX-HOLDING value (a mixed struct
+ * field read, a mixed-kind local) stored under an integer/content key. The
+ * slot's kind is the box's, so the `_kw` read finds the same value the
+ * char*-key spelling stores. */
+void        mojo_dict_set_word_kw(MojoDict *d, int64_t kw, int64_t w);
 void        mojo_dict_set_struct_kw(MojoDict *d, int64_t kw, void *v);
 void        mojo_dict_set_other_struct_kw(MojoDict *d, int64_t kw, void *v);
 int         mojo_dict_contains_kw(MojoDict *d, int64_t kw);
@@ -1680,6 +1685,13 @@ void        mojo_dict_set_bool(MojoDict *d, char *key, int v);
  * it every plain `0` in a dict printed as `None`, because the generic value
  * repr answers "None" for a zero word. */
 void        mojo_dict_set_none(MojoDict *d, char *key);
+/* A BOX-HOLDING word stored as a dict VALUE (stage 5c): a mixed struct field
+ * read (`c.s` beside `None`) or a mixed-kind local. The static C type is
+ * `int64_t`, so the slot's kind has to come from the box itself — without it
+ * `{'k': c.s}` stored the box's address and printed `{'k': 0}` for a field
+ * holding `None`. `_dict_slot_boxed` is the inverse read, so `print(d)` and
+ * `d['k']` agree with the value the field held. */
+void        mojo_dict_set_word(MojoDict *d, char *key, int64_t w);
 /* An `int | None` field read off a struct (see the definition in
  * fire_runtime.c for the word-model bound): kind 4 when the word is zero
  * (the field's annotation says the zero may be None), kind 0 otherwise. */
@@ -1691,6 +1703,9 @@ void        mojo_dict_set_none_key_double(MojoDict *d, double v);
 void        mojo_dict_set_none_key_bool(MojoDict *d, int v);
 void        mojo_dict_set_none_key_none(MojoDict *d);
 void        mojo_dict_set_none_key_struct(MojoDict *d, void *v);
+/* The `None`-key store of a BOX-HOLDING value (`d[None] = c.s`), the same
+ * by-kind store as `mojo_dict_set_word`. */
+void        mojo_dict_set_none_key_word(MojoDict *d, int64_t w);
 int64_t     mojo_dict_get_none_key_int(MojoDict *d);
 char       *mojo_dict_get_none_key_str(MojoDict *d);
 double      mojo_dict_get_none_key_double(MojoDict *d);
@@ -1794,6 +1809,10 @@ int         mojo_bytes_max(MojoBytes *b);
 int         mojo_bytes_min(MojoBytes *b);
 int64_t     mojo_list_pop(MojoList *l);
 int64_t     mojo_list_pop_at(MojoList *l, int64_t idx);
+/* `lst.pop(i)` on a list that describes its own slots: the popped value as
+ * the tagged word its kind calls for (a None box stays None, a bool box stays
+ * a bool), not the raw slot word. */
+int64_t     mojo_list_pop_at_boxed(MojoList *l, int64_t idx);
 /* `del lst[i]` — same removal as mojo_list_pop_at, but a different Python
  * operation with a different refusal on a tuple (see its definition). */
 int64_t     mojo_list_delitem(MojoList *l, int64_t idx);
@@ -1947,6 +1966,8 @@ void        mojo_dict_set_bytes_str(MojoDict *d, MojoBytes *key, char *v);
 void        mojo_dict_set_bytes_bool(MojoDict *d, MojoBytes *key, int v);
 /* ...and of mojo_dict_set_none. */
 void        mojo_dict_set_bytes_none(MojoDict *d, MojoBytes *key);
+/* ...and of mojo_dict_set_word: a box-holding value under a bytes key. */
+void        mojo_dict_set_bytes_word(MojoDict *d, MojoBytes *key, int64_t w);
 /* ...and of mojo_dict_set_struct: same `kind == 5`, same recorded repr. */
 void        mojo_dict_set_bytes_struct(MojoDict *d, MojoBytes *key, void *obj);
 void        mojo_dict_set_bytes_other_struct(MojoDict *d, MojoBytes *key, void *obj);

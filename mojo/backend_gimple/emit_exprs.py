@@ -140,6 +140,20 @@ def lower_expr(gen, node) -> tuple[str, str]:
                     gen, '_ret_may_hold_mixed', ())):
             gen._word_mark_boxed(_rv)
             gen._word_mark_tagged(_rv)
+        # A call to a function this compile knows is VOID, used as a VALUE
+        # (`print(do_nothing())`, `x = obj.push(v)`, a dict/list element),
+        # is Python's None. The lowerer emitted the call and answered the
+        # placeholder `int` 0; replace it with the shared None box and mark it
+        # a tagged word, so print/is-None/truthiness dispatch by kind. A bare
+        # statement call does not come through here (`_gen_stmt_ExprStmt` uses
+        # `_lower_call` directly), so a value-discarding call allocates
+        # nothing.
+        if gimple_ctypes.TypeLattice.is_c_int(_rt) \
+                and ginf.call_is_void(gen, node):
+            _nv = gen._call_expr('int64_t', 'mojo_box_none', [])
+            gen._word_mark_boxed(_nv)
+            gen._word_mark_tagged(_nv)
+            return 'int64_t', _nv
         # A `yield` used as a VALUE (`x = yield`, `print((yield))`) reads the
         # resume word, which is the None box when the generator was resumed by
         # `next()` / `send(None)` (coro.py's trampoline). Mark it as a tagged
@@ -1840,6 +1854,16 @@ def _lme_struct_field(gen, node, field_map, op: str, ov, struct_name: str) -> tu
         if t not in gen._struct_field_owners:
             gen._struct_field_owners[t] = []
         gen._struct_field_owners[t].append((struct_name, node.member))
+    # Stage 5c: a field whose LIST value carries a per-slot kinds row (a bool
+    # or None appended beside ints/strs) must be read BOXED, or `self.items[-1]`
+    # / `.pop()` reads the raw word and a None/bool box's payload 0 prints as
+    # the integer 0. The append site records the field (`note_field_slot_kinds`);
+    # the mark here is what `_ls_list` consults for the boxed accessor.
+    _fsk = getattr(gen, '_field_slot_kinds', None)
+    if _fsk:
+        _fsn = _fsk.get(_as_str(struct_name))
+        if _fsn and _as_str(node.member) in _fsn:
+            gen._word_mark_slot_kinds(t)
     return field_type, t
 
 
@@ -6382,7 +6406,7 @@ def _lower_compare_chain(gen, node: gimple_ctypes.CompareChain) -> tuple[str, st
             cmp_type, cmp_val = gen._lower_in_dispatch(
                 lt, lv, rt, rv, negate=(op == 'not in'),
                 x_is_none=is_none_needle(gen, node.operands[i]),
-                x_is_word=_is_box_word_expr(gen, node.operands[i], lv))
+                x_is_word=ginf.is_box_word_expr(gen, node.operands[i], lv))
         else:
             cmp_type, cmp_val = gen._lower_binary_tail(op, left_node, lt, lv, right_node, rt, rv)
         cond = gen._ensure_bool_cond(cmp_type, cmp_val)
@@ -7218,7 +7242,7 @@ def _lower_in_impl(gen, node: gimple_ctypes.BinaryOp, negate: bool) -> tuple[str
         xv = gen._cast(xt, xv)
     return gen._lower_in_impl_values(xt, xv, node.right, negate,
                                      x_is_none=is_none_needle(gen, node.left),
-                                     x_is_word=_is_box_word_expr(gen, node.left, xv))
+                                     x_is_word=ginf.is_box_word_expr(gen, node.left, xv))
 
 
 def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool,
@@ -7942,7 +7966,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         # None -> an 'n' slot, a bool -> a bool slot), so every later read of
         # the literal — iteration, repr, a set constructor — sees the value,
         # not the address.
-        if gimple_ctypes.TypeLattice.is_word(et) and _is_box_word_expr(gen, el, ev):
+        if gimple_ctypes.TypeLattice.is_word(et) and ginf.is_box_word_expr(gen, el, ev):
             gen._emit_call('void', '', 'mojo_list_append_word',
                            [('MojoList *', t), ('int64_t', ev)])
             gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
@@ -8378,28 +8402,6 @@ def _is_scalar_elem_kind(elem: str) -> bool:
             or gimple_ctypes.TypeLattice.is_bytes(elem))
 
 
-def _is_box_word_expr(gen, el, ev) -> bool:
-    """Is this lowered `int64_t` value a BOX-HOLDING word, whose kind the
-    runtime tag carries rather than the C type?
-
-    Three producers: a mixed-kind LOCAL (`mixed_box_name` — a container beside
-    a scalar, or two scalar kinds), a parameter whose annotation the body
-    contradicts (`boxed_param_names`, one of the same names), and a value
-    already marked as a box/tagged word by its lowering (a call to a
-    mixed-return function, a `next()` off a mixed generator). Appending one
-    of these through the int accessor stores the box's own address; the
-    word-aware append keeps the value."""
-    if gen._word_may_be_box(ev) \
-            or gen._word_is_tagged(ev) \
-            or gen._word_is_dyn(ev):
-        return True
-    if isinstance(el, IdentExpr):
-        _n = _as_str(_as_ident_node(el).name)
-        try:
-            return ginf.mixed_box_name(gen, _n)
-        except Exception:
-            return False
-    return False
 
 
 def _provably_int_word(gen, el, ev: str) -> bool:
@@ -8918,6 +8920,20 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
         # identical `_is_star_spread` handling.
         if _is_star_spread(_el):
             _emit_star_spread(gen, t, et, ev)
+            continue
+        # A BOX-HOLDING word (a mixed struct field read, a mixed-kind local, a
+        # tagged word) is appended under its own runtime kind, exactly as the
+        # list literal's identical arm does: `(c.s,)` over a field holding
+        # `None` appended the box's address as an int slot and printed `(0,)`.
+        # `include_dyn=False`: a merely-dynamic word (a `uint32` read out of a
+        # `bitcast` list, a `hi, lo = (hilo[1], hilo[0])` element) is NOT a
+        # box, and boxing it made the destructured slots boxed words whose
+        # arithmetic added a box address (philox.mojo `_incrn`).
+        if gimple_ctypes.TypeLattice.is_word(et) and ginf.is_box_word_expr(gen, _el, ev, False):
+            gen._emit_call('void', '', 'mojo_list_append_word',
+                           [('MojoList *', t), ('int64_t', ev)])
+            gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
+            gen._word_mark_slot_kinds(t)
             continue
         use = gimple_ctypes.TypeLattice.list_suffix(et) if per_element else suf
         ev_cast = gen._cast_for_list(et, ev, use)
