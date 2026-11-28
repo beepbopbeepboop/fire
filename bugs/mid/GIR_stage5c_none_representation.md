@@ -561,3 +561,49 @@ Measured: `classes/03`, `10`, `38`, `/tmp/ret2`, `/tmp/ternnone`,
 `/tmp/matrix` stay OK; `test_pydiff_ratchet.py` 139/0. The corpus and
 `test_gimple_runner.py`/`compile_stdlib.py` re-runs are reported with the
 commit.
+
+## Status 2026-11-27 (mixed-kind parameters; None as a NULL container)
+
+**The mixed-kind unannotated parameter is the tagged word.** `value_class_of`
+returns `'mixed'` for a parameter whose call sites pass BOTH a scalar and a
+reference (and `field_value_class` for a field stored from one, or from both
+kinds). This is evidence of more than one kind, not rule 3's silence (that is
+`'unknown'`, no evidence). `_pv_bits('mixed') = REPS|SCALAR` so a forwarded
+parameter carries the answer; `_pv_collect_round` records no call-site kinds
+for ANNOTATED parameters (the annotation is the decision).
+`collect_mixed_field_param_names` merges every observed mixed key, so the call
+site boxes each argument by kind and the body gets the name from
+`mixed_field_params` (`gen_func` now passes it too, as `_gen_struct_method`
+already did). `mixed_field_names` treats a `'mixed'` store — including a store
+of a tagged parameter — as mixed even without a `None` store, so the field's
+reads (list append, print, repr) dispatch by kind. A mixed field whose
+DECLARED C type is a pointer (usage inference from one call site) is read as
+`int64_t` and marked, and the store is coerced through `_to_int64`.
+
+Also in this round:
+
+- `value_class_of`'s local-scalar table: a `'str'` binding is a REFERENCE, not
+  'scalar' (the table stores 'int'/'double'/'str'); calling it scalar made
+  `rename(s)`/`rename("")` look mixed and boxed a string parameter.
+- `_pv_bind_local_structs` follows `cur = self.head; cur = cur.next` to the
+  struct a constructor store created, so `cur.value` resolves its owner.
+- a `*args` parameter is slot-kinded (`_reset_func`); a `None` argument in the
+  pack is appended as the shared None box, and a function returning `args[0]`
+  counts that element as possible None.
+- a struct constructor boxes a tagged `__init__` parameter (`Point(x, None)`).
+
+**`None` as a NULL container prints `None`.** A NULL list/tuple repr renders
+`"None"` (a refs-only slot's None is NULL; an empty list is never NULL), and
+an `and`/`or` None short-circuit only stores the box when the joined result is
+a WORD. A container/str pointer beside a different pointer kind is a word of
+unknown kind. `lst.append(None)` stores the None box under its slot kind.
+
+**Measured.** `classes/12_linked_list_nodes` WRONG -> OK,
+`params/31_varargs_sum` WRONG -> OK, `flow/02_and_or_operands` OK,
+`flow/34_none_then_list` OK, `classes/21_str_and_repr`'s SIGSEGV gone (its
+remaining diff is the default-object repr for a methodless class, not None);
+`params/37_immutable_arg_rebind`, `classes/03`, `10`, `38`, `funcs/05` and
+`/tmp/ret2`, `/tmp/matrix` OK; `test_pydiff_ratchet.py` 139/0; runtime header
+scan 84/84; the mixed-field test's "both kinds" case now expects `'mixed'` and
+the field (the old rule-3 expectation). The full corpus/runner/stdlib re-runs
+are reported with the commit.
