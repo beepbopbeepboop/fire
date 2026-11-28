@@ -1674,18 +1674,35 @@ def _lower_TernaryExpr(gen, node) -> tuple[str, str]:
     ct, cv = gen.lower_expr(node.condition)
     cv = gen._ensure_bool_cond(ct, cv)
     res_type = gimple_ctypes.TypeLattice.join(gen._quick_type(node.then_val), gen._quick_type(node.else_val))
-    result = gen._new_temp(res_type)
+    # A `None` branch of a WORD-typed ternary is the shared None box, not the
+    # integer 0: `a // b if b else None` returned 0 where CPython returns None
+    # (funcs/30_dispatch_dict_by_string). A refs-only slot keeps its NULL None
+    # (rule 1), so this is gated on the joined result being a word.
+    _tn_none = gen._is_none_literal(node.then_val)
+    _te_none = gen._is_none_literal(node.else_val)
+    if (_tn_none or _te_none) and gimple_ctypes.TypeLattice.is_word(res_type):
+        result = gen._new_temp(res_type)
+        gen._word_mark_boxed(result)
+        gen._word_mark_tagged(result)
+    else:
+        result = gen._new_temp(res_type)
     bb_then = gen._new_bb()
     bb_else = gen._new_bb()
     bb_merge = gen._new_bb()
     gen._cond_goto(f"{cv}", bb_then, bb_else)
     gen._emit_label(bb_then)
     tt, tv = gen.lower_expr(node.then_val)
-    gen._safe_coerce_emit(tt, res_type, tv, result)
+    if _tn_none and gimple_ctypes.TypeLattice.is_word(res_type):
+        gen._copy(result, gen._call_expr('int64_t', 'mojo_box_none', []))
+    else:
+        gen._safe_coerce_emit(tt, res_type, tv, result)
     gen._goto(bb_merge)
     gen._emit_label(bb_else)
     et, ev = gen.lower_expr(node.else_val)
-    gen._safe_coerce_emit(et, res_type, ev, result)
+    if _te_none and gimple_ctypes.TypeLattice.is_word(res_type):
+        gen._copy(result, gen._call_expr('int64_t', 'mojo_box_none', []))
+    else:
+        gen._safe_coerce_emit(et, res_type, ev, result)
     gen._goto(bb_merge)
     gen._emit_label(bb_merge)
     # A ternary over two operands this codegen already KNOWS are integers

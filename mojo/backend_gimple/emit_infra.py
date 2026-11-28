@@ -4377,6 +4377,19 @@ def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
                 return False
             copies += 1
             continue
+        if isinstance(v, gimple_ctypes.TernaryExpr):
+            # A ternary with a `None` branch and a word/scalar other branch is
+            # lowered to the tagged word (`_lower_TernaryExpr` boxes the None
+            # branch when the joined type is a word), so a name bound to one
+            # keeps the box: `x = v if c else None` then prints None, not 0.
+            _tn_t = gen._is_none_literal(v.then_val)
+            _te_t = gen._is_none_literal(v.else_val)
+            if _tn_t != _te_t:
+                _ot_t = gen._quick_type(v.else_val if _tn_t else v.then_val)
+                if (gimple_ctypes.TypeLattice.is_word(_ot_t)
+                        or gimple_ctypes.TypeLattice.is_c_int(_ot_t)):
+                    continue
+            return False
         # A no-default `d.get(k)` with a scalar/unknown value domain is the
         # boxed read (`_ldm_get`): None on a miss, the slot's own word on a
         # hit. Keep the box, or the miss's None unwraps to the integer 0.

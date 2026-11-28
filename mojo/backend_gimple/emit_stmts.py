@@ -1689,6 +1689,17 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                  or (isinstance(node.value.func, gimple_ctypes.IdentExpr)
                      and _as_str(node.value.func.name)
                      in getattr(gen, '_ret_may_hold_mixed', ()))))
+        # A ternary with a `None` branch and a word/scalar other branch lowers
+        # to the tagged word (`_lower_TernaryExpr` boxes the None branch when
+        # the joined type is a word). The RHS itself is proof for THIS store,
+        # exactly like a call to a mixed-return function, so the bind keeps the
+        # box: `x = v if c else None` then prints None, not 0.
+        _tern_none_rhs = (
+            isinstance(node.value, gimple_ctypes.TernaryExpr)
+            and (gen._is_none_literal(node.value.then_val)
+                 != gen._is_none_literal(node.value.else_val))
+            and gimple_ctypes.TypeLattice.is_word(vtype)
+            and gen._word_bind_tagged(v))
         # A receive-only name (`x = yield`, every binding of it) keeps the
         # resume word's box too: `x = yield` after `next(it)` is the None box,
         # and the name must render it as None (`tagged_recv_name`).
@@ -1696,7 +1707,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                             and (gen._word_bind_tagged(v)
                                  or _for_copy or _call_tagged)
                             and gimple_ctypes.TypeLattice.is_word(gen.var_types.get(tname, 'int64_t'))
-                            and (_call_tagged
+                            and (_call_tagged or _tern_none_rhs
                                  or ginf.tagged_next_bind_name(gen, _as_str(tname))
                                  or ginf.tagged_recv_name(gen, _as_str(tname))))
         # A MIXED name (`x = 0` beside `x = v` over a tagged generator) is a

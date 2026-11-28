@@ -15080,6 +15080,12 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
         if isinstance(v, CallExpr) and isinstance(v.func, IdentExpr):
             if _as_str(v.func.name) in ('min', 'max'):
                 return True
+        if isinstance(v, TernaryExpr):
+            _tca = _rbn_ein.value_class_of(self, v.then_val, key, owner, 0)
+            _tcb = _rbn_ein.value_class_of(self, v.else_val, key, owner, 0)
+            if ((_tca == 'scalar' and _tcb == 'none')
+                    or (_tca == 'none' and _tcb == 'scalar')):
+                return True
         # A LOCAL bound from a container element (`best = items[0]; return
         # best`) or a FOR-LOOP target over any iterable (`for w in words:
         # return w`) is the same value word. The binding is found by a
