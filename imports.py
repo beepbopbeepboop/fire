@@ -142,7 +142,10 @@ class Resolver:
     """
 
     def __init__(self, path=None, gcc=None, flags=()):
-        self.path = list(path) if path is not None else default_mojo_path()
+        # `if path`: the compiled call pads the `None` default with the NULL word, which is not
+        # `None` to an `is not None` test, so `list(NULL)` raised "object is not iterable".
+        # (An explicit EMPTY search path now means the default path; no caller passes one.)
+        self.path = list(path) if path else default_mojo_path()
         self.gcc = gcc or find_gcc()
         # `if flags`: the compiled call pads the `()` default with the NULL word, and
         # `tuple(NULL)` raised "object is not iterable" -- import resolution died

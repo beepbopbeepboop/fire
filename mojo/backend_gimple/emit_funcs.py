@@ -4617,7 +4617,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # register held. `main` keeps the integer 0: its return value is the
     # PROCESS EXIT CODE, not a Python value.
     if (gimple_ctypes.TypeLattice.is_word(ret_type) and node.name != 'main'
-            and id(node.body) in (getattr(gen, '_mixed_return_bodies', None) or ())
+            and gimple_exprtypes._nid(node.body) in gen._mixed_return_bodies
             and ginf.body_may_fall_off(node.body)):
         gen._ret(gen._call_expr('int64_t', 'mojo_box_none', []))
 
@@ -6177,7 +6177,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # block). A method whose return slot is proven scalar beside None reaches
     # the end of its body as the shared None box, not an uninitialised word.
     if (gimple_ctypes.TypeLattice.is_word(ret_type)
-            and id(node.body) in (getattr(gen, '_mixed_return_bodies', None) or ())
+            and gimple_exprtypes._nid(node.body) in gen._mixed_return_bodies
             and ginf.body_may_fall_off(node.body)):
         gen._ret(gen._call_expr('int64_t', 'mojo_box_none', []))
 

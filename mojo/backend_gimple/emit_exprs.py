@@ -5086,6 +5086,17 @@ def _lbt_boxed_none_compare(gen, op: str, left_node, lt: str, lv: str, right_nod
     # identity test asks the box's kind, never the word.
     if gen._word_is_mixed_field(_other):
         _mixed_none = True
+    # NOTE: a merely-DYN word is deliberately NOT in this gate. A dyn word is
+    # the union of two conventions: a container-slot read (whose None 5c
+    # boxes, so a bare 0 there is the integer 0) and an ERASED POINTER word
+    # (a generic getattr result, a local holding a `Node *`), whose NULL 0
+    # IS None. The kind read is right for the first and wrong for the second
+    # (it made `cur is not None` true for a NULL `cur` and
+    # `classes/12_linked_list_nodes` crashed dereferencing 0), so an unknown
+    # word keeps the word compare — the same `x == 0` answer it had before.
+    # A slot whose decision IS known is marked with the fact itself:
+    # `_word_mark_mixed_field` for an imported method's mixed-field return
+    # (see `_emit_call`), the tagged/mixed marks for the in-module paths.
     # Only an int word: a `char *` name keeps its NULL-pointer test below.
     # A float box answers 0 here, which is the right answer for a float.
     if (gimple_ctypes.TypeLattice.is_int_word(_other_t)

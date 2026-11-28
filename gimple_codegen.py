@@ -3441,6 +3441,9 @@ class GimpleGen:
         # The current function's unannotated parameter names (emit_infra `_reset_func`
         # fills it); declared so the compiled `GimpleGen` has the field the readers use.
         self._cur_untyped_params: set = set()
+        # `_nid(body)` of every function body whose return type was widened to the tagged word
+        # (infra_infer records, emit_stmts and module_gen read).
+        self._mixed_return_bodies: set = set()
         self._param_value_obs: dict = {}
         self._early_def_pts_used: dict[str, list] = {}
         # _pair_key(sanitized home-module qualifier, fn name) -> return ctype —

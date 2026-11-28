@@ -223,7 +223,7 @@ _ESCAPING_ITER_CACHE: dict = {}
 def escaping_iter_names(body) -> set:
     """Names bound by `name = iter(...)` in `body` that also appear as a bare
     argument of a call to a function other than the builtins above."""
-    key = id(body)
+    key = gimple_exprtypes._nid(body)    # not the bare list address (see `exprtypes._nid`)
     hit = _ESCAPING_ITER_CACHE.get(key)
     if hit is not None and hit[0] is body:
         return hit[1]

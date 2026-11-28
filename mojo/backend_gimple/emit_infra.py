@@ -3781,6 +3781,20 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         build.call_into(gen, result_var, fname, coerced_args)
     else:
         build.call_void(gen, fname, coerced_args)
+    # H1 (stage 5c): an IMPORTED method whose defining unit decided its
+    # return slot is a MIXED field (`return self.v`, a scalar beside None)
+    # returns the shared None box, but this TU only knows `int64_t`. Record
+    # the fact the callee's decision established — a box-holding word, never
+    # a float box — rather than a generic "dyn": the mixed-field mark is what
+    # the None identity/equality compare reads (`mojo_word_is_none`), and it
+    # keeps arithmetic on the word (the field is int/str/bool or None, so
+    # the float kind-select does not apply). The symbol set is built by the
+    # imported-struct-method loop in `module_gen`
+    # (`_imported_mixed_ret_syms`).
+    if (result_var
+            and gimple_ctypes.TypeLattice.is_int_word(_as_str(ret_type))
+            and _as_str(fname) in (getattr(gen, '_imported_mixed_ret_syms', None) or ())):
+        gen._word_mark_mixed_field(result_var)
     for _lv, _bv, _le in _pending_list_unpacks:
         build.if_block(gen, _bv)
         build.call_void(gen, _list_unpack_name(_le), [_lv, _bv, '-1'], True, 4)

@@ -3683,8 +3683,9 @@ def _is_mixed_return(gen) -> bool:
     if (not gimple_ctypes.TypeLattice.is_word(_as_str(getattr(gen, 'func_ret_type', '') or ''))):
         return False
     _body = getattr(gen, '_cur_func_body', None)
-    return _body is not None and id(_body) in getattr(
-        gen, '_mixed_return_bodies', ())
+    # `_nid`, the odd key `infra_infer` records (a bare list address is its registry
+    # key); a declared GimpleGen set, so the compiled reader and writer share it.
+    return _body is not None and gimple_exprtypes._nid(_body) in gen._mixed_return_bodies
 
 
 def _box_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:

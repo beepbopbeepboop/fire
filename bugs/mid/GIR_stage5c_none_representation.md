@@ -740,7 +740,9 @@ Two halves, independent; (b) is reachable now, (a) needs a build-order
 decision.
 
 **H1 — an imported method's returned word is "nothing says what the callee
-returns" (fixes (b)).**
+returns" (fixes (b)).** IMPLEMENTED 2026-11-28, narrowed to the defining
+unit's own decision; see the last Status entry. The steps below are the
+original guide.
 
 1. Mark the symbol. The imported-method extern loop
    (`mojo/backend_gimple/module_gen.py`, the `for s in
@@ -866,3 +868,89 @@ expected, 0 unexpected). Corpus (287 programs): OK **160**, WRONG 105,
 CRASH 15, ERROR 2, GCC 2, REFUSED 3 — versus OK 159/WRONG 106 before these
 four fixes, and only `classes/13` flipped (no WRONG/CRASH moved the other
 way). `test_gimple_runner.py`: 688 passed, 0 failed.
+
+## Status 2026-11-28 (H1: an imported mixed-field return is a box)
+
+Implements H1 of the guide above, narrowed to the decision the defining unit
+actually made:
+
+- **What is recorded.** `module_gen`'s imported-struct-method loop now asks,
+  for each imported method whose body lives in another TU, whether a return
+  arm is `self.<field>` where `mixed_field_names` over the DEFINING
+  `StructDef` (the imported node carries its methods) says the field is
+  mixed. Those symbols go into `_imported_mixed_ret_syms`, both spellings
+  (`helper_Box_get` and `Box_get`). The importer's own parameter tables do
+  not cover the defining module's call sites, so this is the literals-only
+  subset of the definer's decision — a false negative keeps today's word
+  read, never an over-mark.
+- **What the call result carries.** `_emit_call` marks that result with
+  `_word_mark_mixed_field` — the fact the callee established (a box-holding
+  word that is an int/str/bool or None, never a float box) — so the existing
+  in-module machinery applies unchanged: `x is None` / `x == None` read
+  `mojo_word_is_none`, `print` renders by kind, `== "hi"` goes through
+  `mojo_box_eq`, and arithmetic stays a word add (no float kind-select).
+- **Why not every word-returning import, and why not a generic `dyn`.** A
+  refs-only slot (`self.s` receiving strings and None) is rule 3 in the
+  defining unit when its scalar evidence lives in a third module; its bare 0
+  IS None's spelling there, and the kind read would answer "not None". A
+  broad `dyn` gate was measured to do exactly that: `classes/12_linked_list_nodes`
+  CRASHed because a NULL `Node *` erased to an int word is dyn, `cur is not
+  None` went true, and `cur.next` dereferenced 0. The final rule marks only
+  the fact the callee decided, so an unknown word keeps its word compare
+  (`x == 0`, the same answer it had) and a container/field read whose None
+  is a box is marked by the reader that knows it.
+- **Runtime.** `mojo_word_is_none` is unchanged: a registered-pointer test
+  that answers 0 for a non-box, so a plain integer can never be mistaken for
+  None by it.
+
+**Pinned** as `test_codegen_imported_method_none_return.py` (registered
+`reg-codegen-imported-method-none-return`, regressions bucket, `tiny`): two
+per-file two-module fixtures built with `compile_module_to_c`, gcc
+`-fgimple`, linked with `runtime/fire_runtime.c`, run, and compared with
+CPython. The mixed case covers `None/True/True/1/2/hi/True/True/None/True`
+(print, `is None`, `== None`, `+ 1`, `== "hi"`, `!=`, reset); the refs-only
+case pins the boundary (`is None` / `== "x"` correct, with its unset print
+left to H2). Both pass.
+
+**Tallies on the final tree.** Corpus (287 programs): OK **160**, WRONG 105,
+CRASH 15, ERROR 2, GCC 2, REFUSED 3 — byte-for-byte the same WRONG/CRASH
+lists as before H1 (no corpus program is multi-module, so the fix is not
+exercised there and nothing moved). `compile_stdlib.py -j4`: 610 passed, 0
+failed (0 expected, 0 unexpected). `test_gimple_runner.py`: 688 passed, 0
+failed. `test_pydiff_ratchet.py` 139/0; the mixed-field, type and
+runtime-header ratchets 0/0 (84/84).
+
+## Status 2026-11-28 (port: body-keyed `_nid`, declared `_mixed_return_bodies`)
+
+The sibling worktree `../mojo-reference` carried an uncommitted batch of
+compiled-path (`do_imports=False`, self-hosted binary) identity/`None` fixes.
+Ported here because 5c's return-slot mechanism is one of the tables it
+repairs:
+
+- **`_nid(body)` as every body key.** A body is a LIST, and on the self-hosted
+  path a raw integer dict/set key is looked up among live containers
+  (`exprtypes._nid`), so `id(body)` can raise `unhashable type: 'list'` or be
+  classified as that list. `infra_infer._infer_return_type_core`,
+  `emit_stmts._is_mixed_return`, `emit_resolve._proven_local_types`,
+  `itcursor.escaping_iter_names`, `lambdareduce.reducible_lambdas`,
+  `module_gen._mk` / `_note_mixed_return` / `_gmp_collect_boxed_return_names`,
+  and `emit_funcs`'s two implicit-return epilogues now all use the same
+  `_nid` key (the last three were not in the sibling diff: the collector's
+  old `id(body)` would have stopped matching the declared set, and the two
+  epilogues would have stopped returning the None box).
+- **`GimpleGen.__init__` declares `_mixed_return_bodies`**, so the compiled
+  reader and writer share a real field instead of a lazy `getattr` (whose
+  `None` on the self-hosted path is a boxed word).
+- **Presence tests instead of `.get(...)+is not None`** where a miss is the
+  boxed None on the self-hosted path (`resolve_shared._quick_type`'s two
+  imported-global tables), **content comparison** in
+  `_gmh_record_param_elem` (a string `==` compares pointers there, and a
+  tuple `!=` compares identities, so every second call looked like a
+  conflict and erased the element type), the `_drop_unreferenced_unimpl_stubs`
+  dict-of-sets rewrite, and `imports.Resolver.__init__`'s `if path` (the
+  compiled call pads the `None` default with the NULL word).
+- Deletes the accidentally committed `tmpe7tqx39y.mojo` (a scratch script).
+
+Measured on the ported tree: corpus 287 programs unchanged (OK 160 / WRONG
+105 / CRASH 15 / ERROR 2 / GCC 2 / REFUSED 3; identical WRONG and CRASH
+lists), `compile_stdlib.py -j4` 610 passed / 0 failed.

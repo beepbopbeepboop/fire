@@ -3049,11 +3049,10 @@ def _infer_return_type_core(gen, body: list) -> str:
                 and _return_arms_need_boxed_word(acc, arms, _rt, gen)) \
                 or (gimple_ctypes.TypeLattice.is_int_word(_rt)
                     and _return_arms_are_int_or_none(acc, arms, body)):
-            _mixed = getattr(gen, '_mixed_return_bodies', None)
-            if _mixed is None:
-                _mixed = set()
-                gen._mixed_return_bodies = _mixed
-            _mixed.add(id(body))
+            # `_nid(body)`, not `id(body)`: the body is a LIST, so its bare address
+            # is also the registry key of the live list and a set holding it is
+            # classified by the list, not the integer (see `exprtypes._nid`).
+            gen._mixed_return_bodies.add(gimple_exprtypes._nid(body))
             return 'int64_t'
         # `int` is this compiler's INTERNAL marker for "a _Bool met an int"
         # (see `_dict_val_of`), but it is also the C storage type of a

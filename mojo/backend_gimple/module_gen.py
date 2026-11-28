@@ -1612,7 +1612,7 @@ _REPR_HIDDEN_FIELDS = {'FunctionDef': ('yield_bearing_node_ids',)}
 REPR_CLUSTER_DEFS_HEAD = 'static char * _mojo_dispatch_repr (void *obj) {'
 
 
-def _repr_cluster_reachable(parts: list) -> bool:
+def _repr_cluster_reachable(parts: list[str]) -> bool:
     """Does THIS module's own emitted text name any cluster helper?
 
     Read over every part with the cluster's OWN text excluded — the six
@@ -1629,7 +1629,7 @@ def _repr_cluster_reachable(parts: list) -> bool:
     static helpers this module cannot call, and a missed reference is a link
     error.
     """
-    text = []
+    text: list[str] = []
     for part in parts:
         if part in REPR_CLUSTER_DECLS:
             continue
@@ -1646,7 +1646,7 @@ def _repr_cluster_reachable(parts: list) -> bool:
 UNIMPL_STUB_NAMES = ('_ReflectTable_in_dll', '_Bool_items', 'id')
 
 
-def _drop_unreferenced_unimpl_stubs(parts: list) -> list:
+def _drop_unreferenced_unimpl_stubs(parts: list[str]) -> list[str]:
     """`parts` without the `static` unimplemented-helper stubs (`id`,
     `_Bool_items`, `_ReflectTable_in_dll`) that nothing in the module names.
 
@@ -1670,22 +1670,35 @@ def _drop_unreferenced_unimpl_stubs(parts: list) -> list:
         name: re.compile(r'(?<![A-Za-z0-9_])' + name + r'(?![A-Za-z0-9_])')
         for name in UNIMPL_STUB_NAMES
     }
-    referenced_by = {name: set() for name in UNIMPL_STUB_NAMES}
+    # Which distinct texts name each stub: a flat `name\x1ftext` key table and a per-name
+    # count, not a dict of sets of texts read back through a generator expression
+    # (`any(t != text for t in referenced_by[name])` -- neither a set value nor a generator
+    # frame survives as such in the compiled compiler, and the list this returns feeds
+    # `_dedup_variadic_externs`, where one NULL part is a KeyError). "Some OTHER text names
+    # it" is `count - (1 if this text names it)`.
+    ref_seen: dict[str, bool] = {}
+    ref_count: dict[str, int] = {}
+    for name in UNIMPL_STUB_NAMES:
+        ref_count[name] = 0
     for part in parts:
-        text = _as_str(part)
+        text: str = part
         for name in UNIMPL_STUB_NAMES:
             if pats[name].search(text):
-                referenced_by[name].add(text)
-    keep: list = []
+                _rk: str = name + '\x1f' + text
+                if _rk not in ref_seen:
+                    ref_seen[_rk] = True
+                    ref_count[name] = ref_count[name] + 1
+    keep: list[str] = []
     for part in parts:
-        text = _as_str(part)
+        text: str = part
         dropped = False
         if text.startswith('static ') and text.endswith('}'):
             for name in UNIMPL_STUB_NAMES:
                 if (' ' + name + ' (') in text:
-                    # A stub definition for `name`. Dropped iff no other part
-                    # (a part whose text differs from this one) references it.
-                    if not any(t != text for t in referenced_by[name]):
+                    _others: int = ref_count[name]
+                    if (name + '\x1f' + text) in ref_seen:
+                        _others = _others - 1
+                    if _others <= 0:
                         dropped = True
         if not dropped:
             keep.append(part)
@@ -1798,7 +1811,7 @@ def _drop_unreferenced_extern_decls(text: str) -> str:
     return ''.join(lines[j] for j in range(n) if j not in drop_idx)
 
 
-def _drop_unreachable_repr_cluster(parts: list) -> list:
+def _drop_unreachable_repr_cluster(parts: list[str]) -> list[str]:
     """`parts` without the generic-repr cluster when nothing reaches it.
 
     The one decision, applied to BOTH emissions — the definitions
@@ -1810,7 +1823,7 @@ def _drop_unreachable_repr_cluster(parts: list) -> list:
     """
     if _repr_cluster_reachable(parts):
         return parts
-    out = []
+    out: list[str] = []
     for part in parts:
         if part in REPR_CLUSTER_DECLS:
             continue
@@ -10834,9 +10847,29 @@ def _gmh_record_param_elem(self, callee, pname, e, ne):
     callee = _as_str(callee)
     pname = _as_str(pname)
     d = self._param_elem_types.setdefault(callee, {})
-    if pname in d and d[pname] != (e, ne):
-        old_e, old_ne = d[pname]
-        if old_e == e and old_e is not None and e is not None and old_ne != ne:
+    # Compared by CONTENT through `_elem_spec_key`, never as tuples or by `==` on the words:
+    # `d[pname] != (e, ne)` is an identity comparison of two list objects in the compiled
+    # compiler, and `old_e == e` compares string POINTERS (the same element type arrives as
+    # a different pointer on each of the pass's rounds). Every second call for one parameter
+    # then looked like conflicting call sites and stored `(None, None)`, which erases the
+    # element type: `for t in tasks` over a list of `Task` lost `Task *` and read every
+    # field through dynamic dispatch.
+    _ke = _elem_spec_key(e)
+    _kn = _elem_spec_key(ne)
+    _differs = False
+    old_e = None
+    old_ne = None
+    _kold_e = ''
+    _kold_n = ''
+    if pname in d:
+        _old = _as_list(d[pname])
+        old_e = _old[0]
+        old_ne = _old[1]
+        _kold_e = _elem_spec_key(old_e)
+        _kold_n = _elem_spec_key(old_ne)
+        _differs = not (_kold_e == _ke and _kold_n == _kn)
+    if _differs:
+        if _kold_e == _ke and _ke != '' and _kold_n != _kn:
             # Same container element type but nested kind disagrees:
             # keep the container (honest) and drop the nested kind (ambiguous).
             # The nested kind is NOT then "int64_t, no evidence": the
@@ -10845,17 +10878,32 @@ def _gmh_record_param_elem(self, callee, pname, e, ne):
             # it routes each inner list through the runtime boxed reader
             # (see `_nested_mixed_names`) instead of the int64_t default.
             d[pname] = (e, None)
-            if gimple_ctypes.TypeLattice.is_list(e):
+            if gimple_ctypes.TypeLattice.is_list(_as_str(e)):
                 _mx_inner = self._param_nested_mixed.setdefault(callee, set())
                 _mx_inner.add(pname)
         else:
-            if (old_e is not None and e is not None and old_e != e
-                    and not gimple_ctypes.TypeLattice.is_list(old_e) and not gimple_ctypes.TypeLattice.is_list(e)):
+            if (_kold_e != '' and _ke != '' and _kold_e != _ke
+                    and not gimple_ctypes.TypeLattice.is_list(_as_str(old_e))
+                    and not gimple_ctypes.TypeLattice.is_list(_as_str(e))):
                 _em = self._param_elem_mixed.setdefault(callee, set())
                 _em.add(pname)
-            d[pname] = (None, None)   # conflicting call sites → unknown
+            d[pname] = (None, None)   # conflicting call sites -> unknown
     else:
         d[pname] = (e, ne)
+
+
+def _elem_spec_key(x) -> str:
+    """A canonical string for one element spec (`None`, a ctype string, or a nested list of
+    specs), so two specs compare by content. '' is "no spec"."""
+    if not x:
+        return ''
+    if isinstance(x, str):
+        return 's' + _as_str(x)
+    parts: list[str] = []
+    xs: list = _as_list(x)
+    for i in range(len(xs)):
+        parts.append(_elem_spec_key(xs[i]))
+    return 'l' + '\x1f'.join(parts)
 
 
 def _gmh_record_param_dict_val(self, callee, pname, vt):
@@ -15073,10 +15121,7 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
     `None` arm and a proven-scalar arm joins; a references-only slot keeps the
     NULL word, exactly as the DECISION rule says."""
     import mojo.backend_gimple.emit_infra as _rbn_ein
-    _mixed = getattr(self, '_mixed_return_bodies', None)
-    if _mixed is None:
-        _mixed = set()
-        self._mixed_return_bodies = _mixed
+    _mixed: set = self._mixed_return_bodies   # declared field; keys are `_nid(body)`
     _names = getattr(self, '_ret_may_hold_mixed', None)
     if _names is None:
         _names = set()
@@ -15229,7 +15274,12 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
         if _has_scalar and _rbn_ein.body_may_fall_off(body):
             _has_none = True
         if _has_none and _has_scalar:
-            _mixed.add(id(body))
+            # `_nid(body)`, not `id(body)`: the same key the inference pass
+            # writes (`infra_infer._infer_return_type_core`) and the return
+            # emitter reads (`_is_mixed_return`). The bare list address also
+            # collides with a live list's registry key on the self-hosted
+            # path.
+            _mixed.add(gimple_exprtypes._nid(body))
             _names.add(_as_str(key))
             _boxed = getattr(self, '_ret_boxed_names', None)
             if _boxed is None:
@@ -17244,7 +17294,7 @@ def gen_module_impl(self, stmts: list):
         _mk_slots: dict = {}
 
         def _mk(name, body, params=None):
-            _k = id(body)
+            _k = gimple_exprtypes._nid(body)    # not the bare list address (see `exprtypes._nid`)
             if _k not in _mk_maybe:
                 _reuse = False
                 if callee_kinds is not None and _k in _mk_first_maybe:
@@ -17515,6 +17565,51 @@ def gen_module_impl(self, stmts: list):
                 # no typedef is an `unknown type name` — measured 2026-10-21
                 # part 4 integration on the same `indices` shape).
                 self._ensure_tuple_struct(_ret_ann)
+            # H1 (stage 5c): an IMPORTED method whose body returns a MIXED
+            # field (`return self.v`, `self.v` = a scalar beside None) - the
+            # defining module boxed that field and returns the box, but this
+            # TU only knows `int64_t`. Record the symbol; `_emit_call` marks
+            # the call result dyn, so `x is None` / `x == None` ask the
+            # runtime (`mojo_word_is_none`) instead of comparing with 0.
+            #
+            # Deliberately NOT every word-returning imported method: a
+            # refs-only slot (`self.s` receiving strings and None) keeps the
+            # NULL/0 word by rule 3 in the defining unit (its scalar evidence
+            # may be in a third module), and the kind read would call its
+            # bare 0 "not None". The field decision is computed from the
+            # DEFINING struct's own body (the imported StructDef carries its
+            # methods), which is the same evidence that unit's compile had.
+            def _imported_mixed_return(_st, _m) -> bool:
+                import mojo.backend_gimple.emit_infra as _h1_ein
+                try:
+                    _names = _h1_ein.mixed_field_names(_st, self)
+                except Exception:
+                    return False
+                if not _names:
+                    return False
+                _acc: list = []
+                _arms: list = []
+                try:
+                    self._collect_return_types(_m.body, _acc, _arms)
+                except Exception:
+                    return False
+                for _a in _arms:
+                    if (isinstance(_a, MemberExpr)
+                            and isinstance(_a.obj, IdentExpr)
+                            and _as_str(_a.obj.name) == 'self'
+                            and _as_str(_a.member) in _names):
+                        return True
+                return False
+            if (gimple_ctypes.TypeLattice.is_int_word(_as_str(ret_type))
+                    and _imported_mixed_return(s, m)):
+                # Both spellings: the call site uses the qualified symbol
+                # (`helper_Box_get`); some import paths keep the bare one.
+                _urw = getattr(self, '_imported_mixed_ret_syms', None)
+                if _urw is None:
+                    _urw = set()
+                    self._imported_mixed_ret_syms = _urw
+                _urw.add(_as_str(mangled))
+                _urw.add(_as_str(bare_mangled))
             if any('...' in p for p in param_ctypes):
                 params_str = '...'
             else:
@@ -19686,15 +19781,12 @@ def gen_module_impl(self, stmts: list):
     # a tagged word: `emit_stmts._check_float_arm_into_annotated_pointer`
     # refuses it at compile time.
     _ret_mixed: set = set()
-    _mrb = getattr(self, '_mixed_return_bodies', None)
-    if _mrb is None:
-        _mrb = set()
-        self._mixed_return_bodies = _mrb
+    _mrb: set = self._mixed_return_bodies    # a declared GimpleGen field; keys are `_nid(body)`
 
     def _note_mixed_return(_mf_name, _mf_body):
         if _mf_body is None:
             return
-        if id(_mf_body) not in _mrb:
+        if gimple_exprtypes._nid(_mf_body) not in _mrb:
             # The SAME entry point the definition emitter uses, overlays and
             # all: it records the mix in `_mrb` when (and only when) it
             # widens the return type, so a call site marked here and the
@@ -19703,7 +19795,7 @@ def gen_module_impl(self, stmts: list):
                 self._infer_return_type(_mf_body)
             except Exception:
                 return
-        if id(_mf_body) in _mrb:
+        if gimple_exprtypes._nid(_mf_body) in _mrb:
             _ret_mixed.add(_as_str(_mf_name))
 
     for _rf_name in _fn_by_name:

@@ -3792,7 +3792,7 @@ def _proven_local_types(gen) -> dict:
     if cache is None:
         cache = {}
         gen._proven_local_types_cache = cache
-    key = id(body)
+    key = gimple_exprtypes._nid(body)    # not the bare list address (see `exprtypes._nid`)
     hit = cache.get(key)
     if hit is not None:
         return hit

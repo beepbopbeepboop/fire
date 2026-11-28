@@ -320,23 +320,23 @@ def _quick_type(gen, node) -> str:
         # (emit_exprs' imported-global arm). Answering int64_t here typed a
         # `var fl = F` class attribute as a box, so a float global came out as
         # its truncated integer.
-        _imp_acc = getattr(gen, '_imported_global_accessors', {}).get(node.name)
-        if _imp_acc is not None:
-            return _as_str(_imp_acc[0])
-        # The same from-import home the body read routes through
-        # (`bare_global_read_plan`'s `_imp_fields`): when the defining module
-        # is compiled into this unit but no export entry exists for the name
-        # (a definer outside the compiler's own directory, where the
-        # module_loader export scan does not run), its registered field C
-        # type is the answer, not the int64_t default. Without this a def
-        # returning a bare imported `str` global was typed `int64_t`, while
-        # its body read `_k_src_globals.NAME` as `char *`.
-        _imp_home = _as_str(getattr(gen, '_own_imported_global_home', {}).get(node.name) or '')
-        _imp_field = _as_str(getattr(gen, '_own_imported_global_field', {}).get(node.name) or '')
-        if _imp_home and _imp_field:
-            _imp_fields = gen._module_global_field_type(_imp_home, _imp_field)
-            if _imp_fields is not None:
-                return _as_str(_imp_fields[0])
+        # Presence tests over typed dicts, not `getattr(gen, .., {}).get(name)` + `is not None`: a
+        # `.get` miss is the boxed None on the self-hosted path, which is "not None", so every
+        # plain name that was no local took `_imp_acc[0]` of garbage as its type (`None` came
+        # back as a stray pointer, `0 or "" or None` then merged as `char *` instead of the word).
+        _inm: str = _as_str(node.name)
+        _iga: dict = _as_dict(getattr(gen, '_imported_global_accessors', None) or {})
+        if _inm in _iga:
+            return _as_str(_as_list(_iga[_inm])[0])
+        _ihm: dict = _as_dict(getattr(gen, '_own_imported_global_home', None) or {})
+        _ifd: dict = _as_dict(getattr(gen, '_own_imported_global_field', None) or {})
+        if _inm in _ihm and _inm in _ifd:
+            _imp_home = _as_str(_ihm[_inm])
+            _imp_field = _as_str(_ifd[_inm])
+            if _imp_home and _imp_field:
+                _imp_fields = gen._module_global_field_type(_imp_home, _imp_field)
+                if _imp_fields is not None:
+                    return _as_str(_imp_fields[0])
         return 'int64_t'
     if (isinstance(node, gimple_ctypes.SubscriptExpr)
             and (isinstance(node.obj, gimple_ctypes.IdentExpr)

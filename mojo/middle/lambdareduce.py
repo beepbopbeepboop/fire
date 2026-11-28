@@ -26,6 +26,7 @@ site, and there is no call site to inline into.
 from __future__ import annotations
 
 import mojo.middle.types as gimple_ctypes
+import mojo.middle.exprtypes as gimple_exprtypes
 from fire_compiler import _as_str
 
 
@@ -463,8 +464,9 @@ def reducible_lambdas(gen) -> dict:
     if cache is None:
         cache = {}
         gen._reducible_lambdas_cache = cache
-    if id(body) in cache:
-        return cache[id(body)]
+    _ck = gimple_exprtypes._nid(body)    # not the bare list address (see `exprtypes._nid`)
+    if _ck in cache:
+        return cache[_ck]
     enclosing = dict(getattr(gen, 'var_types', {}) or {})
     out = {}
     if body:
@@ -482,5 +484,5 @@ def reducible_lambdas(gen) -> dict:
             except AttributeError:
                 pass
             out[name] = lam
-    cache[id(body)] = out
+    cache[_ck] = out
     return out
