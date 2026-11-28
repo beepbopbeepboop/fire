@@ -5166,9 +5166,13 @@ def value_class_of(gen, node, caller_key, caller_struct, depth) -> str:
         # silent (it only answers the multi-kind box case). Without this a call
         # site `c.put(x)` over such a local went `unknown` and the field kept
         # its refs-only word.
-        lk = ((getattr(gen, '_pv_local_scalar_kinds', None) or {})
-              .get(_as_str(caller_key), {}))
-        if n in lk:
+        # Presence tests over a DECLARED `dict` field (gimple_codegen), not
+        # `getattr(.., None) or {}` + `.get(key, {})`: a miss is the boxed None on
+        # the self-hosted path, and an undeclared `_pv_*` attribute never met its
+        # reader there (see `_pv_structs`).
+        _lks: dict = _as_dict(gen._pv_local_scalar_kinds)
+        _ck: str = _as_str(caller_key)
+        if _ck in _lks and n in _as_dict(_lks[_ck]):
             return 'scalar'
         return _pv_type_class(_pv_var_type(gen, caller_key, n))
     if isinstance(node, gimple_ctypes.MemberExpr) \
@@ -5352,6 +5356,29 @@ def _pv_collect_round(gen, bodies: list, structs: dict, defs: dict, pnames: dict
     return table
 
 
+def _pv_local_scalar_names(gen, body) -> dict:
+    """`{local name: 'int' | 'double' | 'str'}` for every local of `body` that some
+    binding PROVES a scalar kind of (`_mixed_scalar_binding_kind`). Only presence
+    is ever asked, so which binding is "last" does not matter.
+
+    The visitor is an ordinary closure over `dvt`/`kinds`, the shape every other
+    `_walk_func_stmts` caller here uses (`_scalar_mixed_prescan`'s `visit`), not a
+    nested def whose captures arrive as DEFAULT arguments (`def f(.., _k=_kinds)`),
+    which the compiled compiler does not lower."""
+    dvt = _scalar_mixed_prescan(gen, body)[0]
+    kinds: dict = {}
+
+    def visit(s):
+        if isinstance(s, gimple_ctypes.AssignStmt) \
+                and isinstance(s.target, gimple_ctypes.IdentExpr):
+            kn = _mixed_scalar_binding_kind(gen, s.value, dvt)
+            if kn is not None:
+                kinds[_as_str(s.target.name)] = _as_str(kn)
+
+    _walk_func_stmts(body, visit)
+    return kinds
+
+
 def collect_param_value_obs(gen, all_functions: list, all_structs: list,
                             caller_bodies: list, own_struct_names: list = None) -> None:
     """Fill `gen._param_value_obs` (and the tables `value_class_of` reads):
@@ -5413,21 +5440,7 @@ def collect_param_value_obs(gen, all_functions: list, all_structs: list,
         _ck = _as_str(entry[0])
         if _ck in lks:
             continue
-        _dvt, _ann = _scalar_mixed_prescan(gen, entry[2])
-        _kinds: dict = {}
-
-        def _pv_lkind(name, value, _k=_kinds, _d=_dvt):
-            _kn = _mixed_scalar_binding_kind(gen, value, _d)
-            if _kn is not None:
-                _k[_as_str(name)] = _kn
-
-        def _pv_lvisit(s):
-            if isinstance(s, gimple_ctypes.AssignStmt) \
-                    and isinstance(s.target, gimple_ctypes.IdentExpr):
-                _pv_lkind(s.target.name, s.value)
-
-        _walk_func_stmts(entry[2], _pv_lvisit)
-        lks[_ck] = _kinds
+        lks[_ck] = _pv_local_scalar_names(gen, entry[2])
     gen._pv_local_scalar_kinds = lks
     gen._param_value_obs = {}
     for _round in range(3):

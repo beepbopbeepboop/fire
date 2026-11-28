@@ -3419,6 +3419,7 @@ class GimpleGen:
         self._pv_own_structs: set = set()
         self._pv_mixed_cache: dict = {}
         self._pv_local_structs: dict = {}
+        self._pv_local_scalar_kinds: dict = {}
         self._param_value_obs: dict = {}
         self._early_def_pts_used: dict[str, list] = {}
         # _pair_key(sanitized home-module qualifier, fn name) -> return ctype —
