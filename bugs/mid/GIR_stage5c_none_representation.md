@@ -607,3 +607,36 @@ remaining diff is the default-object repr for a methodless class, not None);
 scan 84/84; the mixed-field test's "both kinds" case now expects `'mixed'` and
 the field (the old rule-3 expectation). The full corpus/runner/stdlib re-runs
 are reported with the commit.
+
+## Status 2026-11-27 (double-domain `.get`; corpus 157 OK)
+
+**The double-domain `dict.get` miss is the None box, with its readers.**
+`_ldm_get`'s no-default boxed read now covers a DOUBLE value domain (the box
+carries `'d'`), `dict_get_call_is_tagged` no longer excludes it, a local bound
+to such a `.get` is declared `int64_t` (the assignment hint override) and
+`tagged_next_bind_name`'s `.get` arm keeps the box, and a boxed word handed to
+a `double` parameter is unboxed with `mojo_box_double` — both in `_emit_call`'s
+coercion and in the libm module-member path (`math.sqrt(d.get(k))`).
+
+Measured: a focused program (local `x = d.get(k)`: hit, miss, `x is None`,
+`print(x)`, `x + 1`, `math.sqrt(d.get(k))`, `math.sqrt(x)`, `float(d.get(k))`,
+`d.get(k, 0.0)`) is OK. `test_pydiff_ratchet.py` 139/0; type/runtime ratchets 0.
+
+**Corpus on the previous commit (`4cbcce216`):** 286 programs — OK **157**,
+WRONG 107, CRASH 15, ERROR 2, GCC 2, REFUSED 3 (the run before the mixed-kind
+parameter work was OK 150/WRONG 114/CRASH 16). The None-as-`0` group is down
+to two (`funcs/07_lambda_in_list` — its None line is right, the remaining diff
+is the untyped callable parameters inferred `char *` from one string call
+site; `classes/12_linked_list_nodes` — now OK; `params/31_varargs_sum` — now
+OK). `flow/02` and `flow/34` (`None -> []`) are OK.
+
+**Still open.**
+- A CONTAINER value domain's `.get` (`dd.get("a")["n"]`) returns the container
+  type but its readers lose the inner value metadata (`object is not
+  subscriptable`), and the hit prints as its address. A separate slice.
+- Cross-module per-file (`do_imports=False`) mixed fields: unmeasured (the
+  inline `fire.py run` path handles a literal and a parameter store in two
+  modules correctly); the test harness cannot link a sibling import in the
+  per-file path.
+- `test_gimple_runner.py` / `compile_stdlib.py` / the corpus re-runs on the
+  final commit are the closing evidence.
