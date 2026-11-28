@@ -2821,13 +2821,13 @@ def _return_arms_need_boxed_word(acc: list, arms: list, joined: str = None, gen=
             # not scalar evidence; casting it to the joined `char *` handed
             # printf a box header or a small integer. The callee is not a
             # known function name, so the arm is a dispatch and must widen.
-            if (gimple_ctypes.TypeLattice.is_cstr(_joined)
+            if (gen is not None and gimple_ctypes.TypeLattice.is_cstr(_joined)
                     and isinstance(_node, gimple_ctypes.CallExpr)
                     and isinstance(_node.func, gimple_ctypes.IdentExpr)):
                 _fnn = _as_str(_node.func.name)
-                _rets = getattr(gen, 'func_return_types', None) or {}
-                _vars = getattr(gen, 'var_types', None) or {}
-                if _fnn not in _rets and _fnn in _vars:
+                # Presence tests on the two DECLARED dict fields, not
+                # `getattr(gen, .., None) or {}`: an untyped word on the self-hosted path.
+                if _fnn not in _as_dict(gen.func_return_types) and _fnn in _as_dict(gen.var_types):
                     return True
     return False
 
@@ -2971,11 +2971,25 @@ def _boxed_local_binding_kinds(gen, body: list) -> dict:
     return out
 
 
+def _acc_mixes_cstr(acc: list) -> bool:
+    """Do the return-arm types `acc` include a C string AND more than one distinct
+    type? A plain loop: a generator expression inside `any(...)`/`set(...)` is not
+    something the compiled compiler lowers."""
+    seen: set = set()
+    has_cstr = False
+    for a in acc:
+        t: str = _as_str(a)
+        seen.add(t)
+        if gimple_ctypes.TypeLattice.is_cstr(t):
+            has_cstr = True
+    return has_cstr and len(seen) > 1
+
+
 def _return_arm_is_boxed_local(gen, arms: list, body: list, acc: list = None) -> bool:
     """True when a returned name is bound to two incompatible kinds here."""
     kinds = _boxed_local_binding_kinds(gen, body)
-    untyped = set(getattr(gen, '_cur_untyped_params', ()) or ())
-    for i, arm in enumerate(arms or []):
+    untyped: set = gen._cur_untyped_params   # a declared GimpleGen field (gimple_codegen)
+    for arm in (arms or []):
         if isinstance(arm, gimple_ctypes.IdentExpr):
             ks = kinds.get(_as_str(arm.name), set())
             if len(ks) > 1 and not ks <= {'int', 'bool', 'float'}:
@@ -2984,9 +2998,7 @@ def _return_arm_is_boxed_local(gen, arms: list, body: list, acc: list = None) ->
             # by its call sites, so a bare-name arm carries the tagged word
             # even though _quick_type guessed a pointer from another arm.
             if _as_str(arm.name) in untyped and acc is not None \
-                    and any(gimple_ctypes.TypeLattice.is_cstr(_as_str(a))
-                            for a in acc) \
-                    and len(set(_as_str(a) for a in acc)) > 1:
+                    and _acc_mixes_cstr(acc):
                 return True
         if isinstance(arm, gimple_ctypes.TernaryExpr):
             branches = [getattr(arm, 'then_val', None), getattr(arm, 'else_val', None)]

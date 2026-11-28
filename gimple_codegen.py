@@ -3420,6 +3420,9 @@ class GimpleGen:
         self._pv_mixed_cache: dict = {}
         self._pv_local_structs: dict = {}
         self._pv_local_scalar_kinds: dict = {}
+        # The current function's unannotated parameter names (emit_infra `_reset_func`
+        # fills it); declared so the compiled `GimpleGen` has the field the readers use.
+        self._cur_untyped_params: set = set()
         self._param_value_obs: dict = {}
         self._early_def_pts_used: dict[str, list] = {}
         # _pair_key(sanitized home-module qualifier, fn name) -> return ctype —
