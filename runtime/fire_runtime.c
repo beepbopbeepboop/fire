@@ -4812,6 +4812,18 @@ int mojo_str_eq(MojoStr *a, MojoStr *b)
    raw strcmp() on NULL segfaults. */
 int mojo_cstr_cmp(char *a, char *b)
 {
+    /* A mixed-kind value can reach this `char *` signature still tagged as a
+     * MojoBox (e.g. `pick(words, 2) == ""` where pick returns a boxed word).
+     * strcmp on the box header compares its magic bytes with the string and
+     * answers "not equal" for every value. Unwrap by kind first; a small
+     * integer word then falls into the guard below, which is the same answer
+     * the byte-code arm of mojo_cstr_cmp_word gives. */
+    int64_t _wa = (int64_t)(intptr_t)a;
+    int64_t _wb = (int64_t)(intptr_t)b;
+    if (_wa && mojo_is_boxed(_wa)) _wa = mojo_box_word(_wa);
+    if (_wb && mojo_is_boxed(_wb)) _wb = mojo_box_word(_wb);
+    a = (char *)(intptr_t)_wa;
+    b = (char *)(intptr_t)_wb;
     if ((intptr_t)a < 65536 || (intptr_t)b < 65536)
         return (intptr_t)a - (intptr_t)b;
     if (a == NULL || b == NULL)
