@@ -7099,6 +7099,16 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
         return 'int', gen._new_val('int', '0')
     if method == 'append' and args:
         at, av = gen.lower_expr(args[0])
+        # A literal `None` appended beside other kinds is the shared None box,
+        # under its own slot kind; otherwise `[1, 2].append(None)` stored the
+        # integer 0 and printed `[1, 2, 0]` (flow/34_none_then_list).
+        if gen._is_none_literal(args[0]):
+            _nw = gen._call_expr('int64_t', 'mojo_box_none', [])
+            gen._emit_call('void', '', 'mojo_list_append_word',
+                           [('MojoList *', ov), ('int64_t', _nw)])
+            gen._word_mark_slot_kinds(ov)
+            ginf.note_field_slot_kinds(gen, ov)
+            return 'int', gen._new_val('int', '0')
         # A real Python `str[i]` result is itself a 1-character STRING
         # (not a scalar) — this compiler's `char` representation for it
         # (see mojo_str_char_at) breaks that invariant, so `.append(c)`

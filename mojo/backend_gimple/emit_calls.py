@@ -13203,10 +13203,15 @@ def _lower_struct_constructor(gen, struct_name: str,
         _chosen = gen._resolve_overload(_init_candidates, args, kwargs)
         if _chosen is not None:
             init_fname = gen._struct_method_csym(struct_name, '__init__', _chosen['overload_id'])
-            arg_pairs = [(f"{struct_name} *", t)] + \
-                gen._build_call_args_for_candidate(
-                    _chosen, args, kwargs,
-                    gen._struct_init_defaults.get(struct_name, {}))
+            _iinit = _as_str(struct_name) + '___init__'
+            _ipairs = gen._build_call_args_for_candidate(
+                _chosen, args, kwargs,
+                gen._struct_init_defaults.get(struct_name, {}))
+            if (getattr(gen, '_param_box_names', None) or {}).get(_iinit):
+                _ipairs = ginf._box_param_call_args(
+                    gen, _iinit, _ipairs, list(args), kwargs,
+                    (getattr(gen, '_method_param_names', None) or {}).get(_iinit))
+            arg_pairs = [(f"{struct_name} *", t)] + _ipairs
             gen._emit_call('void', '', init_fname, arg_pairs, _arg_nodes)
             return ctype, t
         # No candidate could be resolved — either no candidate's arity fits
@@ -13320,6 +13325,17 @@ def _lower_struct_constructor(gen, struct_name: str,
         # arg_pairs, so a cross-module `Class(module_name=<boxed local>,
         # aset={..})` passed an int64_t into `char *` / a MojoSet* into
         # `int64_t` uncast (GCC -Wint-conversion, hard error under -fgimple).
+        # Stage 5c: a `__init__` parameter tagged at its call sites (a
+        # `None`/bool literal, or mixed kinds) is boxed by kind here exactly
+        # as a method/function call's argument is; the ctor path built the
+        # pairs itself and skipped `_box_param_call_args`.
+        _iinit2 = _as_str(struct_name) + '___init__'
+        if (getattr(gen, '_param_box_names', None) or {}).get(_iinit2):
+            _ipairs2 = ginf._box_param_call_args(
+                gen, _iinit2, arg_pairs[1:], list(args), kwargs,
+                (getattr(gen, '_method_param_names', None) or {}).get(_iinit2)
+                or init_pnames or None)
+            arg_pairs = [arg_pairs[0]] + _ipairs2
         _init_full = gen.func_param_types.get(init_fname, [])
         if len(_init_full) == len(arg_pairs):
             for _ai in range(1, len(arg_pairs)):

@@ -5819,6 +5819,14 @@ def mixed_field_names(struct, gen=None) -> frozenset:
                 # dispatch by kind or a `list.append`/`print` of the field
                 # stores the box's address as an integer.
                 _bit = 4
+            # A store of a TAGGED parameter (one the call sites box a
+            # None/bool literal for) makes the field box-holding too: the
+            # field can receive the None box even though no literal `None` is
+            # stored here (`Point(x, None)` -> `self.y = y`).
+            if _bit == 0 and isinstance(found[i][1], gimple_ctypes.IdentExpr):
+                _sn = _as_str(found[i][1].name)
+                if gen is not None and _sn in param_mixed_field_names(gen, ckey):
+                    _bit = 4
             stores[fname] = _as_int(stores[fname]) | _bit
     out: list = []
     for fname in order:

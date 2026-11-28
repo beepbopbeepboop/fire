@@ -1813,12 +1813,28 @@ def _lme_struct_field(gen, node, field_map, op: str, ov, struct_name: str) -> tu
     # storage: guard the load on the instance's presence bit.
     gimple_ctypes.presence_check_emit(
         gen, gen._struct_name_owner.get(struct_name), node.member, ov, op, struct_name)
-    t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
+    # Stage 5c: a MIXED field (a scalar beside `None`, or values of more than
+    # one kind) is the tagged word; its DECLARED C type may still be a pointer
+    # from the usage inference (`Point.x` is `char *` because one call site
+    # passes a string), so the READ is typed `int64_t` and marked. Otherwise
+    # `repr(self.x)` on a field holding an int box called the str helper with
+    # the box's address (SIGSEGV in classes/21_str_and_repr).
+    _is_mixed_f = ginf.mixed_field_read(gen, struct_name, node.member)
+    _fref = f'{ov}{op}{gimple_ctypes._safe_field(node.member)}'
+    if _is_mixed_f:
+        # A component_ref of the DECLARED pointer type assigned to an int64_t
+        # temp is a non-trivial conversion GIMPLE rejects; cast explicitly.
+        if gimple_ctypes.TypeLattice.is_word(field_type):
+            t = gen._new_val(field_type, _fref)
+        else:
+            # `(int64_t)ptr` is an invalid GIMPLE unary; `_to_int64` routes a
+            # pointer through `void *` first.
+            t = gen._to_int64(field_type, _fref)
+        field_type = 'int64_t'
+    else:
+        t = gen._new_val(field_type, _fref)
     _mark_boxed_field_read(gen, struct_name, node.member, field_type, t)
-    # Stage 5c: a MIXED field (a scalar beside `None`) stores `None` as the
-    # shared box, so its read is a box and answers by the box's kind.
-    if (gimple_ctypes.TypeLattice.is_word(field_type)
-            and ginf.mixed_field_read(gen, struct_name, node.member)):
+    if _is_mixed_f:
         gen._word_mark_mixed_field(t)
     # PART 6 (2026-10-22, family C): record a READ of a tagged-Optional
     # field so the boolean-context conversions (_ensure_bool_cond /
@@ -3939,6 +3955,22 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                 and ltype in gimple_ctypes._CONTAINER_KIND_TYPES
                 and _rq in gimple_ctypes._CONTAINER_KIND_TYPES):
             _mixed_word = True
+        # A CONTAINER/STR pointer beside a DIFFERENT pointer kind (`[] and
+        # "never"`, a list selected on one edge and a str on the other): the
+        # join picks one pointer type and the other operand is stored into it
+        # raw, so `print` read the list's memory as a string. Whichever was
+        # selected is a word of unknown kind, answered by the runtime -- the
+        # same reasoning as the two-container rule above.
+        if (not _bool_merge and not _mixed_word
+                and ltype != _rq
+                and gimple_ctypes.TypeLattice.ends_in_star(ltype)
+                and isinstance(_rq, str)
+                and gimple_ctypes.TypeLattice.ends_in_star(_rq)
+                and (ltype in gimple_ctypes._CONTAINER_KIND_TYPES
+                     or _rq in gimple_ctypes._CONTAINER_KIND_TYPES
+                     or gimple_ctypes.TypeLattice.is_cstr(ltype)
+                     or gimple_ctypes.TypeLattice.is_cstr(_rq))):
+            _mixed_word = True
         if _mixed_word:
             res_type = 'int64_t'
         # A BYTES operand against a str or a word (`os.path.split(b'a/b')[0] or
@@ -3988,7 +4020,8 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             # constant, not as a cast of the `_Bool`: a pointer is never made
             # from a 1-bit value (gimple-lint's cast-narrow-int-to-ptr).
             gen._cast_into(result, res_type, '0')
-        elif _lnone and node.op == 'and':
+        elif _lnone and node.op == 'and' \
+                and gimple_ctypes.TypeLattice.is_word(res_type):
             # `None and x`: the left is falsy, so the short-circuit edge IS
             # the answer, and the answer is None.
             gen._copy(result, gen._call_expr('int64_t', 'mojo_box_none', []))
