@@ -13,6 +13,19 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <execinfo.h>
+#include <signal.h>
+#include <unistd.h>
+static void _bm_segv(int sig) {
+    void *_bt[24]; int _n = backtrace(_bt, 24);
+    char _msg[64]; int _m = snprintf(_msg, sizeof(_msg), "BACKTRACE signal=%d\n", sig);
+    (void)!write(2, _msg, _m);
+    backtrace_symbols_fd(_bt, _n, 2);
+    _exit(128 + sig);
+}
+__attribute__((constructor)) static void _bm_install(void) {
+    signal(SIGSEGV, _bm_segv); signal(SIGBUS, _bm_segv); signal(SIGABRT, _bm_segv);
+}
 #include <fnmatch.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -11719,6 +11732,14 @@ char *mojo_repr_slot_kind(char kind, int64_t v)
          * variable", and its NULL is how this runtime spells Optional[str]'s
          * None. repr of a NULL char * would otherwise be read as a string. */
         if (!v) return strdup("None");
+        /* A kinds row can outlive the value it described -- a list literal
+         * re-stored through an int slot, or a uniform 'p' annotation put on
+         * a mixed list -- so a slot named 'p' may hold a small integer or a
+         * tagged BOX rather than a char *. Reading that as a char * is a
+         * wild pointer (containers/09, /30 and funcs/32 all died in
+         * strlen here). Answer by the word's own kind instead. */
+        if (mojo_is_boxed(v)) return mojo_repr_boxed(v);
+        if ((uint64_t)v < 0x10000ULL) return mojo_repr_int(v);
         return mojo_repr_str((char *)(intptr_t)v);
     case MOJO_KIND_BYTES:
         return mojo_bytes_repr((MojoBytes *)(intptr_t)v);

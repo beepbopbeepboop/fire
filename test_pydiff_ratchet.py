@@ -34,6 +34,8 @@ NO_CRASH = [
     'params/40_dispatch_table_of_defs.py',
     'containers/11_in_list_needles.py',
     'containers/05_mixed_list.py',
+    'containers/09_list_remove_index_count.py',
+    'funcs/32_recursion_accumulator.py',
 ]
 
 
