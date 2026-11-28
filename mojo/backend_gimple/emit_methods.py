@@ -9705,6 +9705,17 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
                  or _as_str(mangled) in getattr(gen, '_ret_may_hold_mixed', ())):
         gen._word_mark_boxed(t)
         gen._word_mark_tagged(t)
+    # H2/rule 1: a REFS-ONLY return slot (the method's defining unit decided
+    # every non-None return value is a reference). The bare 0 IS None, so
+    # print/str spell it by the runtime's word-or-None rule. The bare key is
+    # an in-file method's; the qualified one an imported method's published
+    # signature (see `_imported_refs_ret_syms`).
+    if gimple_ctypes.TypeLattice.is_word(ret_type) \
+            and (_as_str(struct_name) + '_' + _as_str(method)
+                 in getattr(gen, '_ret_refs_names', ())
+                 or _as_str(mangled) in getattr(gen, '_ret_refs_names', ())
+                 or _as_str(mangled) in getattr(gen, '_imported_refs_ret_syms', ())):
+        gen._word_mark_refs_none(t)
     if _mret_api is not None:
         gen._generator_var_api[t] = _mret_api
         gen._actual_types[t] = 'MojoGenerator *'

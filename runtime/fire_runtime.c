@@ -16655,6 +16655,18 @@ char *mojo_str_word_fresh(int64_t v)
     return d;
 }
 
+/* `str(v)` for a REFS-ONLY word (stage 5c DECISION rule 1): the slot's
+ * non-`None` values are all references, so the bare zero IS `None` (a live
+ * reference is never NULL). A per-file compile can leave such a field at the
+ * `int64_t` default when its only evidence is an importer's call sites, and
+ * `mojo_cstr_or_int_str` spells that zero `0`. Returns a FRESH heap string the
+ * caller owns (the same contract as `mojo_str_word_fresh`). */
+char *mojo_word_str_or_none(int64_t v)
+{
+    if (v == 0) return strdup("None");
+    return mojo_str_word_fresh(v);
+}
+
 /* The dict-STORE twin of `mojo_cstr_or_int_release`: the SAME ownership
  * protocol — a borrowed boxed string is left alone, a content key is freed
  * outright, everything else is a block from `_int_str_block` (int decimals,

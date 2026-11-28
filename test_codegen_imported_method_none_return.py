@@ -38,6 +38,7 @@ sys.path.insert(0, HERE)
 
 from build_config import find_gcc  # noqa: E402
 from build_stdlib_dylib import compile_module_to_c  # noqa: E402
+import mojo.middle.cross_module as cross_module  # noqa: E402
 from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S  # noqa: E402
 
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
@@ -81,14 +82,12 @@ CASES = {
         'main()\n',
         'None\nTrue\nTrue\n1\n2\nhi\nTrue\nTrue\nNone\nTrue\n',
     ),
-    # The refs-only slot stays rule 3 in the defining unit (its scalar
-    # evidence would have to come from a third module), so its word is the
-    # bare 0 and the None test is the word compare: `is None` is True and
-    # `== "x"` is True, exactly as CPython answers. This case exists so the
-    # mixed-return marking cannot over-reach onto a plain word return; the
-    # unset value's PRINT is not asserted because spelling that 0 as `None`
-    # needs the cross-module call-site evidence, which is a separate scheme
-    # (the doc's H2), not this fix.
+    # The refs-only slot (rule 1): its non-None stores are all references, so
+    # the bare 0 IS None. H2's pre-pass publishes `put("x")` to the defining
+    # unit (the field's class becomes 'refs') and the defining unit publishes
+    # `get`'s `ret_class: refs` back, so the importer spells the unset value
+    # `None` and the stored one `x`. Also pins that the mixed marking did not
+    # over-reach onto a plain word return.
     'refs_only_field_return': (
         'class Label:\n'
         '    def __init__(self):\n'
@@ -103,15 +102,17 @@ CASES = {
         '\n'
         'def main():\n'
         '    a = Label()\n'
+        '    print(a.get())\n'
         '    print(a.get() is None)\n'
         '    a.put("x")\n'
         '    print(a.get())\n'
         '    print(a.get() == "x")\n'
         '    a.clear()\n'
         '    print(a.get() is None)\n'
+        '    print(a.get())\n'
         '\n'
         'main()\n',
-        'True\nx\nTrue\nTrue\n',
+        'None\nTrue\nx\nTrue\nTrue\nNone\n',
     ),
 }
 
@@ -141,10 +142,21 @@ def _run_case(name: str, helper_src: str, main_src: str, want: str) -> None:
         # Oracle: the fixture itself must be a valid program.
         assert _cpython_stdout(td, main_path) == want, f'[{name}] fixture'
 
+        # H2's pre-pass: publish BOTH modules' calls to the other's callees
+        # before either compiles (the whole-closure evidence pass), exactly as
+        # `build_stdlib_dylib.build` does in the parent process.
+        cross_module.reset()
+        cross_module.scan_module_calls(helper_src, 'helper')
+        cross_module.scan_module_calls(main_src, 'main')
+
         objs = []
         for module, src, path in (('helper', helper_src, helper_path),
                                   ('main', main_src, main_path)):
-            c_text = compile_module_to_c(src, path, module)
+            # H2: the definer's first compile publishes its signatures, and
+            # the importer (compiled second) consumes them. Opt-in so a
+            # many-independent-modules process cannot leak between units.
+            c_text = compile_module_to_c(src, path, module,
+                                         publish_signatures=True)
             assert c_text.strip(), f'[{name}] compile_module_to_c({module}) empty'
             c_file = os.path.join(td, module + '.gen.c')
             with open(c_file, 'w') as f:

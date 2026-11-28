@@ -409,8 +409,84 @@ class _DylibGeneratedCppError(RuntimeError):
     path); the root cause is that the C++20 definitions had no link line."""
 
 
+def _publish_cross_module_signatures(gen, stmts, module_name: str) -> None:
+    """Publish this unit's method/function C signatures + return value class.
+
+    The importer's module text scan cannot see the defining unit's decisions:
+    an unannotated `def get(self): return self.s` scans as `int64_t`, so a
+    refs-only field's None arrives there as a word and prints `0`. Publishing
+    the DEFINITION's own answer (its C types, and `ret_class` for the
+    refs-only/mixed word classes that have no distinct C type) is the H2
+    half that makes the importer agree with what was emitted.
+
+    `ret_class`: 'mixed' when the return slot is the tagged word
+    (`_mixed_return_bodies`), 'refs' when an arm reads a refs-only field
+    (`field_value_class`), '' otherwise. Only methods are published; an
+    imported struct's methods are the per-file shape that needs it.
+    """
+    import mojo.middle.cross_module as _xm
+    import mojo.middle.types as _N
+    import mojo.backend_gimple.emit_infra as _ein
+    sigs: dict = {}
+
+    import mojo.middle.exprtypes as _ex
+
+    def _ret_class(sname, body) -> str:
+        try:
+            if body is not None and _ex._nid(body) in gen._mixed_return_bodies:
+                return 'mixed'
+        except Exception:
+            pass
+        try:
+            _acc: list = []
+            _arms: list = []
+            gen._collect_return_types(body, _acc, _arms)
+        except Exception:
+            return ''
+        for _a in _arms or ():
+            if (isinstance(_a, _N.MemberExpr)
+                    and isinstance(_a.obj, _N.IdentExpr)
+                    and _a.obj.name == 'self'):
+                try:
+                    if _ein.field_value_class(gen, sname, _a.member, 0) == 'refs':
+                        return 'refs'
+                except Exception:
+                    pass
+        return ''
+
+    for s in (stmts or []):
+        if isinstance(s, _N.StructDef):
+            _sname = s.name
+            _seen: dict = {}
+            for m in (s.methods or []):
+                if isinstance(m, _N.FunctionDef):
+                    _seen.setdefault(m.name, []).append(m)
+            for _mn in _seen:
+                if len(_seen[_mn]) != 1:
+                    continue        # an overload set: the bare key is ambiguous
+                _m = _seen[_mn][0]
+                _bare = _sname + '_' + _mn
+                _ret = gen.func_return_types.get(_bare)
+                _par = gen.func_param_types.get(_bare)
+                if not _ret or _par is None:
+                    continue
+                sigs[_sname + '.' + _mn] = {
+                    'ret': _ret, 'params': list(_par),
+                    'ret_class': _ret_class(_sname, _m.body),
+                }
+        elif isinstance(s, _N.FunctionDef):
+            _ret = gen.func_return_types.get(s.name)
+            _par = gen.func_param_types.get(s.name)
+            if _ret and _par is not None:
+                sigs[s.name] = {'ret': _ret, 'params': list(_par),
+                                'ret_class': _ret_class(None, s.body)}
+    if sigs:
+        _xm.publish_signatures(module_name, sigs)
+
+
 def compile_module_to_c(src: str, path: str, module_name: str,
-                        linkable: bool = True, no_mangle: tuple = ()) -> str:
+                        linkable: bool = True, no_mangle: tuple = (),
+                        publish_signatures: bool = False) -> str:
     """Compile one library module to GIMPLE C with no main/entry points.
 
     `no_mangle`: free-function names whose C symbol is emitted EXACTLY as
@@ -455,7 +531,22 @@ def compile_module_to_c(src: str, path: str, module_name: str,
             # lowered with T erased to int64_t (bug:CODEGEN_local_generic_
             # float_literal_arg_erases_to_int64).
             gen._source_text = src
-            box['c'] = gen.gen_module(Parser(py_tokenize(src)).parse_module())
+            _stmts = Parser(py_tokenize(src)).parse_module()
+            box['c'] = gen.gen_module(_stmts)
+            # H2: publish what THIS unit actually emitted, for an importer's
+            # extern/signature and for the refs-only word class (below).
+            if publish_signatures:
+                # OFF by default: a process that compiles many INDEPENDENT
+                # modules (compile_stdlib) would otherwise leak one module's
+                # signatures into the next one's import scan, and two files
+                # sharing a basename (`utils`, `__init__`) would collide. The
+                # H2 pre-release path (the two-unit fixture, and any caller
+                # that compiles a definer and its importer in one process)
+                # opts in explicitly.
+                try:
+                    _publish_cross_module_signatures(gen, _stmts, module_name)
+                except Exception:
+                    pass
             box['degraded'] = list(gen._generic_struct_elaboration_failures)
             box['csyms'] = {k: sorted(v) for k, v in (getattr(gen, '_func_csym_record', None) or {}).items()}
             box['cpp'] = getattr(gen, 'generated_cpp', '')
@@ -1303,7 +1394,7 @@ def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str,
 
 def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tuple = _OBJ_FLAGS,
                          known_structs: frozenset = frozenset(), dep_fingerprint: str = '',
-                         instances: dict = None):
+                         instances: dict = None, cross_snapshot: dict = None):
     """Per-module independent work (source → object): read, collect exports,
     compile (cache-or-build). Each module is fully independent — no shared
     state — so this parallelizes across processes the same way
@@ -1334,6 +1425,16 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
     caller's own symbol rather than qualified and re-suffixed here. Their
     exports are deliberately not advertised: the reflection table describes
     the module's declarations, and these exist only to satisfy references."""
+    if cross_snapshot:
+        # H2: this worker process starts with an empty registry; the parent's
+        # whole-closure pre-pass handed it the call-site evidence so THIS
+        # module (the definer) can classify its own parameters from an
+        # IMPORTER's call sites.
+        try:
+            import mojo.middle.cross_module as _xm_cross
+            _xm_cross.seed(cross_snapshot)
+        except Exception:
+            pass
     gcc = find_gcc()
     name = _module_name_for(path)
     src = open(path).read()
@@ -1593,6 +1694,27 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
                 pass
         known_structs = frozenset(known_structs)
 
+        # H2 (stage 5c): a whole-closure PRE-PASS over every module's calls to
+        # OTHER modules' callees, published in this (parent) process and
+        # handed to each worker. A per-file compile otherwise sees only its
+        # own call sites, so an unannotated parameter an importer passes a
+        # string to is rule-3 silence in the defining unit and its field
+        # keeps the bare word (`print(None)` -> `0`). See
+        # `mojo.middle.cross_module`.
+        cross_snapshot = None
+        try:
+            import mojo.middle.cross_module as _xm_build
+            _xm_build.reset()
+            for _xpath in modules:
+                try:
+                    _xm_build.scan_module_calls(open(_xpath).read(),
+                                                _module_name_for(_xpath))
+                except Exception:
+                    continue
+            cross_snapshot = _xm_build.snapshot()
+        except Exception:
+            cross_snapshot = None
+
         # Per-module transitive local-dependency fingerprint (BUG-2026-032): index
         # every module in this build under each spelling it might be imported as,
         # then fold the content hash of each module's reachable local-import
@@ -1629,7 +1751,8 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
                     _compile_module_job, modules,
                     [workdir] * len(modules), [use_cache] * len(modules),
                     [objflags] * len(modules), [known_structs] * len(modules),
-                    [dep_fps[p] for p in modules]))
+                    [dep_fps[p] for p in modules],
+                    [None] * len(modules), [cross_snapshot] * len(modules)))
             # Merge each job's own CAS hit/miss into this process's cas.stats —
             # see _compile_module_job's docstring on why worker-process stats
             # don't propagate on their own. Only needed here: the jobs<=1 path
@@ -1643,7 +1766,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
                     cas.stats['misses'] += 1
         else:
             results = [_compile_module_job(path, workdir, use_cache, objflags, known_structs,
-                                           dep_fps[path])
+                                           dep_fps[path], cross_snapshot=cross_snapshot)
                        for path in modules]
 
         # Cross-module generic FREE FUNCTION instances (bug:CODEGEN_stdlib_
@@ -1674,7 +1797,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
                 _inst = instance_jobs[_ipath]
                 _ires = _compile_module_job(
                     _ipath, workdir, use_cache, objflags, known_structs,
-                    dep_fps[_ipath], _inst)
+                    dep_fps[_ipath], _inst, cross_snapshot)
                 if _ires[4] is not None:
                     print("  instances for %s: not emitted (%s)"
                           % (os.path.basename(_ipath), _ires[4]), file=sys.stderr)
@@ -2261,7 +2384,7 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
         `_X`, and `reflect.export_csym` resolved the entry to some OTHER
         symbol. Nothing is missing; the shared export-csym rule is computing
         a Mojo overload-mangled name for a C prototype. This is a real,
-        currently-live defect measured on this tree: of `fire_runtime.h`'s 898
+        currently-live defect measured on this tree: of `fire_runtime.h`'s 899
         entry points, only a handful survive `build_stdlib()`'s `nm`
         cross-check, and the rest are dropped for exactly this reason. So the
         stdlib dylib has never advertised most of the runtime entry points it

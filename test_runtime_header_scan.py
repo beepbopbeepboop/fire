@@ -743,7 +743,14 @@ def test_every_declaration_is_seen():
     # a tagged word (`None == 0` False, `0.0 == 0` True, a str box by
     # content). Box 548 -> 549, word stays 459; total 1007 -> 1008. `--fix`
     # wrote this rung's figure and every quoted one from the same scan.
-    for header, want in (('fire_runtime.h', 898),   # --fix writes the live figure
+    # 898 -> 899 (2026-11-28, H2 refs-only print): ONE name,
+    # `mojo_word_str_or_none` (`int64_t` in, `char *` out) — a refs-only word's
+    # `print` where the bare 0 IS None (stage 5c rule 1). Both the parameter
+    # and the pointer RETURN are one 64-bit word by the live rule, so word
+    # 460 -> 461, box stays 548; total 1008 -> 1009. `--fix` wrote the quoted
+    # figures (FORMAL.md, formal/build.py, formal/model/builtins.py) from this
+    # scan.
+    for header, want in (('fire_runtime.h', 899),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already

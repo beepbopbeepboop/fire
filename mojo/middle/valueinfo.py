@@ -62,6 +62,11 @@ FLAG_BIND_BOX = 8
 # to the kind (the read is a Box); `carry` does not move it, so only the field
 # read itself answers an identity test by the box's kind.
 FLAG_MIXED_FIELD = 16
+# A word read from a REFS-ONLY slot (stage 5c rule 1: its non-None values are
+# all references, so the bare 0 IS None). Unlike the mixed field above the word
+# keeps its integer C type; only the SPELLING differs (`print`/`str` must say
+# `None` for 0). `carry` moves it — every copy of the value is the same word.
+FLAG_REFS_NONE = 32
 
 
 class ValueInfo:
@@ -223,6 +228,8 @@ class WordFacts:
             _d.flags = _d.flags | FLAG_SLOT_KINDS
         if (_s.flags & FLAG_BOXED_CONTAINER) != 0:
             _d.flags = _d.flags | FLAG_BOXED_CONTAINER
+        if (_s.flags & FLAG_REFS_NONE) != 0:
+            _d.flags = _d.flags | FLAG_REFS_NONE
 
     # ── save / restore across a nested body ──────────────────────────────
     def snapshot(self) -> dict:
@@ -335,6 +342,14 @@ class WordFacts:
         _rec = self._info(name, True)
         _rec.kind = KIND_BOX
         _rec.flags = _rec.flags | FLAG_MIXED_FIELD
+
+    def mark_refs_none(self, name: str) -> None:
+        _rec = self._info(name, True)
+        _rec.flags = _rec.flags | FLAG_REFS_NONE
+
+    def is_refs_none(self, name: str) -> bool:
+        _rec = self._info(name, False)
+        return _rec is not None and (_rec.flags & FLAG_REFS_NONE) != 0
 
     def mark_tagged(self, name: str) -> None:
         _rec = self._info(name, True)

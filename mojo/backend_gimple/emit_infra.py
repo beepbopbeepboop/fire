@@ -3795,6 +3795,13 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             and gimple_ctypes.TypeLattice.is_int_word(_as_str(ret_type))
             and _as_str(fname) in (getattr(gen, '_imported_mixed_ret_syms', None) or ())):
         gen._word_mark_mixed_field(result_var)
+    # H2: an imported method whose defining unit published a REFS-ONLY return
+    # (`ret_class == 'refs'`): the word is a reference or the bare 0 that means
+    # None (rule 1), so print/str spell it by the runtime's word-or-None rule.
+    if (result_var
+            and gimple_ctypes.TypeLattice.is_int_word(_as_str(ret_type))
+            and _as_str(fname) in (getattr(gen, '_imported_refs_ret_syms', None) or ())):
+        gen._word_mark_refs_none(result_var)
     for _lv, _bv, _le in _pending_list_unpacks:
         build.if_block(gen, _bv)
         build.call_void(gen, _list_unpack_name(_le), [_lv, _bv, '-1'], True, 4)
@@ -5709,10 +5716,15 @@ def collect_param_value_obs(gen, all_functions: list, all_structs: list,
     defs: dict = {}
     pnames: dict = {}
     allnames: dict = {}
+    # `<callee>` -> (struct, method) for a method's analysis key, None for a
+    # free function: the cross-module registry below is keyed by the
+    # qualified `<module>.<Class>.<method>` spelling.
+    owner_of: dict = {}
     for fn in all_functions:
         if isinstance(fn, gimple_ctypes.FunctionDef):
             k = _as_str(fn.name)
             defs[k] = fn
+            owner_of[k] = None
             names: list = []
             for p in (fn.params or []):
                 n = _as_str(p[0])
@@ -5727,6 +5739,7 @@ def collect_param_value_obs(gen, all_functions: list, all_structs: list,
         for m in (st.methods or []):
             k = sname + '_' + _as_str(m.name)
             defs[k] = m
+            owner_of[k] = (sname, _as_str(m.name))
             pnames[k] = _pv_method_params(m)
     for k in pnames:
         allnames[k] = set(pnames[k])
@@ -5796,6 +5809,48 @@ def collect_param_value_obs(gen, all_functions: list, all_structs: list,
         gen._param_value_obs = table
         if same:
             break
+    # H2: the call-site kinds OTHER modules published for this module's
+    # callees (mojo.middle.cross_module, filled by the build's pre-pass). A
+    # per-file compile sees only its own calls, so an unannotated parameter
+    # that an importer passes a string to would be rule 3 silence here. The
+    # local table stays authoritative for a parameter it observed — this only
+    # ADDS the published kinds (an OR of the refs/scalar bits), so a
+    # contradiction between the two makes the slot `mixed` (an honest
+    # "more than one kind") rather than silently picking one side.
+    try:
+        import mojo.middle.cross_module as _xm
+    except Exception:
+        _xm = None
+    _mod = _as_str(getattr(gen, 'module_name', '') or '')
+    if _xm is not None and _mod:
+        _pub_tbl = dict(gen._param_value_obs or {})
+        _changed = False
+        for _k in pnames:
+            _own = owner_of.get(_k)
+            if _own:
+                _qk = _mod + '.' + _as_str(_own[0]) + '.' + _as_str(_own[1])
+            else:
+                _qk = _mod + '.' + _as_str(_k)
+            _pub = _xm.call_kinds(_qk)
+            if not _pub:
+                continue
+            for _i in range(len(pnames[_k])):
+                _pn = _as_str(pnames[_k][_i])
+                _ks = _pub.get('#%d' % _i) or _pub.get(_pn)
+                if not _ks:
+                    continue
+                _bits = 0
+                for _kind in _ks:
+                    if _kind == 'p' or _kind == 'w':
+                        _bits = _bits | _PV_REFS
+                    elif _kind == 'i' or _kind == 'b' or _kind == 'd':
+                        _bits = _bits | _PV_SCALAR
+                if _bits:
+                    _pk = param_value_key(_k, _pn)
+                    _pub_tbl[_pk] = _as_int(_pub_tbl.get(_pk, 0)) | _bits
+                    _changed = True
+        if _changed:
+            gen._param_value_obs = _pub_tbl
     # The literal-kind half, independent of the refs/scalar classification:
     # a parameter receiving `None` / `True` / `False` at any call site must be
     # the tagged word even when its non-None values are one consistent scalar
@@ -7557,6 +7612,10 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
             and gimple_exprtypes.is_python_bool_expr(gen, enode):
         return gen._call_expr('char *', 'mojo_bool_to_str',
                               [('int', gen._cast('int', ev))])
+    # A REFS-ONLY word (stage 5c rule 1): its bare 0 IS None, so `str()` /
+    # `f'{x}'` / `'%s' % x` must spell it None like `print` does.
+    if gimple_ctypes.TypeLattice.is_int_word(et) and gen._word_is_refs_none(ev):
+        return gen._call_expr('char *', 'mojo_word_str_or_none', [('int64_t', ev)])
     # A container/scalar name (`mixed_value_locals`) is a box-holding word
     # whose kind changes with each store: the static `_actual_types` retyping
     # below would read the bare int of the LAST store through the container
@@ -10623,6 +10682,17 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._copy(_res, f"{_s}")
             gen._emit_label(bb_done)
             resolved_parts.append(('char *', _res))
+            continue
+        if (gimple_ctypes.TypeLattice.is_int_word(atype)
+                and gen._word_is_refs_none(aval)):
+            # A refs-only word: the bare 0 IS None (stage 5c rule 1), so the
+            # generic int spelling would print `0` where CPython prints
+            # `None`. `mojo_word_str_or_none` returns a FRESH heap string
+            # (release it with the repr walkers' plain `free`).
+            _rn = gen._call_expr('char *', 'mojo_word_str_or_none',
+                                 [('int64_t', aval)])
+            resolved_parts.append(('char *', _rn))
+            _owned_reprs.append(_rn)
             continue
         if gimple_ctypes.TypeLattice.is_int_word(atype):
             _arg_node = args[_pi] if _pi < len(args) else None

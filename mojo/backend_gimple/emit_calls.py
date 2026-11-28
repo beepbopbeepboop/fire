@@ -13010,6 +13010,11 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         gen._word_mark_boxed(t)
         gen._word_mark_tagged(t)
         return ret_type, t
+    if (gimple_ctypes.TypeLattice.is_int_word(_as_str(ret_type))
+            and fname_raw in getattr(gen, '_ret_refs_names', ())):
+        # A refs-only return slot (stage 5c rule 1): the bare 0 IS None.
+        gen._word_mark_refs_none(t)
+        return ret_type, t
     # A multi-value return's per-slot types, carried across the call (see
     # gen._return_slot_types's declaration). Same reason and same shape as
     # the `_return_elem_types` block just below: the callee's slot types are

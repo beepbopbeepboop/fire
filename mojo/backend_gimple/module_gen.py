@@ -15126,6 +15126,13 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
     if _names is None:
         _names = set()
         self._ret_may_hold_mixed = _names
+    # REFS-ONLY return slots (rule 1): the word is a reference or the bare 0
+    # that IS None, so a call site marks the result and print/str spell it by
+    # the runtime's word-or-None rule. Filled by `_one` below.
+    _refs = getattr(self, '_ret_refs_names', None)
+    if _refs is None:
+        _refs = set()
+        self._ret_refs_names = _refs
 
     def _arm_is_scalar(v, key, owner, body=None) -> bool:
         _avc = _rbn_ein.value_class_of(self, v, key, owner, 0)
@@ -15227,6 +15234,7 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
             return
         _has_none = False
         _has_scalar = False
+        _has_refs = False
         for _i in range(len(arms)):
             _v = arms[_i]
             if _v is None or isinstance(_v, NoneLiteral) or (
@@ -15243,6 +15251,20 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
                 _has_none = True
                 _has_scalar = True
                 continue
+            # A REFS-ONLY field read (`return self.s`) is rule 1's word: its
+            # 0 is None, its other values are references. Recorded separately
+            # from the mixed/tagged slot — the C type stays the word, only
+            # the spelling (and `is None`) differs.
+            if (owner and isinstance(_v, MemberExpr)
+                    and isinstance(_v.obj, IdentExpr)
+                    and _as_str(_v.obj.name) == 'self'):
+                try:
+                    if _rbn_ein.field_value_class(
+                            self, _as_str(owner), _as_str(_v.member), 0) == 'refs':
+                        _has_refs = True
+                        continue
+                except Exception:
+                    pass
             # A return arm that IS a box-holding slot (a mixed field read,
             # `return self.s`) already carries the scalar-and-None
             # representation: the field's own decision is the return slot's
@@ -15281,6 +15303,8 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
             # path.
             _mixed.add(gimple_exprtypes._nid(body))
             _names.add(_as_str(key))
+        elif _has_refs:
+            _refs.add(_as_str(key))
             _boxed = getattr(self, '_ret_boxed_names', None)
             if _boxed is None:
                 _boxed = set()
@@ -17610,6 +17634,37 @@ def gen_module_impl(self, stmts: list):
                     self._imported_mixed_ret_syms = _urw
                 _urw.add(_as_str(mangled))
                 _urw.add(_as_str(bare_mangled))
+            # H2: the DEFINING unit's published signature + return value
+            # class (see build_stdlib_dylib._publish_cross_module_signatures).
+            # The text scan below cannot see an unannotated method's real
+            # return type or its refs-only/mixed word class, so an importer's
+            # extern would re-guess `int64_t` and print a refs-only None as
+            # `0`. A published row wins because it IS what the definition
+            # emitted; with no row (a module compiled in another order or not
+            # at all) today's scan result stands.
+            _xhome = _as_str((getattr(self, '_imported_struct_home', None) or {}).get(s.name) or '')
+            if _xhome:
+                try:
+                    import mojo.middle.cross_module as _xm2
+                    _xsig = _xm2.signatures(_xhome).get(
+                        _as_str(s.name) + '.' + _as_str(m.name))
+                except Exception:
+                    _xsig = None
+                if _xsig:
+                    _xret = _as_str(_xsig.get('ret'))
+                    _xpar = _xsig.get('params')
+                    if _xret and isinstance(_xpar, (list, tuple)) \
+                            and len(_xpar) == len(param_ctypes):
+                        ret_type = _xret
+                        param_ctypes = [_as_str(_x) for _x in _xpar]
+                    if (_as_str(_xsig.get('ret_class')) == 'refs'
+                            and gimple_ctypes.TypeLattice.is_int_word(_as_str(ret_type))):
+                        _xrr = getattr(self, '_imported_refs_ret_syms', None)
+                        if _xrr is None:
+                            _xrr = set()
+                            self._imported_refs_ret_syms = _xrr
+                        _xrr.add(_as_str(mangled))
+                        _xrr.add(_as_str(bare_mangled))
             if any('...' in p for p in param_ctypes):
                 params_str = '...'
             else:

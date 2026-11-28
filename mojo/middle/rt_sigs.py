@@ -979,6 +979,7 @@ RT_SIGS: dict[str, list[str]] = {
     'mojo_str_to_float': ['double', 'MojoStr *'],
     'mojo_str_to_int': ['int64_t', 'MojoStr *'],
     'mojo_str_word_fresh': ['char *', 'int64_t'],
+    'mojo_word_str_or_none': ['char *', 'int64_t'],
     'mojo_str_zfill': ['char *', 'char *', 'int64_t'],
     'mojo_stream_write': ['void', 'int64_t', 'char *'],
     'mojo_strlen': ['int64_t', 'char *'],

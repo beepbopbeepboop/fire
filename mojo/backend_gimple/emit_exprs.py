@@ -1836,6 +1836,29 @@ def _lme_struct_field(gen, node, field_map, op: str, ov, struct_name: str) -> tu
     _mark_boxed_field_read(gen, struct_name, node.member, field_type, t)
     if _is_mixed_f:
         gen._word_mark_mixed_field(t)
+    elif gimple_ctypes.TypeLattice.is_word(field_type):
+        # Stage 5c rule 1: a REFS-ONLY field (every non-None store is a
+        # reference) that ended up at the `int64_t` default still represents
+        # None as the bare 0 — a live reference is never NULL. Mark the read
+        # so print spells that 0 as None instead of the integer; the C type
+        # and every other reader stay exactly as they were. Memoized per
+        # (struct, field): `field_value_class` walks the struct's stores, and
+        # this runs on every word-typed member read.
+        _rc = getattr(gen, '_pv_refs_field_cache', None)
+        if _rc is None:
+            _rc = {}
+            gen._pv_refs_field_cache = _rc
+        _rk = _as_str(struct_name) + '\x1f' + _as_str(node.member)
+        # A PRESENCE test, not `.get(...) is None`: on the self-hosted path a
+        # `.get` miss is the boxed None word, not None (see the port notes).
+        if _rk in _rc:
+            _is_refs = _rc[_rk]
+        else:
+            _is_refs = 1 if ginf.field_value_class(
+                gen, struct_name, _as_str(node.member), 0) == 'refs' else 0
+            _rc[_rk] = _is_refs
+        if _is_refs:
+            gen._word_mark_refs_none(t)
     # PART 6 (2026-10-22, family C): record a READ of a tagged-Optional
     # field so the boolean-context conversions (_ensure_bool_cond /
     # `not`) consult the is_some side-band instead of the raw word.

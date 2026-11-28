@@ -961,3 +961,71 @@ census refresh `f88dc70a0`): `test_gimple_runner.py` **688 passed, 0 failed**;
 header scan 84/84 (its FORMAL.md quote was refreshed 868 -> 869 after the
 other lane's runtime change). The owner's `make bootstrap` remains the
 acceptance check for the compiled path this port touches.
+
+## Status 2026-11-28 (H2: cross-module call-site evidence + the refs-only None spelling)
+
+Implements H2 of the guide above. The per-file refs-only case — a field whose
+only `None` is written in the defining unit and whose non-`None` values are a
+string an IMPORTER passes — now prints `None` and the string, exactly as
+CPython.
+
+**The channel.** New `mojo/middle/cross_module.py`: a serializable registry of
+(a) call-site argument kinds keyed `<module>.<Class>.<method>` (or
+`<module>.<func>`), parameter keyed `#<position>` or the keyword name, in
+`coro`'s kind alphabet; and (b) per-module signatures (`ret` C type, `params`,
+and a `ret_class` of `'refs'` / `'mixed'`). `scan_module_calls(src, module)`
+is the whole-closure pre-pass; `snapshot()`/`seed()` carry it across
+`ProcessPoolExecutor` workers. `build_stdlib_dylib.build` scans every module's
+source in the parent before dispatching jobs and hands the snapshot to each
+job (seeded at job start); `compile_module_to_c` publishes the unit's
+signatures — including `ret_class`, read off `_mixed_return_bodies` and
+`field_value_class` — after a successful compile.
+
+**Definer side.** `emit_infra.collect_param_value_obs` ORs the published kinds
+into `_param_value_obs`, so `field_value_class`/`mixed_field_names` see an
+importer's `put("x")` as `'refs'`; no C type changes (the field is still the
+`int64_t` word). The read of a refs-only field is then marked
+`FLAG_REFS_NONE` (`valueinfo`, `emit_exprs._lower_MemberExpr`, memoized per
+struct/field) and every string spelling — `print`, `str()`, f-strings,
+`'%s' %` (`emit_infra._gen_print` and `_stringify_value`) — routes it through
+`mojo_word_str_or_none`: a new runtime helper (`0` → `"None"`, otherwise
+`mojo_str_word_fresh`). Rule 1 already stored the None as the bare 0; only
+the spelling was wrong. A METHOD whose return arm is a refs-only field is
+recorded in `_ret_refs_names` (`_gmp_collect_boxed_return_names`) and its
+call result marked at the method-call site, so the in-module
+`c.get()` gets the same spelling as the field read itself.
+
+**Importer side.** The imported-struct-method extern loop reads the
+definition's published signature (overriding `ret`/`params` when the arity
+lines up) and records word-returning `ret_class == 'refs'` symbols in
+`_imported_refs_ret_syms`; the method-call site marks the result
+`_word_mark_refs_none`, so the importing unit's spellings say `None` and a
+stored string prints as itself. Signature publication is **opt-in**
+(`compile_module_to_c(..., publish_signatures=True)`), because a process that
+compiles many INDEPENDENT modules (the stdlib sweep) must not leak one unit's
+signatures into the next one's import scan — two files sharing a basename
+(`utils`, `__init__`) would otherwise collide. The build's workers receive
+the call-kind evidence (snapshot) but publish no signatures, so a parallel
+dylib build gets the definer half and its importers keep today's text-scan
+fallback; `jobs=1`/the two-unit path get both.
+
+**Acceptance.** `test_codegen_imported_method_none_return.py`'s refs-only
+fixture now runs the pre-pass over BOTH sources before either compiles and
+asserts the full CPython output (`None/True/x/True/True/None`); it passes.
+The in-module reduction (`class Label` + `put("x")`, no second module) is OK
+under `pydiff` too. Runtime census: +1 declaration (`mojo_word_str_or_none`:
+header 898 → 899, word 460 → 461, total 1008 → 1009); `test_runtime_header_scan --fix`
+refreshed the quoted figures in `FORMAL.md`, `formal/build.py` and
+`formal/model/builtins.py`, and the scan is 84/84 again.
+
+**Tallies on the shared working tree** (the other lane's corpus work is present
+too, so the deltas from the last committed baseline are not all H2's):
+corpus 287 programs — OK **162**, WRONG 107, CRASH 14, ERROR 2, GCC 2,
+REFUSED 0 (last committed baseline: OK 160 / WRONG 105 / CRASH 15 / REFUSED 3;
+the WRONG and CRASH lists are byte-identical across the two H2 runs, so the
+H2 edits themselves moved no corpus program). `compile_stdlib.py -j 8`:
+610 passed, 0 failed (0 expected, 0 unexpected). `test_gimple_runner.py`:
+**688 passed, 0 failed**. `test_pydiff_ratchet.py`: the list is now 162 programs
+(the other lane's `--update`), 0 failures; `test_runtime_header_scan.py`
+84/84. The owner's `make bootstrap` is still the acceptance for the runtime
+and compiled-path changes.

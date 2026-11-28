@@ -2384,6 +2384,9 @@ void mojo_cstr_or_int_release(int64_t orig, char *s);
 /* `str(v)` for an Int-kinded word: a FRESH heap copy of the conversion, owned
    by the caller (free it once its one use is done). See the .c comment. */
 char *mojo_str_word_fresh(int64_t v);
+/* `str(v)` for a REFS-ONLY word (stage 5c rule 1): 0 IS None, every other word
+   is its own kind's spelling. A FRESH heap copy, owned by the caller. */
+char *mojo_word_str_or_none(int64_t v);
 /* The dict-STORE twin of the release above: same ownership protocol, plus
    the key's SPELLING — a pooled canonical decimal reached the store as an
    INTEGER, so the slot the store just wrote prints its key unquoted, while
