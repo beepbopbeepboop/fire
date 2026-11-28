@@ -13971,8 +13971,22 @@ MojoList *mojo_dict_values(MojoDict *d) {
         if (uk >= 0) mojo_list_set_elem_repr(out, (void *)_dict_val_repr_fn[uk]);
     }
     int64_t *order = mojo_dict_order_indices(d);
-    for (int64_t oi = 0; oi < d->used; oi++)
-        mojo_list_append_int(out, d->slots[order[oi]].val);
+    /* Describe each VALUE slot so a consumer that walks this list with the
+     * string accessor skips ints/None instead of strcmp'ing them. A dict can
+     * hold int, str, float and None values at once; without a row here,
+     * `"" in inventory.values()` handed an int word to mojo_list_contains_str
+     * and died in libc (containers/36). The row is owned by the kinds table,
+     * which stores the pointer without freeing it, like the interned rows. */
+    char *kbuf = d->used > 0 ? (char *)malloc((size_t)d->used + 1) : NULL;
+    for (int64_t oi = 0; oi < d->used; oi++) {
+        int64_t _vi = order[oi];
+        mojo_list_append_int(out, d->slots[_vi].val);
+        if (kbuf) {
+            char _kb = mojo_dict_kind_byte(d->slots[_vi].kind);
+            kbuf[oi] = _kb ? _kb : 'i';
+        }
+    }
+    if (kbuf) { kbuf[d->used] = '\0'; mojo_list_set_kinds(out, kbuf); }
     free(order);
     return out;
 }

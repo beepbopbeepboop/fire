@@ -40,6 +40,7 @@ NO_CRASH = [
     'flow/14_try_else_finally.py',
     'flow/02_and_or_operands.py',
     'flow/34_none_then_list.py',
+    'containers/36_dict_membership_views.py',
 ]
 
 
