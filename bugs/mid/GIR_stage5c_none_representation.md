@@ -493,3 +493,71 @@ added (the `test_type_string_ratchet.py` counts are unchanged).
   correctly (measured with `/tmp/xmod`), but the per-file path cannot link the
   sibling in the test harness, so the limitation is unmeasured there.
 - Owner runs `make bootstrap` as the acceptance check.
+
+## Status 2026-11-27 (pool re-measurement: the None group is down to four)
+
+Grouping the corpus by the first differing line (the doc's own measurement
+recipe, `pydiff --out` + first-difference), the `want=None / got=0` group went
+from **13 programs to 4** across this round:
+
+- fixed by the return-slot pass and its evidence widening:
+  `classes/03`, `10`, `32`, `38`, `41`, `params/09`,
+  `12_return_str_or_none`, `32_implicit_none_return` (only
+  `type(...).__name__` remains), `flow/12_early_return_loop`;
+- fixed by the bool/and-or/format/ternary reads: `strings/13`, `17`,
+  `funcs/30`'s `op_div` line;
+- fixed by the lifted-closure tagged-return channel (next section):
+  `funcs/05_two_stacks_no_sharing` (nested `pop` through
+  `make_stack` -> tuple -> unpack -> call).
+
+The three remaining `None -> 0` programs, each a distinct architectural gap
+rather than the field/parameter/local slot this doc settled:
+
+1. `funcs/07_lambda_in_list.py` — the None line is now right; the remaining
+   diff is that the untyped callable parameters are inferred `char *` from one
+   string call site (`apply_all(ops[:1], "x", "y")`), so `a + b` at the int
+   call site concatenates NULL pointers. The mixed-parameter value-kind gap
+   (rule 3 / the 5b mixed-container refusal), not a `None` representation.
+2. `classes/12_linked_list_nodes.py` — `Node.value` is an untyped constructor
+   parameter chain (`push_front(value)` -> `Node(value, ...)`), the same
+   mixed-parameter gap, not a `None` representation.
+3. `params/31_varargs_sum.py` — a `None` in a `*args` pack: the pack coerces
+   every extra argument to `int64_t` and appends it as an int slot, so the
+   callee reads `args[0]` as 0.
+
+A second rendering gap, `None -> []` (3 programs: `flow/02_and_or_operands`,
+`flow/16_bool_and_or_chain`, `flow/34_none_then_list`): a `None` selected by
+`and`/`or` into a CONTAINER-typed slot is the NULL pointer (rule 1, correct),
+but the list repr helpers render a NULL list as `[]`, not `None`.
+
+None of these is the field/parameter/local slot representation this document
+is about; each is its own modelling project. The owner's `make bootstrap` is
+still the acceptance check for the self-hosted compiler.
+
+## Status 2026-11-27 (the lifted-closure tagged-return channel)
+
+A nested `def`/lambda now gets the same return-slot decision as a module
+function: `_gmp_collect_boxed_return_names` runs over `_all_closures` (after
+`_gmp_discover_closures`) and records the lifted name in `_ret_boxed_names`.
+The callable VALUE created from such a body records the fact
+(`_bound_method_tagged` / `_callable_tagged`); the fact then travels
+
+- through a factory's return (`_return_bound_method_tagged` /
+  `_return_callable_tagged` / `_return_slot_tagged`),
+- through a name binding (`carry_value_info`,
+  `carry_callable_ret_from_call`),
+- through a tuple literal's per-slot flag (`_tuple_slot_tagged`) and the
+  unpack that binds the names,
+- through a container store (`_container_callable_tagged`, recorded by
+  `note_container_callable_ret`) for `ops[3](...)`,
+
+and the three call-through-a-value paths mark the result a tagged word.
+`funcs/05_two_stacks_no_sharing.py` (the nested `pop` returning None or an
+element) goes WRONG -> OK. the list `.append` now asks the ONE box-word
+predicate (`is_box_word_expr`, which includes a dyn word) instead of
+`_word_may_be_box`, so an appended callable result keeps its kind.
+
+Measured: `classes/03`, `10`, `38`, `/tmp/ret2`, `/tmp/ternnone`,
+`/tmp/matrix` stay OK; `test_pydiff_ratchet.py` 139/0. The corpus and
+`test_gimple_runner.py`/`compile_stdlib.py` re-runs are reported with the
+commit.
