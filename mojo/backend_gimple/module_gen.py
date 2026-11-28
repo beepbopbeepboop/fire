@@ -15064,7 +15064,7 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
         _names = set()
         self._ret_may_hold_mixed = _names
 
-    def _arm_is_scalar(v, key, owner) -> bool:
+    def _arm_is_scalar(v, key, owner, body=None) -> bool:
         if _rbn_ein.value_class_of(self, v, key, owner, 0) == 'scalar':
             return True
         # A CALL whose result is the element/value of a container
@@ -15080,6 +15080,40 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
         if isinstance(v, CallExpr) and isinstance(v.func, IdentExpr):
             if _as_str(v.func.name) in ('min', 'max'):
                 return True
+        # A LOCAL bound from a container element (`best = items[0]; return
+        # best`) or a FOR-LOOP target over any iterable (`for w in words:
+        # return w`) is the same value word. The binding is found by a
+        # whole-body walk that does not descend into nested defs.
+        if isinstance(v, IdentExpr) and body is not None:
+            _vn = _as_str(v.name)
+            _bound: list = []
+
+            def _visit(s):
+                if isinstance(s, AssignStmt) \
+                        and isinstance(s.target, IdentExpr) \
+                        and _as_str(s.target.name) == _vn:
+                    _bound.append(s.value)
+                elif isinstance(s, ForStmt):
+                    _tg = s.target
+                    # `ForStmt.target` is the NAME STRING for a simple target
+                    # (`for w in words`), an IdentExpr in some rewritten forms,
+                    # and a list/tuple for `for i, n in ...`.
+                    _tnames: list = []
+                    if isinstance(_tg, (list, tuple)):
+                        for _t in _tg:
+                            _tnames.append(_as_str(_t))
+                    elif isinstance(_tg, IdentExpr):
+                        _tnames.append(_as_str(_tg.name))
+                    else:
+                        _tnames.append(_as_str(_tg))
+                    for _tn in _tnames:
+                        if _tn == _vn:
+                            _bound.append('for')
+                            break
+            _rbn_ein._walk_func_stmts(body, _visit)
+            for _b in _bound:
+                if isinstance(_b, SubscriptExpr) or _b == 'for':
+                    return True
         if not isinstance(v, SubscriptExpr):
             return False
         # A SUBSCRIPT of a container: a `self.<field>` one is asked of the
@@ -15122,7 +15156,7 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
                     and gimple_ctypes.TypeLattice.is_none_type(_as_str(_v.name))):
                 _has_none = True
                 continue
-            if _arm_is_scalar(_v, key, owner):
+            if _arm_is_scalar(_v, key, owner, body):
                 _has_scalar = True
         # Python's fall-off-the-end is `return None`: a proven scalar arm plus
         # a path that can reach the end is the same rule-2 slot as an explicit

@@ -740,6 +740,9 @@ void mojo_str_register(char *s);
 void mojo_struct_tag_register(int64_t tag);
 /* `==` between two words of unknown kind (see the definition). */
 int mojo_word_eq(int64_t a, int64_t b);
+/* `a == b` where at least one side is a tagged word: None equals only None,
+ * a float box compares numerically with an int, a str box by content. */
+int mojo_box_eq(int64_t a, int64_t b);
 int mojo_is_registered_dict(int64_t addr);
 /* Set-shaped sibling of the list/dict registries — see mojo_set_new. */
 int mojo_is_registered_set(int64_t addr);

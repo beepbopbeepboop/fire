@@ -1047,6 +1047,7 @@ RT_SIGS: dict[str, list[str]] = {
     'mojo_word_contains': ['int', 'int64_t', 'int64_t'],
     'mojo_word_cstr_value': ['char *', 'int64_t'],
     'mojo_word_eq': ['int', 'int64_t', 'int64_t'],
+    'mojo_box_eq': ['int', 'int64_t', 'int64_t'],
     'mojo_word_is_none': ['int', 'int64_t'],
     'mojo_word_is_text': ['int', 'int64_t'],
     'mojo_word_slice': ['int64_t', 'int64_t', 'int64_t', 'int64_t'],

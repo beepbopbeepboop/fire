@@ -738,7 +738,12 @@ def test_every_declaration_is_seen():
     # element stops reading as the integer its payload shares bits with. Box
     # 547 -> 548, word stays 459; total 1006 -> 1007. `--fix` wrote this
     # rung's figure and every quoted one from the same scan.
-    for header, want in (('fire_runtime.h', 897),   # --fix writes the live figure
+    # 897 -> 898 (2026-11-27, the stage 5c equality read): ONE name,
+    # `mojo_box_eq` (`int64_t`, `int64_t` in, `int` out) — `==` where a side is
+    # a tagged word (`None == 0` False, `0.0 == 0` True, a str box by
+    # content). Box 548 -> 549, word stays 459; total 1007 -> 1008. `--fix`
+    # wrote this rung's figure and every quoted one from the same scan.
+    for header, want in (('fire_runtime.h', 898),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already

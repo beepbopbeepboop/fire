@@ -5059,6 +5059,28 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         _arm_r = _lbt_boxed_none_compare(gen, op, left_node, lt, lv, right_node, rt, rv)
         if _arm_r is not None:
             return _arm_r
+    # `a == b` where a side is a TAGGED WORD and neither side is a `None`
+    # literal: the box's own kind decides the value equality (`None == 0` is
+    # False, `0.0 == 0` is True, a str box compares by content). The generic
+    # operand conversion below unwraps with `mojo_box_word`, which flattens the
+    # None box to 0 and keeps a double box as its address, so both answers
+    # were wrong (measured: `contains_zero` in
+    # flow/12_early_return_loop.py over `[None, 1]` and `[1, 0.0, 2]`).
+    if (op in ('==', '!=')
+            and (gimple_ctypes.TypeLattice.is_word(lt)
+                 or gimple_ctypes.TypeLattice.is_int_word_or_bool(lt))
+            and (gimple_ctypes.TypeLattice.is_word(rt)
+                 or gimple_ctypes.TypeLattice.is_int_word_or_bool(rt))
+            and (gen._word_may_be_box(lv) or gen._word_is_tagged(lv)
+                 or gen._word_may_be_box(rv) or gen._word_is_tagged(rv))):
+        _be_l = lv if gimple_ctypes.TypeLattice.is_word(lt) else gen._to_int64(lt, lv)
+        _be_r = rv if gimple_ctypes.TypeLattice.is_word(rt) else gen._to_int64(rt, rv)
+        _be_t = gen._call_expr('int', 'mojo_box_eq',
+                               [('int64_t', _be_l), ('int64_t', _be_r)])
+        _be_r = gen._new_temp('_Bool')
+        _be_c = '!= 0' if op == '==' else '== 0'
+        build.assign(gen, f'{_be_r}', f'{_be_t} {_be_c}')
+        return '_Bool', _be_r
     # `x is None` / `is not None` where `x` is PROVABLY an integer: the answer
     # is a constant False/True, because 0 is an integer and None is not it.
     # The generic identity arm below compares the words, and None is the word

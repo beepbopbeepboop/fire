@@ -10592,6 +10592,50 @@ int mojo_word_eq(int64_t a, int64_t b)
     return mojo_value_eq(a, b, MOJO_EQ_UNKNOWN);
 }
 
+/* `a == b` where at least one side is a TAGGED word (a box whose kind only
+ * the runtime knows): `None` is equal only to `None`, a float box compares
+ * NUMERICALLY with an int (`0.0 == 0` is True), a bool/int box by payload,
+ * a str box by content. The plain unbox path (`mojo_box_word`) cannot answer
+ * this: it keeps a double box as its address (so `0.0 == 0` was False) and
+ * flattens the None box to 0 (so `None == 0` was True). Measured on
+ * `flow/12_early_return_loop.py`'s `contains_zero([None, 1])` / `[1, 0.0, 2]`. */
+int mojo_box_eq(int64_t a, int64_t b)
+{
+    if (a == b) return 1;
+    if (mojo_is_boxed(a)) {
+        MojoBox *ax = (MojoBox *)(intptr_t)a;
+        if (ax->kind == 'n') return mojo_word_is_none(b);
+        if (mojo_is_boxed(b)) {
+            MojoBox *bx = (MojoBox *)(intptr_t)b;
+            if (bx->kind == 'n') return 0;
+            if (ax->kind == 'p' && bx->kind == 'p') {
+                if (ax->bits == 0 || bx->bits == 0) return ax->bits == bx->bits;
+                return strcmp((char *)(intptr_t)ax->bits,
+                              (char *)(intptr_t)bx->bits) == 0;
+            }
+            if (ax->kind == 'p' || bx->kind == 'p') return 0;
+            if (ax->kind == 'd' || bx->kind == 'd') {
+                double da = (ax->kind == 'd') ? mojo_double_from_bits(ax->bits)
+                                              : (double)ax->bits;
+                double db = (bx->kind == 'd') ? mojo_double_from_bits(bx->bits)
+                                              : (double)bx->bits;
+                return da == db;
+            }
+            return ax->bits == bx->bits;
+        }
+        if (ax->kind == 'd') return mojo_double_from_bits(ax->bits) == (double)b;
+        if (ax->kind == 'p') {
+            if (ax->bits == 0) return b == 0;
+            return mojo_boxed_is_str(b)
+                && strcmp((char *)(intptr_t)ax->bits, (char *)(intptr_t)b) == 0;
+        }
+        if (ax->kind == 'l') return 0;
+        return ax->bits == b;
+    }
+    if (mojo_is_boxed(b)) return mojo_box_eq(b, a);
+    return mojo_word_eq(a, b);
+}
+
 int mojo_value_eq(int64_t a, int64_t b, int elem)
 {
     if (a == b) return 1;

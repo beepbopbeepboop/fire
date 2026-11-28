@@ -454,16 +454,24 @@ added (the `test_type_string_ratchet.py` counts are unchanged).
 - `params/32_implicit_none_return.py` now differs only in
   `type(...).__name__` (`<type>` where CPython says `int`/`NoneType`), which
   is the `type()` builtin's own limitation, not a `None` value.
+- `params/09_empty_vs_full_list.py` (`return best`, a local bound from
+  `items[0]`) and `flow/12_early_return_loop.py` (`return w`, a for-loop
+  target; `contains_zero([None, 1])` / `[1, 0.0, 2]`): OK. The latter needed
+  `mojo_box_eq` (`None == 0` is False, `0.0 == 0` is True, a str box by
+  content) because the generic operand conversion flattened the None box to 0
+  and kept a double box as its address.
+- `params/12_return_str_or_none.py` (`return parts[0]` / `text[-1]` beside
+  `None`): OK — a subscript of a LOCAL container is now scalar evidence for
+  the return slot.
 - `classes/04_list_field_append.py`: its `None` lines are now correct; the
   remaining diff is the mixed int/str LIST repr (`['1', 'two', ...]`) and the
   `count_strings` that follows from it — a mixed-parameter value-kind gap
   (rule 3 / the 5b mixed-container refusal), not `None`.
 - `test_pydiff_ratchet.py`: 139 listed, 0 failures.
-  `test_runtime_header_scan.py`: 84/84 (header 897, box 548, total 1007).
+  `test_runtime_header_scan.py`: 84/84 (header 898, box 549, total 1008).
   `test_type_string_ratchet.py` / `test_type_lattice_predicates.py`: 0.
-- `compile_stdlib.py`, `test_gimple_runner.py`, `c_oracle check`: re-run on the
-  committed tree (the shared worktree was being written by the stage-4 lane
-  while this landed).
+- `compile_stdlib.py`, `test_gimple_runner.py`, `c_oracle check` and a full
+  corpus run: on the committed tree, reported with the commit.
 
 **Still open.**
 - `dict.get(k)` on a DOUBLE value domain keeps its `double` miss (0.0): the
@@ -474,9 +482,6 @@ added (the `test_type_string_ratchet.py` counts are unchanged).
   (`funcs/05_two_stacks_no_sharing.py`, `funcs/07_lambda_in_list.py`): the
   return pass walks the module's top-level functions and struct methods, not
   lifted closures.
-- A `char *`-returning function's NULL (`params/12_return_str_or_none.py`) is
-  still printed as `0`; a refs-only slot's `None` is NULL, and the print path
-  does not render NULL as `None`.
 - Cross-module per-file (`do_imports=False`) mixed fields: the inline
   (`fire.py run`) path handles a literal and a parameter store in two modules
   correctly (measured with `/tmp/xmod`), but the per-file path cannot link the
