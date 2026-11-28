@@ -7,9 +7,9 @@ diffs each `.ci` against `python3 fire.py --dump-full` of the same file, which i
 how every startup crash and every wrong-output defect of the self-hosted compiler
 was found (doc/GIR.md, "Selfhost closure"). Typical use:
 
-    python3 tools/selfhost_probe.py build <dir>
-    python3 tools/selfhost_probe.py probe <dir> prog1.mojo prog2.mojo
-    python3 tools/selfhost_probe.py probe <dir> corpus pydiff:40    # the durable sets, below
+    python3 tools/memcap.py --limit-gb 30 -- python3 tools/selfhost_probe.py build <dir>
+    python3 tools/memcap.py --limit-gb 24 -- python3 tools/selfhost_probe.py probe <dir> prog1.mojo
+    python3 tools/memcap.py --limit-gb 24 -- python3 tools/selfhost_probe.py probe <dir> corpus pydiff:40
     # a crash: ASLR matters, lldb must run with it ON
     lldb -b -o 'settings set target.disable-aslr false' \
          -o 'run --dump-full prog.mojo' -o 'bt 12' /tmp/shb/mojo_selfhost
@@ -17,13 +17,14 @@ was found (doc/GIR.md, "Selfhost closure"). Typical use:
     lldb ... -o 'breakpoint set -n mojo_raise_attribute_error' ...
 
 `SELFHOST_PROBE_DEBUG=1` on `build` adds -g1 so `bt` in lldb shows `file.py:line`.
-`build` takes about 15 minutes and 10 GB; `probe` takes seconds per file. Run ONE build or probe
-at a time (a reboot on 2026-11-27 followed several builds and a probe run at once).
+`build` takes about 15 minutes and 10 GB; `probe` takes seconds per file. ALWAYS run under tools/memcap.py
+(above), and ONE build or probe at a time: a reboot on 2026-11-27 followed several builds and a
+probe run going at once.
 
-Every run of the built binary is bounded: a wall-clock limit and a resident-set limit, and a child
-that passes either is stopped with a plain SIGTERM (this tool's own child, nobody else's) and
-reported as TIMEOUT / RSS-LIMIT. A compiler bug that loops while allocating must not be able to
-take the machine with it.
+On top of memcap, every run of the built binary is bounded here too: a wall-clock limit and a
+resident-set limit, and a child that passes either is stopped with a plain SIGTERM (this tool's own
+child) and reported as TIMEOUT / RSS-LIMIT. memcap is the machine-wide guard; this one just makes
+the verdict say which run was the runaway.
 
 Program sets: `corpus` is tools/selfhost_programs/*.mojo (small programs, one defect class each);
 `pydiff:N` is the first N programs of tools/pydiff_ok.txt.
