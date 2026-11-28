@@ -8585,7 +8585,11 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
     # returned from a function) while the runtime does. Only for `list` — a
     # `set` re-reads its elements through the set's own per-slot accessors and
     # genuinely produces a different container.
-    _copy_src = None
+    # '' = no source (a value temp is never empty), NOT `None`: an optional str held as
+    # an unknown word on the self-hosted path made the `in gen._elem_types` tests below
+    # hash the word, never find the source, and the copy lost its element type
+    # (`a == list((1, 2, 3))` compared with the 'unknown elements' code).
+    _copy_src: str = ''
     if kind == 'list' or kind == 'tuple':
         _ct, _cv = gen.lower_expr(_arg0)
         if gimple_ctypes.TypeLattice.is_list(_ct):
@@ -8628,7 +8632,7 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
     # that promoted type as its element repr, which then wins over the kinds
     # row at print time. Nothing is lost by skipping the walk: a copy holds
     # the same words, and the copy's kinds row is the same row.
-    if _copy_src is not None and gen._word_has_slot_kinds(_copy_src):
+    if _copy_src != '' and gen._word_has_slot_kinds(_copy_src):
         _cp = gen._call_expr('MojoList *', 'mojo_list_copy',
                              [('MojoList *', _copy_src)])
         gen._word_mark_slot_kinds(_cp)
@@ -8656,7 +8660,7 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
     # because both are the same shape: the comprehension has just built a
     # FRESH container, and one property of the source it cannot know has to
     # be copied across by hand.
-    if _copy_src is not None and _copy_src != res:
+    if _copy_src != '' and _copy_src != res:
         gen._emit_call('void', '', 'mojo_list_inherit_kinds',
                        [('MojoList *', res), ('MojoList *', _copy_src)])
         # Carry the compile-time element / nested-element typing across the

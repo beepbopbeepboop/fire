@@ -2141,7 +2141,7 @@ def _tag_literal_call_args(fd, cn, out: dict) -> None:
             out.setdefault(_as_str(fd.name), set()).add(_pn)
 
 
-def param_tagged_defaults(func, names) -> dict:
+def param_tagged_defaults(func, names: set[str]) -> dict:
     """`{parameter name: default expression}` for each of `names` that has a
     declared default. `emit_infra._box_param_call_args` boxes an OMITTED
     argument's padded default by this node, so the pad is the same box a
@@ -2153,9 +2153,10 @@ def param_tagged_defaults(func, names) -> dict:
     # defaulted parameter.
     _defs: dict = _as_dict(getattr(func, 'param_defaults', None) or {})
     out: dict = {}
-    _nl: list = list(names or [])
-    for _ni in range(len(_nl)):
-        _pn = _as_str(_nl[_ni])
+    # `names: set[str]` (the signature, both callers pass `param_default_none_names`'s
+    # set): the loop variable is then a real `char *`. `list(names)` + an index read
+    # made each name a boxed word, and `.lstrip('*')` on it was a strlen of garbage.
+    for _pn in names:
         _pk = _pn.lstrip('*')
         if _pk in _defs:
             out[_pn] = _defs[_pk]

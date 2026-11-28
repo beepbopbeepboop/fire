@@ -18147,19 +18147,25 @@ def gen_module_impl(self, stmts: list):
 
 
     def _caller_bindings(caller_name):
-        """{name: [binding]} for one caller body. A binding is `(callee,
-        index, arity)` for slot `index` of `a, b, ... = callee(...)` with a
-        bare module-level callee, and None for every other way a name is
-        bound (assignment, `var`, loop target, walrus, parameter)."""
-        _cached = _caller_binding_memo.get(caller_name)
-        if _cached is not None:
-            return _cached
+        """{name: [binding]} for one caller body. A binding is the STRING
+        `callee\x1findex\x1farity` for slot `index` of `a, b, ... = callee(...)`
+        with a bare module-level callee, and `''` for every other way a name is
+        bound (assignment, `var`, loop target, walrus, parameter). Strings, not
+        `(callee, index, arity)` tuples and `None`: a tuple read back out of a
+        list in a dict is a boxed word in the compiled compiler, `b is None`
+        does not see its NULL, and `b[0]` was a crash on the first program with
+        a call argument."""
+        if caller_name in _caller_binding_memo:
+            return _caller_binding_memo[caller_name]
         table: dict = {}
-        _cfd = _fn_by_name.get(caller_name)
-        if _cfd is not None:
+        if caller_name in _fn_by_name:
+            _cfd = _fn_by_name[caller_name]
             for _p in (_cfd.params or []):
-                table.setdefault(_as_str(_p[0]), []).append(None)
-        for _n in _walk_ast(_caller_body_by_name.get(caller_name) or []):
+                table.setdefault(_as_str(_p[0]), []).append('')
+        _cbody: list = []
+        if caller_name in _caller_body_by_name:
+            _cbody = _as_list(_caller_body_by_name[caller_name])
+        for _n in _walk_ast(_cbody):
             if isinstance(_n, gimple_ctypes.AssignStmt):
                 _t = _n.target
                 _v = _n.value
@@ -18171,24 +18177,25 @@ def gen_module_impl(self, stmts: list):
                     _arity = len(_t.elements)
                     for _i, _el in enumerate(_t.elements):
                         if isinstance(_el, gimple_ctypes.IdentExpr):
-                            table.setdefault(_as_str(_el.name), []).append((_callee, _i, _arity))
+                            table.setdefault(_as_str(_el.name), []).append(
+                                _callee + '\x1f' + str(_i) + '\x1f' + str(_arity))
                         else:
                             for _nm in _gmh_target_names(_el):
-                                table.setdefault(_nm, []).append(None)
+                                table.setdefault(_nm, []).append('')
                     continue
                 for _nm in _gmh_target_names(_t):
-                    table.setdefault(_nm, []).append(None)
+                    table.setdefault(_nm, []).append('')
             elif isinstance(_n, gimple_ctypes.VarDecl):
-                table.setdefault(_as_str(_n.name), []).append(None)
+                table.setdefault(_as_str(_n.name), []).append('')
             elif isinstance(_n, gimple_ctypes.ForStmt):
                 for _nm in _gmh_target_names(_n.target):
-                    table.setdefault(_nm, []).append(None)
+                    table.setdefault(_nm, []).append('')
             elif isinstance(_n, gimple_ctypes.MultiAssignStmt):
                 for _t in _n.targets:
                     for _nm in _gmh_target_names(_t):
-                        table.setdefault(_nm, []).append(None)
+                        table.setdefault(_nm, []).append('')
             elif isinstance(_n, gimple_ctypes.WalrusExpr):
-                table.setdefault(_as_str(_n.name), []).append(None)
+                table.setdefault(_as_str(_n.name), []).append('')
         _caller_binding_memo[caller_name] = table
         return table
 
@@ -18257,16 +18264,30 @@ def gen_module_impl(self, stmts: list):
         _slot_kind_memo[_key] = _ans
         return _ans
 
+    def _binding_slots(a, caller_name) -> list:
+        """The bindings of call argument `a`'s name in `caller_name`, as the
+        strings `_caller_bindings` stores; empty when `a` is not a name or the
+        name is unbound there."""
+        if not isinstance(a, gimple_ctypes.IdentExpr):
+            return []
+        _tab: dict = _as_dict(_caller_bindings(_as_str(caller_name)))
+        _nm: str = _as_str(a.name)
+        if _nm not in _tab:
+            return []
+        return _as_list(_tab[_nm])
+
     def _unpack_from_container_slot(a, caller_name):
         """Is call argument `a` a name whose every binding in `caller_name` is
         a container-returning tuple-unpack slot (see the block above)?"""
-        if not isinstance(a, gimple_ctypes.IdentExpr):
+        _bs: list = _binding_slots(a, caller_name)
+        if len(_bs) == 0:
             return False
-        _bs = _caller_bindings(_as_str(caller_name)).get(_as_str(a.name))
-        if not _bs:
-            return False
-        for _b in _bs:
-            if _b is None or _slot_kind(_b[0], _b[1], _b[2]) != 'container':
+        for _bi in range(len(_bs)):
+            _b: str = _as_str(_bs[_bi])
+            if _b == '':
+                return False
+            _bp: list = _b.split('\x1f')
+            if _slot_kind(_bp[0], int(_bp[1]), int(_bp[2])) != 'container':
                 return False
         return True
 
@@ -18287,13 +18308,15 @@ def gen_module_impl(self, stmts: list):
         returns are not all provably scalar stays unobserved, exactly as
         today.
         """
-        if not isinstance(a, gimple_ctypes.IdentExpr):
+        _bs: list = _binding_slots(a, caller_name)
+        if len(_bs) == 0:
             return False
-        _bs = _caller_bindings(_as_str(caller_name)).get(_as_str(a.name))
-        if not _bs:
-            return False
-        for _b in _bs:
-            if _b is None or _slot_kind(_b[0], _b[1], _b[2]) != 'scalar':
+        for _bi in range(len(_bs)):
+            _b: str = _as_str(_bs[_bi])
+            if _b == '':
+                return False
+            _bp: list = _b.split('\x1f')
+            if _slot_kind(_bp[0], int(_bp[1]), int(_bp[2])) != 'scalar':
                 return False
         return True
 
@@ -18321,13 +18344,15 @@ def gen_module_impl(self, stmts: list):
     def _unpack_from_str_slot(a, caller_name):
         """Is `a` a name whose every binding in `caller_name` is a tuple-unpack slot that
         every return of the callee fills with a string literal?"""
-        if not isinstance(a, gimple_ctypes.IdentExpr):
+        _bs: list = _binding_slots(a, caller_name)
+        if len(_bs) == 0:
             return False
-        _bs = _caller_bindings(_as_str(caller_name)).get(_as_str(a.name))
-        if not _bs:
-            return False
-        for _b in _bs:
-            if _b is None or not _slot_is_str(_b[0], _b[1], _b[2]):
+        for _bi in range(len(_bs)):
+            _b: str = _as_str(_bs[_bi])
+            if _b == '':
+                return False
+            _bp: list = _b.split('\x1f')
+            if not _slot_is_str(_bp[0], int(_bp[1]), int(_bp[2])):
                 return False
         return True
 

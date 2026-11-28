@@ -149,7 +149,8 @@ def probe(out_dir: str, files: list) -> int:
     for f in files:
         name = os.path.splitext(os.path.basename(f))[0]
         src = os.path.join(work, name + '.mojo')
-        shutil.copy(f, src)
+        if os.path.abspath(f) != os.path.abspath(src):    # already in the work dir: re-probe in place
+            shutil.copy(f, src)
         subprocess.run([sys.executable, os.path.join(ROOT, 'fire.py'), '--dump-full', src],
                        cwd=work, capture_output=True, text=True)
         ref_path = os.path.join(work, name + '.ci')

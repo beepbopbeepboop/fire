@@ -197,7 +197,7 @@ def split_top(text: str, sep: str) -> list:
     return parts
 
 
-def _bare(name: str, class_names) -> STy:
+def _bare(name: str, class_names: dict[str, str]) -> STy:
     if name in ('int', 'Int', 'Int64'):
         return INT
     if name in ('float', 'Float64'):
@@ -213,11 +213,13 @@ def _bare(name: str, class_names) -> STy:
     if name in ('set', 'Set'):
         return set_of(DYN)
     if name in class_names:
+        # Typed `dict[str, str]` (the signature), so this is a dict read; the untyped
+        # parameter indexed a list here (IndexError on the first class annotation).
         return struct_of(class_names[name])
     return DYN
 
 
-def from_annotation(text, class_names) -> STy:
+def from_annotation(text, class_names: dict[str, str]) -> STy:
     """Parse an annotation string into an `STy` (bugs/GIR_type_solver.md, 2.1).
 
     `class_names` maps each spelling a closure class can be written as (its bare name,
