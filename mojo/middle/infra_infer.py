@@ -2956,13 +2956,22 @@ def _boxed_local_binding_kinds(gen, body: list) -> dict:
     return out
 
 
-def _return_arm_is_boxed_local(gen, arms: list, body: list) -> bool:
+def _return_arm_is_boxed_local(gen, arms: list, body: list, acc: list = None) -> bool:
     """True when a returned name is bound to two incompatible kinds here."""
     kinds = _boxed_local_binding_kinds(gen, body)
-    for arm in (arms or []):
+    untyped = set(getattr(gen, '_cur_untyped_params', ()) or ())
+    for i, arm in enumerate(arms or []):
         if isinstance(arm, gimple_ctypes.IdentExpr):
             ks = kinds.get(_as_str(arm.name), set())
             if len(ks) > 1 and not ks <= {'int', 'bool', 'float'}:
+                return True
+            # A pass-through of UNANNOTATED parameters: each argument is boxed
+            # by its call sites, so a bare-name arm carries the tagged word
+            # even though _quick_type guessed a pointer from another arm.
+            if _as_str(arm.name) in untyped and acc is not None \
+                    and any(gimple_ctypes.TypeLattice.is_cstr(_as_str(a))
+                            for a in acc) \
+                    and len(set(_as_str(a) for a in acc)) > 1:
                 return True
         if isinstance(arm, gimple_ctypes.TernaryExpr):
             branches = [getattr(arm, 'then_val', None), getattr(arm, 'else_val', None)]
@@ -3001,7 +3010,7 @@ def _infer_return_type_core(gen, body: list) -> str:
         # do NOT add the body to `_mixed_return_bodies` -- these arms are
         # already boxed by their stores, and re-boxing them here would box a
         # box.
-        if (_return_arm_is_boxed_local(gen, arms, body)
+        if (_return_arm_is_boxed_local(gen, arms, body, acc)
                 and not gimple_ctypes.TypeLattice.is_word(_rt)):
             return 'int64_t'
         # A pointer beside a scalar has no arm type that can hold both; see

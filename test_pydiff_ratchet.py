@@ -29,6 +29,7 @@ OK_LIST = os.path.join(HERE, 'tools', 'pydiff_ok.txt')
 NO_CRASH = [
     'flow/04_ternary_mixed_types.py',
     'flow/33_mixed_type_variable.py',
+    'params/10_none_or_value_arg.py',
 ]
 
 
