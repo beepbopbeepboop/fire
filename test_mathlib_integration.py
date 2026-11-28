@@ -19,7 +19,6 @@ not a pass, it is an unrun check and is printed as such.
 """
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 
@@ -28,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from formal import lean as L
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+PROOF_DIR = os.path.join(tempfile.gettempdir(), "proof-dir")
 LIB = os.path.join(HERE, "lib")
 
 
@@ -41,10 +41,10 @@ def test_path_helper():
     assert any(os.path.basename(os.path.dirname(os.path.dirname(d))) == "mathlib"
                or os.sep + "mathlib" + os.sep in d for d in dirs), \
         f"no Mathlib build dir in {dirs!r}"
-    joined = L.lean_path(LIB, "/tmp/proof-dir")
+    joined = L.lean_path(LIB, PROOF_DIR)
     for d in dirs:
         assert d in joined, f"lean_path dropped {d}"
-    assert joined.startswith("/tmp/proof-dir" + os.pathsep), \
+    assert joined.startswith(PROOF_DIR + os.pathsep), \
         "the proof directory must come FIRST"
     print(f"PASS: {len(dirs)} Mathlib build dirs, composed by lean_path")
     return True
@@ -71,7 +71,10 @@ example (n : Nat) (h : n < 3) : n = 0 \u2228 n = 1 \u2228 n = 2 := by
             f.write(src)
         env = dict(os.environ)
         env["LEAN_PATH"] = L.lean_path(LIB)
-        r = subprocess.run([lean, p], capture_output=True, text=True, env=env)
+        # Through the launcher, like every Lean run in the tree: its bounds and
+        # process-group kill apply, and `exceeded` says which one a run hit.
+        r = L.run_lean(lean, [p], cwd=td, env=env)
+    assert r.exceeded is None, f"Lean hit a bound: {r.exceeded}"
     assert r.returncode == 0, (
         "ProofLib + Mathlib failed to coexist:\n"
         + (r.stdout or "") + (r.stderr or ""))

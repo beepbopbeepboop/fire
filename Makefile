@@ -192,8 +192,7 @@ demo:
 # uses `aesop`/`norm_num`.  `formal/lean.py::mathlib_lean_path` finds the
 # result automatically; nothing else needs configuring.
 mathlib:
-	lake update
-	lake exe cache get
+	python3 tools/fetch_mathlib.py
 
 suite-help:
 	@$(SUITE) --list

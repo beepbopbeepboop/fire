@@ -218,6 +218,31 @@ def find_lean(repo_root: str | None = None) -> str | None:
     return None
 
 
+def fetch_mathlib(repo_root: str | None = None, timeout_s: float = 3600.0) -> None:
+    """Fetch and build Mathlib for this checkout: `lake update`, then the cache.
+
+    The one place Lake is started, which is what `make mathlib` runs through
+    `tools/fetch_mathlib.py`. Lake is not a proof run, so it takes no proof
+    bounds, but it is bounded by wall time and killed as a process group, the
+    same way `run_lean` bounds Lean. Raises RuntimeError on the first failing
+    step, naming it.
+    """
+    root = repo_root or _ROOT
+    for step in (["lake", "update"], ["lake", "exe", "cache", "get"]):
+        # Popen in its own session, as run_lean does, so a timeout kills the
+        # group this call started and nothing else.
+        proc = subprocess.Popen(step, cwd=root, start_new_session=True)
+        try:
+            rc = proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            raise RuntimeError(f"{' '.join(step)} ran past {timeout_s:.0f}s")
+        if rc != 0:
+            raise RuntimeError(f"{' '.join(step)} exited {rc}")
+
+
 def mathlib_lean_path(lib_dir: str) -> list:
     """The Lake build dirs that make `import Mathlib` / `import Aesop` resolve.
 

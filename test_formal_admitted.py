@@ -1248,7 +1248,9 @@ LIBRARY_TRUST = {
     # Updated for callFunc2 threading API change required by the admitted contract fix.
     # 2026-11-06: the `work_step_*` lemmas moved to the `ProofLibSteps<k>` shards
     # (parallel build), so this row dropped from 2910 to the 31 sites that stayed.
-    "ProofLib": (0, 0, 31, 31),
+    # 2026-11-28: 35 — ProofLib grew by 4 bv_decide sites in the ProofLib proof
+    # commits since 31 (619b2cce9 signed bridges, 06b35f103 ite-state lemmas).
+    "ProofLib": (0, 0, 35, 35),
     "ProofLibSteps": (0, 0, 0, 0),
     "ProofLibSteps1": (0, 0, 323, 323),
     "ProofLibSteps2": (0, 0, 333, 333),
@@ -1370,7 +1372,10 @@ AXIOM_CLOSURE = {
     "Extern": (16, 1, 15, 0, 0, 0),
     "IEEE754": (26, 19, 7, 0, 0, 0),
     "Peephole": (43, 4, 31, 0, 8, 0),
-    "ProofLib": (273, 17, 250, 0, 6, 0),
+    # 2026-11-28: re-measured after the ProofLib proof commits since 273 (06b35f103
+    # ite-state lemmas, 619b2cce9 decrement-while signed bridges with two bv_decide
+    # reaches). Not Mathlib: Mathlib adds no ProofLib declarations.
+    "ProofLib": (320, 19, 295, 0, 6, 0),
     "ProofLibSteps": (0, 0, 0, 0, 0, 0),
     "ProofLibSteps1": (22, 20, 2, 0, 0, 0),
     "ProofLibSteps2": (11, 9, 0, 0, 2, 0),
@@ -2165,7 +2170,7 @@ def test_the_census_is_attributed_to_theorems_not_only_to_lines(tmpdir=None):
 # not caught up with.  `test_the_census_is_attributed_to_theorems_not_only_to_lines`
 # prints their names; ten are the `arm64_flag_*` family and 19 are IEEE754's
 # arithmetic, which `NATIVE_DECIDE_ALLOWED` justifies by declaration.
-ONE_SITE_THEOREMS = 37
+ONE_SITE_THEOREMS = 42  # 2026-11-28: re-measured; the 5 new are ProofLib/IEEE754 one-site sites
 
 # How many theorems may carry exactly one site AND that site be a `native_decide`
 # that `NATIVE_DECIDE_ALLOWED` does not already name with a reason.  This is
