@@ -12106,6 +12106,13 @@ def _gmp_emit_imported_symbol_stubs(self, _imp_syms: dict, _stub_only_modules: s
                     # pattern built from the loop variable is not known at
                     # compile time, so the compiled compiler could not run it.
                     signature = gimple_ctypes.replace_word(signature, _ckw, f'_kw_{_ckw}', True)
+                # A parameter NAMED like a C aggregate/control keyword
+                # (`mixed_field_names(struct, gen)`) is not a valid declarator.
+                # Only the trailing-name position is rewritten: `struct tm *`
+                # as a TYPE is followed by a name, never by `,` / `)`.
+                signature = re.sub(
+                    r'\b(struct|union|enum|typedef|switch|case|goto|sizeof|return|while|for|if|else|do|break|continue)\b(?=\s*[,)])',
+                    r'_kw_\1', signature)
                 # A `(void)` prototype is a statement about a function that
                 # takes NO arguments, and this one demonstrably does: the same
                 # translation unit already carries the defining module's own
