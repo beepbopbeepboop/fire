@@ -310,3 +310,24 @@ it was re-implemented from the description above.
   proof in would widen the scalar side.
 - The None-related WRONG programs in the pool other than these (65 at the 2026-11-22 count) are not re-measured
   here, so the doc stays open. Next measurement: rerun the corpus, regroup by first differing line.
+
+## Status 2026-11-27 (local scalar evidence, commit adb949f27)
+
+Wires the `_confident_scalar_locals` proof the 2026-11-23 entry named as the
+remaining gap: `value_class_of` now consults a new `gen._pv_local_scalar_kinds`
+table (built inside `collect_param_value_obs`, keyed per caller key) so a local
+bound once to a provable scalar (`x = 5`) yields `'scalar'` instead of the
+`int64_t` "cannot tell" default. A call site `c.put(x)` over such a local is
+therefore scalar evidence, so the field joins None+scalar into the boxed
+`'mixed'` word slot rather than staying refs-only.
+
+**Measured.** `compile_stdlib.py` 610/610 PASSED, 0 unexpected; `stdlib_dylib_ratchet.py`
+clean; `c_oracle check` byte-identical C on 286 programs + 35 C++ companions;
+`test_gimple_runner.py` 688 passed / 0 failed (None/mixed/box/tagged/pick/optional/field
+selection); `test_pydiff_ratchet.py` 139 listed, 0 failures; `test_gimple_mixed_field_names.py`
+0 failures; `test_type_string_ratchet.py` counts 0; `test_type_lattice_predicates.py`
+0 failures. `pydiff` still has `classes/03`, `32`, `41` OK.
+
+**Still open.** Cross-module mixed-field export; container store unwrapping
+(`{"k": c.s}` prints `0`); the larger None-mentioning WRONG pool is not
+re-measured; owner runs `make bootstrap` (self-host) as the acceptance check.
