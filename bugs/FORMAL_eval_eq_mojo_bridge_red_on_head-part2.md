@@ -178,3 +178,54 @@ entry whose fields are named hypotheses), and then `V_k : Inv_k s -> Inv_next
 design from the first guide; the measurements above are why it is required
 rather than optional. Do not retry bigger budgets, `maxSteps`, or one-theorem
 normalization.
+
+### Experiment 2026-11-27: hoisting each layer into an aux theorem (`layer` tactic)
+
+Instead of stating each layer by hand, a small meta tactic hoists the proof step a
+tactic block produced into its own `mkAuxTheorem` (so the kernel checks one
+shallow theorem per layer and the main term is a chain of applications). It
+compiles on `lean` 4.32.2 and works on a toy goal (`example … := by layer (simp
+only [Nat.add_zero]); exact ⟨h, trivial⟩`):
+
+```lean
+open Lean Elab Tactic Meta in
+elab "layer " t:tacticSeq : tactic => do
+  let g ← getMainGoal
+  g.withContext do
+    let gty ← g.getType
+    let g' ← mkFreshExprSyntheticOpaqueMVar gty (← g.getTag)
+    let rest ← getGoals
+    setGoals [g'.mvarId!]
+    evalTactic t
+    let gs ← getGoals
+    let v ← instantiateMVars g'
+    let gsE := gs.map mkMVar
+    let lctx ← getLCtx
+    let used ← do
+      let mut st : CollectFVars.State := {}
+      st := collectFVars st (← instantiateMVars gty)
+      st := collectFVars st v
+      for e in gsE do st := collectFVars st (← instantiateMVars (← inferType e))
+      pure st.fvarSet
+    let mut fvs : Array Expr := #[]
+    for d in lctx do
+      if !d.isImplementationDetail && used.contains d.fvarId then fvs := fvs.push d.toExpr
+    let allArgs := fvs ++ gsE
+    let aux ← mkAuxTheorem (← mkForallFVars allArgs gty) (← mkLambdaFVars allArgs v)
+    g.assign (mkAppN aux allArgs)
+    setGoals (gs ++ rest)
+```
+
+Applied to every layer of the 4-`if` proof (`| (layer (simp only [wp_k]; try simp …))`)
+it does NOT fix it: the failures move INSIDE single layers (`(kernel) excessive
+memory consumption` on the aux theorem of a layer, plus one `maxRecDepth`). So the
+per-layer `simp` proofs are themselves too heavy for the kernel once the state
+carries the full write-chain memory and the 44-field record, which means the
+invariant approach (state only what each layer changes, as closed forms over `n`)
+is required, not just a split. Evidence the heavy part is the memory term: the
+guard/flag reasoning is closed arithmetic and cheap; every layer re-proves
+`mem_read_u64 (mem_write_u64 …)` address side conditions with `disch := decide`
+over the whole chain. Next experiment: give `simp` a SMALL memory by abstracting
+the stack frame as named slots (`mem_write_u64`'s base as a variable `m0` with the
+read-after-write facts for the frame slots proved once), so layers rewrite over
+`m0` plus a handful of writes instead of a growing lambda chain.
