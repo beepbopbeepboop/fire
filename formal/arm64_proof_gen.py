@@ -2503,7 +2503,30 @@ def _dec_while_pattern(fn):
     """Detect the canonical decrement-while shape:
        while p > 0: p = p - 1 ; return p
     Also accepts the equivalent conditions `p != 0` and `p >= 1` (all mean
-    "counter nonzero").  Returns the parameter name, or None."""
+    "counter nonzero"), and the augmented spelling `p -= 1`.
+
+    The shape gets a TOTAL model with a closed form (`_gen_go`: a
+    signed-positive seed counts down to 0), and `_gen_dec_while_block` proves
+    the AST is `while cond [p := p - 1]` by `rfl`.  Both hard-code a body of
+    EXACTLY one net decrement of `p` by one, so anything that changes the
+    countdown is REFUSED here (return None) rather than matched: a decrement
+    by `k > 1` does not reach 0, and an extra statement or a conditional
+    around the decrement changes the environment the bridge is stated about.
+    Matching those would make the emitted theorems about a different program.
+
+    **This recognizer is not where loop correctness comes from, and widening
+    it is not how new loop shapes get proved.**  The correctness proof is the
+    machine contract (`while_dec_exit_contract`), whose `hbodyDec`,
+    `hcondFlag` and `hframe` obligations the generator discharges from the
+    ACTUAL emitted instructions — so it is general over code generation.  This
+    function only decides whether the extra source-level closed-form model
+    (`_gen_go` + the `eval_eq_mojo` bridge) can be stated; when it cannot, the
+    honest answer is to omit that bridge, not to widen the match.  Supporting
+    conditionals or non-unit steps is therefore a change to the machine
+    contract (a well-founded decrease + a general exit invariant), not to the
+    cases recognised here.
+
+    Returns the parameter name, or None."""
     if not fn.params or len(fn.params) != 1 or len(fn.body) != 2:
         return None
     w, r = fn.body[0], fn.body[1]
@@ -2519,15 +2542,27 @@ def _dec_while_pattern(fn):
     )
     if not _cond_ok:
         return None
-    if len(w.body) != 1 or not isinstance(w.body[0], Assign):
+    if len(w.body) != 1:
         return None
     a = w.body[0]
     if _target_name(a) != p:
         return None
-    v = a.value
-    if not (isinstance(v, BinOp) and v.op == "-"
-            and isinstance(v.left, Var) and v.left.name == p
-            and isinstance(v.right, Int) and v.right.value == 1):
+    if isinstance(a, AugAssign):
+        # `_stmts_ast` desugars `p -= 1` to the SAME node the canonical
+        # spelling yields — `assign p (binop "-" (var p) (int 1))` — so the
+        # AST bridge and the closed form are unchanged.  `_target_name`
+        # already reads `Assign` and `AugAssign` alike.
+        if a.op != "-=":
+            return None
+        if not (isinstance(a.value, Int) and a.value.value == 1):
+            return None
+    elif isinstance(a, Assign):
+        v = a.value
+        if not (isinstance(v, BinOp) and v.op == "-"
+                and isinstance(v.left, Var) and v.left.name == p
+                and isinstance(v.right, Int) and v.right.value == 1):
+            return None
+    else:
         return None
     if not (isinstance(r.value, Var) and r.value.name == p):
         return None
