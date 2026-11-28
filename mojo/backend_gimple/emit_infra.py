@@ -819,6 +819,9 @@ def _reset_func(gen, body: list = None, params: list = None,
     gen._bound_method_tagged: set = set()
     gen._callable_tagged: set = set()
     gen._tuple_slot_tagged: dict = {}
+    # Names bound from an unpack slot whose kind is `none` (the shared None
+    # box): the bind keeps the box instead of unwrapping it to 0.
+    gen._tuple_none_targets: set = set()
     # Any callable VALUE (a lambda's `_funcptr_X` static, a bound-method
     # handle, a struct method taken as a value) -> that callee's real return
     # type. The `mojo_fnptr_call_N` / `mojo_maybe_bound_call_N` helpers are
@@ -7248,7 +7251,7 @@ def _list_repr_fn(gen, rav: str) -> str:
 # LITERAL records (a `struct.unpack` format has no such code) and which
 # reaches here either from the literal itself or across a `return`
 # (`gen._return_value_slot_kinds`).
-_STRUCT_KIND_BYTE = {'int': 'i', 'double': 'd', 'bytes': 's', 'str': 'p'}
+_STRUCT_KIND_BYTE = {'int': 'i', 'double': 'd', 'bytes': 's', 'str': 'p', 'none': 'n'}
 
 # A dict's VALUE ctype -> `gen._struct_slot_kinds`' long-form spelling, so a
 # value whose slot ctype the codegen knows statically can be described in that
@@ -10022,8 +10025,16 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
     # The integer answer reads a maybe-box operand as its integer
     # (`mojo_box_int`), exactly as `_unbox_float_param_operand` does.
-    ilv = gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', lv)]) if lp else lv
-    irv = gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', rv)]) if rp else rv
+    # Both operands of the integer answer must have the SAME C type: a bare
+    # literal beside an int64_t word (`a[0] * 2` on a tagged word, a literal
+    # right operand) is a GIMPLE "type mismatch in binary expression", so a
+    # non-word operand is materialised as an int64_t temp first.
+    ilv = (gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', lv)])
+           if lp else (lv if gimple_ctypes.TypeLattice.is_word(lt)
+                       else gen._to_int64(lt, lv)))
+    irv = (gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', rv)])
+           if rp else (rv if gimple_ctypes.TypeLattice.is_word(rt)
+                       else gen._to_int64(rt, rv)))
     if op == '//':
         ires = gen._rt_call('int64_t', '__mojo_floordiv', [_as_str(ilv), _as_str(irv)])
     else:

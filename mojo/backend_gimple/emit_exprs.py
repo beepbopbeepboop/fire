@@ -9055,6 +9055,16 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
             gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
             gen._word_mark_slot_kinds(t)
             continue
+        # A literal `None` element is the shared None box under its own slot
+        # kind, so `(None, 1)` prints `(None, 1)` and a destructured slot reads
+        # back None (it was appended as the integer 0).
+        if gen._is_none_literal(_el):
+            _nn = gen._call_expr('int64_t', 'mojo_box_none', [])
+            gen._emit_call('void', '', 'mojo_list_append_word',
+                           [('MojoList *', t), ('int64_t', _nn)])
+            gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
+            gen._word_mark_slot_kinds(t)
+            continue
         use = gimple_ctypes.TypeLattice.list_suffix(et) if per_element else suf
         ev_cast = gen._cast_for_list(et, ev, use)
         # GIMPLE: load global string literals into temp before function call

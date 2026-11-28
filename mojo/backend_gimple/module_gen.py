@@ -903,9 +903,9 @@ def _list_literal_slot_kinds(gen, node, param_kinds=None) -> list:
     `TypeLattice.slot_kind_byte`, and the one-byte runtime alphabet
     (`'d'`/`'p'`/`'s'`/`'l'`/`'i'`, `mojo_list_set_kinds`'s) is translated to
     the long form `_struct_slot_kinds` uses. `'l'` (a nested container slot)
-    and `'n'` (`None`) fold to `'int'`: a raw word IS the right read for
-    both — the pointer, and 0 — and the alternative would be a per-slot
-    pointer type this table has never carried.
+    folds to `'int'` (a raw word IS the right read for the pointer); `None`
+    keeps its own `'none'` kind, because the boxed None must stay
+    distinguishable from the integer 0.
 
     Both spellings are translated through ONE `_long` table rather than by
     appending `param_kinds`' value and `slot_kind_byte(...)`'s value
@@ -926,7 +926,10 @@ def _list_literal_slot_kinds(gen, node, param_kinds=None) -> list:
         if (isinstance(_el, gimple_ctypes.NoneLiteral) or (
                 isinstance(_el, gimple_ctypes.IdentExpr)
                 and gimple_ctypes.TypeLattice.is_none_type(_el.name))):
-            out.append('int')
+            # The slot holds the shared None box (stage 5c): a 'none' kind
+            # keeps it distinguishable from the integer 0, which folding to
+            # 'int' did not (`(None, 1)` destructured/printed as `(0, 1)`).
+            out.append('none')
             continue
         if isinstance(_el, gimple_ctypes.IdentExpr) and param_kinds:
             _pk = param_kinds.get(_as_str(_el.name))
@@ -1019,7 +1022,10 @@ wrong-static-answer failure the whole table exists to avoid.
             _kinds.add(gimple_ctypes.TypeLattice.slot_kind_byte(
                 gen._quick_type(_el)))
             _saw_typed = True
-        return _saw_typed and len(_kinds) > 1
+        # A `None` slot keeps its kind even when EVERY slot is None
+        # (`return None, None`): the box must survive the return, or the
+        # caller destructures/prints the integer 0.
+        return _saw_typed and (len(_kinds) > 1 or 'n' in _kinds)
     if not isinstance(node, gimple_ctypes.CallExpr):
         return False
     f = node.func

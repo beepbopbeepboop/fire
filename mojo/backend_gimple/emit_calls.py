@@ -14015,6 +14015,11 @@ def _ls_list(gen, node: gimple_ctypes.SubscriptExpr, iv, ov) -> tuple[str, str]:
             idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
             if gimple_ctypes.TypeLattice.is_double(_skd):
                 return 'double', gen._rt_call('double', 'mojo_list_get_double_checked', [f"{ov}", idx64])
+            if _skd == 'none' or _skd == 'n':
+                t = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{ov}", idx64])
+                gen._word_mark_boxed(t)
+                gen._word_mark_tagged(t)
+                return 'int64_t', t
             if _skd == 'bytes':
                 return _list_slot_bytes(gen, ov, idx64)
             if _skd == 'str':

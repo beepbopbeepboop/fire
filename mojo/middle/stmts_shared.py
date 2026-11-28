@@ -335,7 +335,14 @@ def _assign_target(gen, tgt, et, ev):
         # `_word_bind_box`, not `_word_may_be_box`: the unbox is this NAME's
         # representation decision, and a box that arrived through a plain copy
         # does not make it (see `mojo/middle/valueinfo.py`'s bind/read split).
-        if gimple_ctypes.TypeLattice.is_word(et) and gen._word_bind_box(ev):
+        _keep_none_box = (_as_str(tgt.name) in getattr(gen, '_tuple_none_targets', ()))
+        if _keep_none_box and gimple_ctypes.TypeLattice.is_word(et):
+            # An unpack slot whose kind is `none` IS the shared None box; the
+            # generic `mojo_unbox_plain` below would flatten it to 0.
+            gen._word_mark_tagged(_as_str(tgt.name))
+            gen._word_mark_boxed(_as_str(tgt.name))
+            gen._dyn_word_locals.add(_as_str(tgt.name))
+        elif gimple_ctypes.TypeLattice.is_word(et) and gen._word_bind_box(ev):
             _un = gen._new_temp('int64_t')
             gen._rt_into(_un, 'mojo_unbox_plain', [f"{ev}"])
             if gen._word_is_dyn(ev):

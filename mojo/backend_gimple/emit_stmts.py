@@ -1498,7 +1498,19 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                     and isinstance(node.value.func, gimple_ctypes.IdentExpr):
                 _slot_tags = gen._return_ret_for(
                     _as_str(node.value.func.name), (gen._return_slot_tagged,))
+            _skinds = gen._struct_slot_kinds.get(v)
             for i, tgt in enumerate(targets):
+                # A slot whose kind is `none` is the shared None box; the
+                # target NAME must keep it, so record the name before the
+                # bind (which would otherwise `mojo_unbox_plain` it to 0).
+                if (_skinds is not None and i < len(_skinds)
+                        and _skinds[i] in ('none', 'n')
+                        and isinstance(tgt, gimple_ctypes.IdentExpr)):
+                    _tnt = getattr(gen, '_tuple_none_targets', None)
+                    if _tnt is None:
+                        _tnt = set()
+                        gen._tuple_none_targets = _tnt
+                    _tnt.add(_as_str(tgt.name))
                 # _tuple_elem_value resolves an int64_t-boxed tuple handle
                 # (a call result — the codegen's own `-> tuple[str, str]`
                 # annotated methods return these) to its real MojoList*
@@ -1733,6 +1745,7 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
                                  or _for_copy or _call_tagged)
                             and gimple_ctypes.TypeLattice.is_word(gen.var_types.get(tname, 'int64_t'))
                             and (_call_tagged or _tern_none_rhs
+                                 or _as_str(tname) in getattr(gen, '_tuple_none_targets', ())
                                  or ginf.tagged_next_bind_name(gen, _as_str(tname))
                                  or ginf.tagged_recv_name(gen, _as_str(tname))))
         # A MIXED name (`x = 0` beside `x = v` over a tagged generator) is a

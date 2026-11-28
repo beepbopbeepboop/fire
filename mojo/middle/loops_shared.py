@@ -59,6 +59,16 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
             # MojoList* temp before the accessor call, or GIMPLE rejects
             # "passing int64_t where MojoList * expected".
             lp = gen._coerce_to_type('int64_t', 'MojoList *', v)
+        # A slot whose STATIC kind is `none` is the shared None box; the
+        # static fact wins over the generic runtime-kinded read below, which
+        # flattens the box to 0 for a destructured target.
+        _sk0 = gen._struct_slot_kinds.get(v)
+        if _sk0 is not None and 0 <= idx < len(_sk0) \
+                and _sk0[idx] in ('none', 'n'):
+            _nv0 = gen._rt_call('int64_t', 'mojo_list_get_boxed', [f"{lp}", idx64])
+            gen._word_mark_boxed(_nv0)
+            gen._word_mark_tagged(_nv0)
+            return 'int64_t', _nv0
         # If the list is marked as having per-slot kinds that must be read
         # via mojo_list_get_boxed (e.g. a dict's keys materialized through
         # the opaque boxed path), use the boxed reader for every slot.
@@ -83,6 +93,14 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         # subscript, which genuinely has none.
         _sk = gen._struct_slot_kinds.get(v)
         if _sk is not None and 0 <= idx < len(_sk):
+            if _sk[idx] == 'none' or _sk[idx] == 'n':
+                # A None slot is the shared box (stage 5c); read it back as
+                # the box, not the integer 0.
+                _nv = gen._rt_call('int64_t', 'mojo_list_get_boxed',
+                                   [f"{lp}", idx64])
+                gen._word_mark_boxed(_nv)
+                gen._word_mark_tagged(_nv)
+                return 'int64_t', _nv
             if gimple_ctypes.TypeLattice.is_double(_sk[idx]):
                 return 'double', gen._rt_call('double', 'mojo_list_get_double', [f"{lp}", idx64])
             if _sk[idx] == 'bytes':

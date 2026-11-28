@@ -1948,7 +1948,15 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
 {
     if (!l) return 0;
     int64_t idx = _norm_idx(l, i);
-    if (idx < 0 || idx >= l->len) return 0;
+    if (idx < 0 || idx >= l->len) {
+        /* A source-level subscript of a kinded list (`*args`, a hetero
+         * tuple) is still a Python `lst[i]`: out of range raises, exactly as
+         * `mojo_list_get_int_checked` does. Returning 0 made
+         * `lambda *a: a[0]` on an empty pack print 0 instead of raising
+         * IndexError. */
+        mojo_raise_index_error((char *)"list index out of range");
+        return 0;
+    }
     char _k = mojo_list_slot_kind(l, idx);
     /* An int slot is its own answer and stays the bare word: a box is a heap
      * cell per (list, slot), and taxing every int in a mixed list to serve the
