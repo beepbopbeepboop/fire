@@ -6208,6 +6208,91 @@ def _nested_plain_defs_for_scan(stmts: list) -> list:
     return out
 
 
+def _statically_false(cond) -> bool:
+    """A condition that is a literal false value, so its branch never runs."""
+    if isinstance(cond, N.BoolLiteral):
+        return not bool(getattr(cond, 'value', False))
+    if isinstance(cond, N.IntLiteral):
+        return getattr(cond, 'value', 1) == 0
+    if isinstance(cond, N.NoneLiteral):
+        return True
+    if isinstance(cond, N.StringLiteral):
+        return getattr(cond, 'value', 'x') == ''
+    return False
+
+
+def _dead_branch_calls(stmts, out: set) -> None:
+    """Call nodes under a statically-false branch, collected by identity.
+
+    A call in `if False:` is never executed, so it is not evidence for the
+    generator's fixed C value slot. Counting it turned `two_step(None)` in
+    funcs/21's dead branch into an untypable hole and REFUSED the whole
+    module, though every live call site passed an int.
+    """
+    for st in (stmts or []):
+        # A dead ternary can sit inside any expression statement, not just a
+        # branch: `print(f(...) if False else "x")` is the funcs/21 shape.
+        _dead_ternary_calls(st, out)
+        if isinstance(st, N.IfStmt):
+            if _statically_false(st.condition):
+                _collect_call_ids(st.then_body, out)
+            else:
+                _dead_branch_calls(st.then_body, out)
+            for _cond, _body in (getattr(st, 'elifs', None) or []):
+                if _statically_false(_cond):
+                    _collect_call_ids(_body, out)
+                else:
+                    _dead_branch_calls(_body, out)
+            _dead_branch_calls(getattr(st, 'else_body', None), out)
+        elif isinstance(st, N.WhileStmt):
+            if _statically_false(st.condition):
+                _collect_call_ids(getattr(st, 'body', None), out)
+            else:
+                _dead_branch_calls(getattr(st, 'body', None), out)
+        elif isinstance(st, N.ForStmt):
+            _dead_branch_calls(getattr(st, 'body', None), out)
+        elif isinstance(st, N.FunctionDef):
+            continue
+        else:
+            for _attr in ('body', 'then_body', 'else_body', 'finalbody'):
+                _sub = getattr(st, _attr, None)
+                if isinstance(_sub, list):
+                    _dead_branch_calls(_sub, out)
+
+
+def _dead_ternary_calls(node, out: set) -> None:
+    """Calls in the dead arm of `A if False else B` anywhere under `node`."""
+    for n in _walk(node):
+        if isinstance(n, N.TernaryExpr) and _statically_false(n.condition):
+            for _c in _walk(getattr(n, 'then_val', None)):
+                if isinstance(_c, N.CallExpr):
+                    out.add(id(_c))
+
+
+def _collect_call_ids(stmts, out: set) -> None:
+    """Every CallExpr id in `stmts`, including nested control flow.
+
+    The dead arm of `A if False else B` is collected too: funcs/21 spells
+    its untypable call site that way, not as an `if False:` statement.
+    """
+    for _st in (stmts or []):
+        for n in _walk(_st):
+            if isinstance(n, N.TernaryExpr) and _statically_false(n.condition):
+                for _c in _walk(getattr(n, 'then_val', None)):
+                    if isinstance(_c, N.CallExpr):
+                        out.add(id(_c))
+            elif isinstance(n, N.CallExpr):
+                out.add(id(n))
+
+
+def _kind_is_pointer_word(kind) -> bool:
+    """A call-site kind whose VALUE is pointer bits, whatever it points at."""
+    if kind in ('p', 'w'):
+        return True
+    return isinstance(kind, tuple) and kind and kind[0] in (
+        'list', 'dict', 'set', 'tuple')
+
+
 def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                                module_name: str | None = None) -> None:
     """Populate `_CALLSITE_PARAM_KINDS` (generators / async defs),
@@ -6508,12 +6593,15 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
         which holds the value, was unknown there, and the call was a hole."""
         calls: list = []
         nested: list = []
+        _dead_ids: set = set()
+        _dead_branch_calls(getattr(fn, 'body', None), _dead_ids)
         for n in _walk(fn, True):
             if n is fn:
                 continue
             if isinstance(n, N.FunctionDef):
                 nested.append(n)
-            elif isinstance(n, N.CallExpr) and _wants_call(closure, n):
+            elif (isinstance(n, N.CallExpr) and _wants_call(closure, n)
+                  and id(n) not in _dead_ids):
                 calls.append(n)
         if not calls and not nested:
             return
@@ -6683,10 +6771,15 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                 # undefined-symbol regression")
                 if len(kinds) == 1:
                     resolved[pname] = list(kinds)[0]
-                elif kinds == {'p', 'w'}:
-                    # a string at one call site and a pointer word (a str OR a
-                    # bytes -- `os.fspath(x)`) at another: both are pointers, so
-                    # the parameter is a pointer word
+                elif (kinds == {'p', 'w'}
+                      or all(_kind_is_pointer_word(k) for k in kinds)):
+                    # A string at one call site and a pointer-shaped value at
+                    # another (a pointer word from `os.fspath`, or a container
+                    # such as `windows(seq, n)` called with both a list and a
+                    # str): every arm is POINTER BITS, so the generator's
+                    # single C slot is the pointer word. The runtime registry
+                    # still says which representation the yielded value has;
+                    # a fixed char*/list slot would silently misread one arm.
                     resolved[pname] = 'w'
                 elif len(kinds) > 1:
                     # Genuinely ambiguous: two call sites pass provably
