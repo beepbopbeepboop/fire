@@ -37,6 +37,7 @@ containers/28_list_equality_compare.py
 containers/32_slice_steps_bounds.py
 containers/33_list_mul_concat.py
 containers/41_dict_get_container_values.py
+containers/42_dict_get_bytes_values.py
 flow/01_truthiness.py
 flow/02_and_or_operands.py
 flow/03_chained_and_or.py

@@ -14021,6 +14021,13 @@ def _ls_dict(gen, idx_type, iv, ov) -> tuple[str, str]:
         if gimple_ctypes.TypeLattice.is_double(val_ctype) and not _mixed:
             return 'double', gen._call_expr('double', 'mojo_dict_subscript_bytes_double',
                                             [('MojoDict *', ov), ('MojoBytes *', iv)])
+        if gimple_ctypes.TypeLattice.is_bytes(val_ctype) and not _mixed:
+            # A bytes VALUE stored under a bytes key: the slot holds the
+            # `MojoBytes *` word. The boxed reader raises for a miss (the
+            # subscript contract) and hands back the int slot's own word.
+            _raw_b = gen._call_expr('int64_t', 'mojo_dict_subscript_bytes_boxed',
+                                    [('MojoDict *', ov), ('MojoBytes *', iv)])
+            return val_ctype, gen._cast(val_ctype, _raw_b)
         t = gen._call_expr('int64_t', 'mojo_dict_subscript_bytes_boxed',
                            [('MojoDict *', ov), ('MojoBytes *', iv)])
         _mark_unknown_dict_value(gen, ov, t, iv, 'bytes')
@@ -14035,9 +14042,12 @@ def _ls_dict(gen, idx_type, iv, ov) -> tuple[str, str]:
     if gimple_ctypes.TypeLattice.is_cstr(val_ctype) and not _mixed:
         t = gen._call_expr('char *', 'mojo_dict_subscript_str', [('MojoDict *', ov), (idx_type, iv)])
         return 'char *', t
-    if (gimple_ctypes.TypeLattice.is_set(val_ctype) or gimple_ctypes.TypeLattice.is_dict(val_ctype) or gimple_ctypes.TypeLattice.is_list(val_ctype)):
+    if (gimple_ctypes.TypeLattice.is_set(val_ctype) or gimple_ctypes.TypeLattice.is_dict(val_ctype)
+            or gimple_ctypes.TypeLattice.is_list(val_ctype) or gimple_ctypes.TypeLattice.is_bytes(val_ctype)):
         # Pointer value stored boxed as int64_t; recover the real type so a
-        # later v[k2] / v.get(...) dispatches on the right container.
+        # later v[k2] / v.get(...) dispatches on the right container. BYTES
+        # is the same shape: its slot holds the `MojoBytes *` word, and a
+        # `char *`-only read printed a set repr for it (`print(d["a"])`).
         raw = gen._call_expr('int64_t', 'mojo_dict_subscript_int', [('MojoDict *', ov), (idx_type, iv)])
         t = gen._cast(val_ctype, raw)
         # `d[k]` where `d: dict[K, dict[K2, V2]]` — carry V2 onto the inner

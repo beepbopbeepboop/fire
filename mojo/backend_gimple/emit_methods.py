@@ -6630,7 +6630,8 @@ def _ldm_get(gen, ov: str, args: list) -> tuple:
     # kind ('d'), the local bound to it is declared the word (the assignment's
     # hint override), and a `double` consumer unboxes with `mojo_box_double`.
     if default_val is None and not gimple_ctypes.TypeLattice.is_cstr(val_type) \
-            and not (gimple_ctypes.TypeLattice.is_set(val_type) or gimple_ctypes.TypeLattice.is_dict(val_type) or gimple_ctypes.TypeLattice.is_list(val_type)):
+            and not (gimple_ctypes.TypeLattice.is_set(val_type) or gimple_ctypes.TypeLattice.is_dict(val_type)
+                     or gimple_ctypes.TypeLattice.is_list(val_type) or gimple_ctypes.TypeLattice.is_bytes(val_type)):
         if gen._is_none_literal(args[0]):
             _boxed = gen._call_expr('int64_t', 'mojo_dict_get_boxed_none',
                                     [('MojoDict *', ov)])
@@ -6685,7 +6686,8 @@ def _ldm_get(gen, ov: str, args: list) -> tuple:
         # heap/static addresses as variable/type names), so the
         # default-application is spelled as branch-and-assign.
         result_type = val_type
-        _container_vt = (gimple_ctypes.TypeLattice.is_set(val_type) or gimple_ctypes.TypeLattice.is_dict(val_type) or gimple_ctypes.TypeLattice.is_list(val_type))
+        _container_vt = (gimple_ctypes.TypeLattice.is_set(val_type) or gimple_ctypes.TypeLattice.is_dict(val_type)
+                         or gimple_ctypes.TypeLattice.is_list(val_type) or gimple_ctypes.TypeLattice.is_bytes(val_type))
         # CPython's `get(k, default)` has a HETEROGENEOUS result: the
         # stored value on a hit, the default on a miss, and those two can
         # be different types. One C slot cannot be both, so the result type
@@ -6851,7 +6853,8 @@ def _ldm_get(gen, ov: str, args: list) -> tuple:
         return 'char *', raw
     elif gimple_ctypes.TypeLattice.is_double(val_type):
         return 'double', raw
-    elif (gimple_ctypes.TypeLattice.is_set(val_type) or gimple_ctypes.TypeLattice.is_dict(val_type) or gimple_ctypes.TypeLattice.is_list(val_type)):
+    elif (gimple_ctypes.TypeLattice.is_set(val_type) or gimple_ctypes.TypeLattice.is_dict(val_type)
+          or gimple_ctypes.TypeLattice.is_list(val_type) or gimple_ctypes.TypeLattice.is_bytes(val_type)):
         t = gen._cast(val_type, raw)
         _nd = gen._dict_nested_val_types.get(ov)
         if _nd:

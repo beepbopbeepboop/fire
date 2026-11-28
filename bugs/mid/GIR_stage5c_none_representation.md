@@ -690,13 +690,14 @@ Pinned as `tools/pydiff_corpus/containers/41_dict_get_container_values.py`
 `print` / `len` / subscript. `test_pydiff_ratchet.py` 139/0, the type and
 runtime ratchets 0, runtime header scan 84/84.
 
-Residual, measured and NOT a regression: a BYTES value domain is still
+~~Residual, measured and NOT a regression: a BYTES value domain is still
 unreadable through `.get` (`d = {"a": b"xy"}; print(d.get("a"))` spells the
 pointer, and `len(d.get("a"))` is its address length). It did so before this
 change too (its old domain was the `int64_t` default); `_ldm_get`'s container
 arm has no bytes reader, so `dict_value_kind` deliberately does not claim
 bytes as a container and the `exprtypes` comment says what to implement
-first.
+first.~~ CLOSED 2026-11-28 — see the last Status entry (bytes `.get` and
+bytes subscript).
 
 ### Cross-module per-file (`do_imports=False`) mixed fields — measured
 
@@ -1029,3 +1030,34 @@ H2 edits themselves moved no corpus program). `compile_stdlib.py -j 8`:
 (the other lane's `--update`), 0 failures; `test_runtime_header_scan.py`
 84/84. The owner's `make bootstrap` is still the acceptance for the runtime
 and compiled-path changes.
+
+## Status 2026-11-28 (bytes value-domain `.get` and bytes subscript)
+
+The last residual this doc carried is closed: a bytes-valued dict now reads
+through `.get`/`d[k]` with the bytes readers, and a miss spells `None`.
+
+- `dict_value_kind` names a BYTES literal as `MojoBytes *` (a bytes literal
+  is the same AST node class as a string with `is_bytes`; it was answering
+  `char *`), and claims `is_bytes` as a container-shaped domain.
+- `_ldm_get`'s container arm covers bytes: no-default gets return the
+  `MojoBytes *` pointer (the slot's own word), and the defaulted get uses the
+  same result type with the container branch's default coercion. A miss is
+  NULL, which `mojo_bytes_repr` already renders as `"None"` (no runtime
+  change needed).
+- `_ls_dict` (the SUBSCRIPT reader) gains the same bytes arms for both key
+  domains: a str key reads the slot's int view and casts to
+  `MojoBytes *`; a bytes key goes through the boxed bytes-key reader and
+  casts. Before this, `print(d["a"])` emitted the *set* repr for a bytes
+  value (`_mojo_repr_set(MojoBytes *)` — a hard gcc error).
+- Pinned as
+  `tools/pydiff_corpus/containers/42_dict_get_bytes_values.py`: hit/miss/
+  empty bytes/`None` value, `is None`, `len`, `==`, a NUL-free slice of a
+  hit, `.get(k, default)`, a bytes-KEY dict's `.get` and `d[b"k"]`, and a
+  mixed bytes+None domain. OK under `pydiff`.
+
+Measured on the shared tree: corpus 288 programs (the new pin included) —
+OK **163**, WRONG 107, CRASH 14, ERROR 2, GCC 2, REFUSED 0; the WRONG and
+CRASH lists are identical to the pre-bytes run, so only the new pin moved.
+`compile_stdlib.py -j 8`: 610 passed, 0 failed (0 expected, 0 unexpected).
+`test_gimple_runner.py`: **688 passed, 0 failed**. `test_pydiff_ratchet.py`:
+163 listed, 0 failures. The owner's `make bootstrap` remains the acceptance.

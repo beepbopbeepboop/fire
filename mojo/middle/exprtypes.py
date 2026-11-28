@@ -2056,7 +2056,10 @@ def dict_value_kind(gen, node):
     if isinstance(node, FloatLiteral):
         return 'double'
     if isinstance(node, StringLiteral):
-        return 'char *'
+        # A BYTES literal is the same node class with `is_bytes` set; the
+        # dict stores a `MojoBytes *` and `.get`/`d[k]` need the bytes
+        # readers (`len`, repr, `==`), not the `char *` ones.
+        return 'MojoBytes *' if getattr(node, 'is_bytes', False) else 'char *'
     _vt = gen._quick_type(node)
     if _vt in _FLOAT_TYPES:
         return 'double'
@@ -2066,14 +2069,13 @@ def dict_value_kind(gen, node):
     # answer: the dict stores the pointer and a `.get`/`d[k]` read must know
     # the reader (len/subscript/repr), not treat it as an int64 word.
     #
-    # BYTES is deliberately NOT here. `_ldm_get`'s container arm covers
-    # list/dict/set only, so a bytes domain would take the boxed/word read and
-    # print the pointer (measured: `d = {"a": b"xy"}; print(d.get("a"))`
-    # spelled the address in both the old int64_t domain and a
-    # `MojoBytes *` one). A bytes-valued dict needs its own accessor pairing
-    # first; convert this to a container kind in the same change.
+    # BYTES is a container-shaped value too: `d = {"a": b"xy"}` stores a
+    # `MojoBytes *`, and `.get` must return that pointer so `len`/`print`/`==`
+    # use the bytes readers instead of an int64 word (which printed the
+    # pointer). `_ldm_get`'s container arm and `mojo_bytes_repr`'s NULL arm
+    # (a miss prints `None`) are the other two halves.
     if _vt and (TypeLattice.is_list(_vt) or TypeLattice.is_dict(_vt)
-                or TypeLattice.is_set(_vt)):
+                or TypeLattice.is_set(_vt) or TypeLattice.is_bytes(_vt)):
         return _vt
     if _vt and TypeLattice.ends_in_star(_vt) and gen.struct_field_types.get(_vt[:-2].strip()):
         return _vt
