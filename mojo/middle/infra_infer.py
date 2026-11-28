@@ -2743,7 +2743,7 @@ def _is_none_return_arm(node) -> bool:
             and gimple_ctypes.TypeLattice.is_none_type(_as_str(node.name)))
 
 
-def _return_arms_need_boxed_word(acc: list, arms: list, joined: str = None) -> bool:
+def _return_arms_need_boxed_word(acc: list, arms: list, joined: str = None, gen=None) -> bool:
     """Does an unannotated function whose arms joined to a POINTER really mix
     a pointer with a scalar, so its return type must be the boxed word?
 
@@ -2815,6 +2815,20 @@ def _return_arms_need_boxed_word(acc: list, arms: list, joined: str = None) -> b
                     and isinstance(_node, gimple_ctypes.SubscriptExpr)
                     and isinstance(_node.obj, gimple_ctypes.IdentExpr)):
                 return True
+            # A dispatch through a FUNCTION-VALUED local/parameter (`fn(a, b)`
+            # where fn came from a dict of defs) returns whatever that callee
+            # returned -- int, None or str. Its `int64_t` is an erased word,
+            # not scalar evidence; casting it to the joined `char *` handed
+            # printf a box header or a small integer. The callee is not a
+            # known function name, so the arm is a dispatch and must widen.
+            if (gimple_ctypes.TypeLattice.is_cstr(_joined)
+                    and isinstance(_node, gimple_ctypes.CallExpr)
+                    and isinstance(_node.func, gimple_ctypes.IdentExpr)):
+                _fnn = _as_str(_node.func.name)
+                _rets = getattr(gen, 'func_return_types', None) or {}
+                _vars = getattr(gen, 'var_types', None) or {}
+                if _fnn not in _rets and _fnn in _vars:
+                    return True
     return False
 
 
@@ -2957,13 +2971,22 @@ def _boxed_local_binding_kinds(gen, body: list) -> dict:
     return out
 
 
-def _return_arm_is_boxed_local(gen, arms: list, body: list) -> bool:
+def _return_arm_is_boxed_local(gen, arms: list, body: list, acc: list = None) -> bool:
     """True when a returned name is bound to two incompatible kinds here."""
     kinds = _boxed_local_binding_kinds(gen, body)
-    for arm in (arms or []):
+    untyped = set(getattr(gen, '_cur_untyped_params', ()) or ())
+    for i, arm in enumerate(arms or []):
         if isinstance(arm, gimple_ctypes.IdentExpr):
             ks = kinds.get(_as_str(arm.name), set())
             if len(ks) > 1 and not ks <= {'int', 'bool', 'float'}:
+                return True
+            # A pass-through of UNANNOTATED parameters: each argument is boxed
+            # by its call sites, so a bare-name arm carries the tagged word
+            # even though _quick_type guessed a pointer from another arm.
+            if _as_str(arm.name) in untyped and acc is not None \
+                    and any(gimple_ctypes.TypeLattice.is_cstr(_as_str(a))
+                            for a in acc) \
+                    and len(set(_as_str(a) for a in acc)) > 1:
                 return True
         if isinstance(arm, gimple_ctypes.TernaryExpr):
             branches = [getattr(arm, 'then_val', None), getattr(arm, 'else_val', None)]
@@ -3002,7 +3025,7 @@ def _infer_return_type_core(gen, body: list) -> str:
         # do NOT add the body to `_mixed_return_bodies` -- these arms are
         # already boxed by their stores, and re-boxing them here would box a
         # box.
-        if (_return_arm_is_boxed_local(gen, arms, body)
+        if (_return_arm_is_boxed_local(gen, arms, body, acc)
                 and not gimple_ctypes.TypeLattice.is_word(_rt)):
             return 'int64_t'
         # A pointer beside a scalar has no arm type that can hold both; see
@@ -3011,7 +3034,7 @@ def _infer_return_type_core(gen, body: list) -> str:
         # exactly the functions this decision widened, rather than re-deriving
         # the mix from a differently-seeded type table.
         if (gimple_ctypes.TypeLattice.is_pointer(_rt)
-                and _return_arms_need_boxed_word(acc, arms, _rt)) \
+                and _return_arms_need_boxed_word(acc, arms, _rt, gen)) \
                 or (gimple_ctypes.TypeLattice.is_int_word(_rt)
                     and _return_arms_are_int_or_none(acc, arms, body)):
             _mixed = getattr(gen, '_mixed_return_bodies', None)
