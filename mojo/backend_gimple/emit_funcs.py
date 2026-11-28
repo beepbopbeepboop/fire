@@ -4177,7 +4177,9 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._reset_func(node.body, node.params,
                     allow_lambda_reduction=not _is_coro_body,
                     default_none_params=ginf.param_default_none_names(
-                        gen, node, _as_str(node.name)))
+                        gen, node, _as_str(node.name)),
+                    mixed_field_params=ginf.param_mixed_field_names(
+                        gen, _as_str(node.name)))
     # Per-FUNCTION record of which locals hold a beta-reducible
     # capturing lambda (see mojo/middle/lambdareduce). Cleared here,
     # at a real per-function entry point, rather than in `_reset_func`

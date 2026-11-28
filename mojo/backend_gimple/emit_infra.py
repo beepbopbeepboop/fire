@@ -302,6 +302,16 @@ def _reset_func(gen, body: list = None, params: list = None,
     # arithmetic use goes through the box helpers). NOT `tagged`: these are
     # scalar/None boxes, not a kind-mixed generator word, so `dyn` would make
     # every read ask the runtime for a type it already knows.
+    # A SINGLE-STAR `*args` parameter is a MojoList whose slots can carry any
+    # kind (a `None` argument is packed as the None box, stage 5c). Marking it
+    # slot-kinded makes `args[i]` take the boxed slot read; an int/str/pointer
+    # slot still reads its raw word.
+    for _vp in (params or ()):
+        _vpn = _as_str(_vp[0] if isinstance(_vp, (tuple, list)) else _vp)
+        if _vpn.startswith('*') and not _vpn.startswith('**'):
+            _vpb = _as_str(_vpn.lstrip('*'))
+            gen._struct_slot_kinds[_vpb] = _RuntimeKinded(['int', 'str'])
+            gen._word_mark_slot_kinds(_vpb)
     gen._cur_mixed_field_params = set(mixed_field_params or ())
     for _mfp in gen._cur_mixed_field_params:
         _mfps = _as_str(_mfp)
@@ -3177,8 +3187,9 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 gen._rt_void('mojo_list_extend', [lst, f"{_src}"])
                 _has_spread = True
                 continue
-            ggc._append_vararg_element(gen, lst, atype, aval)
-            _kind_bytes.append(ggc._vararg_elem_kind(atype))
+            ggc._append_vararg_element(gen, lst, atype, aval, _vn)
+            _kind_bytes.append('n' if (gen._is_none_literal(_vn) if _vn is not None else False)
+                               else ggc._vararg_elem_kind(atype))
         if not _has_spread:
             ggc._pack_vararg_kinds(gen, lst, ''.join(_kind_bytes))
         arg_pairs = fixed_pairs + [('MojoList *', lst)]
@@ -5113,9 +5124,10 @@ def param_value_class(gen, func_name, param_name) -> str:
     `None` arguments (and a padded `= None` default) are ignored: they say
     nothing about the kind of the non-`None` values. `'refs'` means every
     other call site passes a reference, `'scalar'` that every one passes an
-    int/float/bool. A parameter with no observation, with an argument whose
-    kind nothing proves, or with BOTH kinds, is `'unknown'` (rule 3: no
-    informative evidence, nothing changes). `func_name` is the callee key the
+    int/float/bool. BOTH kinds is `'mixed'`: evidence of more than one kind,
+    so the slot is the tagged word (the box) and its reads dispatch by kind.
+    `'unknown'` is rule 3's silence: no observation, or an argument whose
+    kind nothing proves. `func_name` is the callee key the
     call-site pass records under: the bare name for a free function,
     `<Struct>_<method>` for a method (a constructor is `<Struct>___init__`)."""
     obs: dict = _as_dict(getattr(gen, '_param_value_obs', None) or {})
@@ -5129,6 +5141,11 @@ def param_value_class(gen, func_name, param_name) -> str:
         return 'refs'
     if bits == _PV_SCALAR:
         return 'scalar'
+    # BOTH kinds at the call sites (`push(1)` and `push("x")`): the slot is
+    # the DynWord/box, not "no evidence". Rule 3's silence is for a parameter
+    # with NO informative argument, which is the `_PV_UNKNOWN`-only case below.
+    if (bits & _PV_REFS) and (bits & _PV_SCALAR):
+        return 'mixed'
     return 'unknown'
 
 
@@ -5173,10 +5190,15 @@ def _pv_var_type(gen, caller_key, name) -> str:
     return _as_str(t)
 
 
-def _pv_bind_local_structs(node, structs: dict, out: dict) -> None:
+def _pv_bind_local_structs(node, structs: dict, out: dict,
+                           owner_struct=None, field_types=None) -> None:
     """Record `name -> '<Struct> *'` for every `name = Struct(...)` under
     `node`, not descending into a nested `def`/`class`; a name bound to two
-    different structs is dropped (`''`).
+    different structs is dropped (`''`). Also follows `name = self.<field>`
+    and `name = <known local>.<field>` when the field's declared type is a
+    struct pointer (`cur = self.head; cur = cur.next`), which is the receiver
+    a later `cur.value` field read needs. `field_types` is
+    `gen.struct_field_types`; `owner_struct` is the enclosing struct.
 
     Flat `_walk_ast` plus a set of the nodes that sit inside a nested
     definition, not a recursion over `dataclasses.fields`: the compiled compiler
@@ -5202,12 +5224,51 @@ def _pv_bind_local_structs(node, structs: dict, out: dict) -> None:
                 out[nm] = ''
             else:
                 out[nm] = ty
+        elif isinstance(n, gimple_ctypes.AssignStmt) \
+                and isinstance(n.target, gimple_ctypes.IdentExpr) \
+                and isinstance(n.value, gimple_ctypes.MemberExpr) \
+                and isinstance(n.value.obj, gimple_ctypes.IdentExpr):
+            _recv = _as_str(n.value.obj.name)
+            _rs = _as_str(owner_struct) if _recv == 'self' else ''
+            if not _rs:
+                _rt = _as_str(out.get(_recv, ''))
+                if gimple_ctypes.TypeLattice.ends_in_star(_rt):
+                    _rs = _rt[:-2]
+            if _rs:
+                _ft = _as_str((_as_dict((field_types or {}).get(_rs) or {})).get(
+                    _as_str(n.value.member)))
+                if not _ft or not gimple_ctypes.TypeLattice.ends_in_star(_ft):
+                    # The field is a WORD by usage inference (`head` is None or
+                    # a `Node(...)`, so its C type is the int64_t default). The
+                    # STRUCT it points at is still recoverable from the
+                    # constructor store that created it, and that is the owner
+                    # `cur.value` needs.
+                    _ost = structs.get(_rs)
+                    if _ost is not None:
+                        for _om in (getattr(_ost, 'methods', None) or []):
+                            _ofs: list = []
+                            _self_field_stores(getattr(_om, 'body', []), _ofs)
+                            for _ofi in range(len(_ofs)):
+                                if _as_str(_ofs[_ofi][0]) != _as_str(n.value.member):
+                                    continue
+                                _ofv = _ofs[_ofi][1]
+                                if isinstance(_ofv, gimple_ctypes.CallExpr) \
+                                        and isinstance(_ofv.func, gimple_ctypes.IdentExpr) \
+                                        and _as_str(_ofv.func.name) in structs:
+                                    _ft = _as_str(_ofv.func.name) + ' *'
+                if _ft and gimple_ctypes.TypeLattice.ends_in_star(_ft):
+                    _nm2 = _as_str(n.target.name)
+                    if _nm2 in out and out[_nm2] != _ft:
+                        out[_nm2] = ''
+                    else:
+                        out[_nm2] = _ft
 
 
 def value_class_of(gen, node, caller_key, caller_struct, depth) -> str:
     """The value class of one expression evaluated inside `caller_key` (a
     callee key, `'<toplevel>'` for module code), owned by struct
-    `caller_struct` or None: `'none'`, `'refs'`, `'scalar'` or `'unknown'`.
+    `caller_struct` or None: `'none'`, `'refs'`, `'scalar'`, `'mixed'` (both
+    kinds, the tagged word) or `'unknown'` (no evidence).
 
     Only shapes that PROVE a kind answer; everything else is `'unknown'`,
     which is silence rather than a second kind (the same discipline the
@@ -5286,6 +5347,14 @@ def value_class_of(gen, node, caller_key, caller_struct, depth) -> str:
         _lks: dict = _as_dict(gen._pv_local_scalar_kinds)
         _ck: str = _as_str(caller_key)
         if _ck in _lks and n in _as_dict(_lks[_ck]):
+            # The table records the binding's SCALAR kind spelling
+            # ('int'/'double'/'str'). Only the numeric kinds are the
+            # `'scalar'` value class; a `str` local is a REFERENCE, and
+            # calling it scalar made a param receiving it beside a str
+            # literal look mixed (`rename(s)`/`rename("")`) and boxed it.
+            _lk = _as_str(_as_dict(_lks[_ck])[n])
+            if _lk == 'str':
+                return 'refs'
             return 'scalar'
         return _pv_type_class(_pv_var_type(gen, caller_key, n))
     if isinstance(node, gimple_ctypes.MemberExpr) \
@@ -5296,6 +5365,13 @@ def value_class_of(gen, node, caller_key, caller_struct, depth) -> str:
             owner = caller_struct
         else:
             t = _pv_var_type(gen, caller_key, on)
+            # A local bound from a struct FIELD (`cur = self.head`) is typed
+            # `int64_t` by the word-inference but its STRUCT is recorded in
+            # `_pv_local_structs`; that is the owner a `cur.value` read needs.
+            _lst = _as_str((_as_dict((getattr(gen, '_pv_local_structs', None) or {}).get(
+                _as_str(caller_key)) or {})).get(on))
+            if _lst and gimple_ctypes.TypeLattice.ends_in_star(_lst):
+                t = _lst
             if t and gimple_ctypes.TypeLattice.ends_in_star(t):
                 owner = t[:-2]
         if owner and _as_str(owner) in structs:
@@ -5333,16 +5409,23 @@ def field_value_class(gen, struct_name, field_name, depth) -> str:
     classes = _field_store_classes(gen, struct, _as_str(field_name), depth)
     saw_refs = False
     saw_scalar = False
+    saw_mixed = False
     for c in classes:
         if c == 'refs':
             saw_refs = True
         elif c == 'scalar':
             saw_scalar = True
+        elif c == 'mixed':
+            saw_mixed = True
         elif c != 'none':
             return 'unknown'
-    if saw_refs and not saw_scalar:
+    if saw_mixed or (saw_refs and saw_scalar):
+        # The field holds values of more than one kind; the box is the only
+        # representation whose reads dispatch on what is actually there.
+        return 'mixed'
+    if saw_refs:
         return 'refs'
-    if saw_scalar and not saw_refs:
+    if saw_scalar:
         return 'scalar'
     return 'unknown'
 
@@ -5352,6 +5435,8 @@ def _pv_bits(cls) -> int:
         return _PV_REFS
     if cls == 'scalar':
         return _PV_SCALAR
+    if cls == 'mixed':
+        return _PV_REFS | _PV_SCALAR
     if cls == 'unknown':
         return _PV_UNKNOWN
     return 0
@@ -5493,6 +5578,10 @@ def _pv_collect_tagged(gen, bodies: list, structs: dict, defs: dict,
 def _pv_collect_round(gen, bodies: list, structs: dict, defs: dict, pnames: dict) -> dict:
     """One pass over every call site, into a fresh table."""
     table: dict = {}
+    # callee -> its ANNOTATED parameter names. An annotation is the
+    # representation decision, so call-site kinds are not recorded for it (a
+    # bool-annotated slot is a real `_Bool`, not the tagged word).
+    _ann_cache: dict = {}
     for entry in bodies:
         caller_name = _as_str(entry[0])
         caller_struct = entry[1]
@@ -5504,6 +5593,13 @@ def _pv_collect_round(gen, bodies: list, structs: dict, defs: dict, pnames: dict
                 continue
             fn = defs[callee]
             names = pnames[callee]
+            _ann = _ann_cache.get(callee)
+            if _ann is None:
+                _ann = set()
+                for _ap in (getattr(fn, 'params', None) or []):
+                    if isinstance(_ap, (tuple, list)) and len(_ap) > 1 and _ap[1] is not None:
+                        _ann.add(_as_str(_ap[0]))
+                _ann_cache[callee] = _ann
             bound: set = set()
             spread = False
             for a in call.args:
@@ -5516,23 +5612,28 @@ def _pv_collect_round(gen, bodies: list, structs: dict, defs: dict, pnames: dict
                 # A spread has no one argument per slot: every parameter may
                 # receive anything, which is "no informative evidence".
                 for n in names:
-                    _pv_note(table, callee, n, _PV_UNKNOWN)
+                    if n not in _ann:
+                        _pv_note(table, callee, n, _PV_UNKNOWN)
                 continue
             for i in range(len(call.args)):
                 if i >= len(names):
                     break
                 bound.add(names[i])
+                if names[i] in _ann:
+                    continue
                 cls = value_class_of(gen, call.args[i], caller_name, caller_struct, 0)
                 _pv_note(table, callee, names[i], _pv_bits(cls))
             for kw in (getattr(call, 'kwargs', None) or []):
                 kn = _as_str(kw[0])
                 if kn in names:
                     bound.add(kn)
+                    if kn in _ann:
+                        continue
                     cls = value_class_of(gen, kw[1], caller_name, caller_struct, 0)
                     _pv_note(table, callee, kn, _pv_bits(cls))
             dflts = getattr(fn, 'param_defaults', None) or {}
             for n in names:
-                if n in bound or n not in dflts:
+                if n in bound or n not in dflts or n in _ann:
                     continue
                 cls = value_class_of(gen, dflts[n], '', None, 0)
                 _pv_note(table, callee, n, _pv_bits(cls))
@@ -5609,7 +5710,8 @@ def collect_param_value_obs(gen, all_functions: list, all_structs: list,
     locs: dict = {}
     for entry in caller_bodies:
         one: dict = {}
-        _pv_bind_local_structs(entry[2], structs, one)
+        _pv_bind_local_structs(entry[2], structs, one, entry[1],
+                               getattr(gen, 'struct_field_types', None))
         locs[_as_str(entry[0])] = one
     gen._pv_local_structs = locs
     # Local name -> scalar binding kind ('int' / 'double' / 'str'), per caller
@@ -5711,10 +5813,17 @@ def mixed_field_names(struct, gen=None) -> frozenset:
                 _bit = 1
             elif _vc == 'scalar':
                 _bit = 2
+            elif _vc == 'mixed':
+                # A store of more than one kind (a scalar beside a reference):
+                # the box, even when no `None` store exists. Its reads must
+                # dispatch by kind or a `list.append`/`print` of the field
+                # stores the box's address as an integer.
+                _bit = 4
             stores[fname] = _as_int(stores[fname]) | _bit
     out: list = []
     for fname in order:
-        if (_as_int(stores[fname]) & 3) == 3:
+        _s = _as_int(stores[fname])
+        if (_s & 4) or ((_s & 3) == 3):
             out.append(fname)
     return frozenset(out)
 
@@ -5746,10 +5855,21 @@ def collect_mixed_field_param_names(gen, all_structs) -> dict:
     `param_mixed_field_names` is the BODY-side reader."""
     gen._param_mixed_field_names = {}
     own = _as_set(getattr(gen, '_pv_own_structs', None) or set())
-    if len(own) == 0 or not getattr(gen, '_param_value_obs', None):
-        return {}
     out: dict = {}
+    # A parameter whose call sites pass BOTH a scalar and a reference is the
+    # tagged word for the same reason a mixed FIELD is: the body cannot know
+    # which it holds, so every read must dispatch on the box's kind and every
+    # call site must box what it passes. This is the `'mixed'` value class
+    # (`value_class_of`); it is not rule 3's "no evidence" (that is
+    # `'unknown'`), it is evidence of more than one kind.
+    _pobs = _as_dict(getattr(gen, '_param_value_obs', None) or {})
+    for _pk in _pobs:
+        if (_as_int(_pobs[_pk]) & _PV_REFS) and (_as_int(_pobs[_pk]) & _PV_SCALAR):
+            out[_as_str(_pk)] = 1
+    _do_fields = len(own) > 0 and len(_pobs) > 0
     for st in all_structs or []:
+        if not _do_fields:
+            break
         if not isinstance(st, gimple_ctypes.StructDef):
             continue
         sname = _as_str(st.name)

@@ -15066,7 +15066,11 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
         self._ret_may_hold_mixed = _names
 
     def _arm_is_scalar(v, key, owner, body=None) -> bool:
-        if _rbn_ein.value_class_of(self, v, key, owner, 0) == 'scalar':
+        _avc = _rbn_ein.value_class_of(self, v, key, owner, 0)
+        if _avc == 'scalar' or _avc == 'mixed':
+            # `'mixed'` (a field stored from a scalar beside a reference) is
+            # a box-holding word: its scalar half is one of the values the
+            # return slot can carry, so the None arm needs the box too.
             return True
         # A CALL whose result is the element/value of a container
         # (`items.pop()`, `max(items)`): `value_class_of` is deliberately
@@ -15139,13 +15143,18 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
             if not _bt:
                 _pt = _as_dict((getattr(self, '_inferred_param_types', None) or {}).get(_as_str(key)) or {})
                 _bt = _pt.get(_bn)
+            if not _bt:
+                # A `*args` parameter is a `MojoList *` the type tables do not
+                # name; a subscript of any plain name is a value word in valid
+                # code, so it is scalar evidence for the return slot.
+                return True
         if _bt is None:
             _bt = ''
         return bool(_bt) and (gimple_ctypes.TypeLattice.is_list(_bt)
                               or gimple_ctypes.TypeLattice.is_dict(_bt)
                               or gimple_ctypes.TypeLattice.is_set(_bt))
 
-    def _one(body, key, owner) -> None:
+    def _one(body, key, owner, va_names=None) -> None:
         if body is None:
             return
         acc: list = []
@@ -15163,6 +15172,15 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
                     and gimple_ctypes.TypeLattice.is_none_type(_as_str(_v.name))):
                 _has_none = True
                 continue
+            # A `*args` element (`return args[0]`) is a VALUE WORD from a pack
+            # that can hold `None` (the pack boxes a None argument), so the
+            # return slot may be None as well as the element's own kind.
+            if va_names and isinstance(_v, SubscriptExpr) \
+                    and isinstance(_v.obj, IdentExpr) \
+                    and _as_str(_v.obj.name).lstrip('*') in va_names:
+                _has_none = True
+                _has_scalar = True
+                continue
             if _arm_is_scalar(_v, key, owner, body):
                 _has_scalar = True
         # Python's fall-off-the-end is `return None`: a proven scalar arm plus
@@ -15179,9 +15197,18 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
                 self._ret_boxed_names = _boxed
             _boxed.add(_as_str(key))
 
+    def _va_names(fn) -> list:
+        _out: list = []
+        for _pp in (getattr(fn, 'params', None) or []):
+            _pn = _as_str(_pp[0] if isinstance(_pp, (tuple, list)) else _pp)
+            if _pn.startswith('*') and not _pn.startswith('**'):
+                _out.append(_as_str(_pn.lstrip('*')))
+        return _out
+
     for _fn in all_functions:
         if isinstance(_fn, FunctionDef) and getattr(_fn, 'return_type', None) is None:
-            _one(getattr(_fn, 'body', None), _as_str(_fn.name), None)
+            _one(getattr(_fn, 'body', None), _as_str(_fn.name), None,
+                 _va_names(_fn))
     for _st in all_structs_for_methods:
         if not isinstance(_st, StructDef):
             continue
@@ -15189,13 +15216,14 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
         for _m in _st.methods:
             if getattr(_m, 'return_type', None) is None:
                 _one(getattr(_m, 'body', None),
-                     _sname + '_' + _as_str(_m.name), _sname)
+                     _sname + '_' + _as_str(_m.name), _sname, _va_names(_m))
     # Nested `def`s/lambdas this compile lifts into their own functions: the
     # same decision, recorded under the name the closure VALUE is created
     # with (`_ret_boxed_names`). The closure-creation and call-through-value
     # sites consult that name (see emit_exprs/emit_methods).
     for _lp in (lifted_pairs or ()):
-        _one(getattr(_lp[1], 'body', None), _as_str(_lp[0]), None)
+        _one(getattr(_lp[1], 'body', None), _as_str(_lp[0]), None,
+             _va_names(_lp[1]))
 
 
 def _gmp_collect_param_value_obs(self, all_functions: list, all_structs_for_methods: list,

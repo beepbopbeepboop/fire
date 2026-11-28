@@ -11213,7 +11213,8 @@ def _vararg_elem_kind(ctype: str) -> str:
     return 'i'
 
 
-def _append_vararg_element(gen, lst: str, ctype: str, cvalue: str) -> None:
+def _append_vararg_element(gen, lst: str, ctype: str, cvalue: str,
+                           node=None) -> None:
     """Append ONE packed `*args` element to the packed `MojoList *` `lst`
     through the accessor its own C type needs — `mojo_list_append_str` for a
     `char *`, `mojo_list_append_double` for a double, `mojo_list_append_int`
@@ -11227,6 +11228,13 @@ def _append_vararg_element(gen, lst: str, ctype: str, cvalue: str) -> None:
     `_pack_vararg_trailing_params`, `_pack_kwargs_slot_call` and
     `_pack_generator_star_args` — the generator arm's own copy of the
     str/double/int dispatch is what this consolidated (see its docstring)."""
+    if node is not None and gen._is_none_literal(node):
+        # A `None` argument in the pack is the shared None box, appended under
+        # its own slot kind; the callee's `*args` is slot-kinded
+        # (`_reset_func`), so `args[i]` reads it back as None, not 0.
+        _nw = gen._call_expr('int64_t', 'mojo_box_none', [])
+        gen._rt_void('mojo_list_append_word', [lst, f"{_nw}"])
+        return
     if gimple_ctypes.TypeLattice.is_cstr(ctype):
         gen._rt_void('mojo_list_append_str', [lst, f"{cvalue}"])
     elif gimple_ctypes.TypeLattice.is_double(ctype):
@@ -13093,7 +13101,18 @@ def _lower_varargs_pack(gen, pack_args: list) -> tuple:
     if len(lowered) == 1 and gimple_ctypes.TypeLattice.is_list(lowered[0][0]):
         return lowered[0]
     lst = gen._rt_call('MojoList *', 'mojo_list_new', [])
-    for atype, aval in lowered:
+    for _vi in range(len(lowered)):
+        atype = _as_str(lowered[_vi][0])
+        aval = _as_str(lowered[_vi][1])
+        if _vi < len(pack_args) and gen._is_none_literal(pack_args[_vi]):
+            # A `None` in the pack is the shared None box, appended under its
+            # own slot kind; the callee's `*args` is slot-kinded
+            # (`_reset_func`), so `args[i]` reads it back as None, not 0.
+            _nw = gen._call_expr('int64_t', 'mojo_box_none', [])
+            gen._void_call('mojo_list_append_word', [('MojoList *', lst),
+                                                     ('int64_t', _nw)])
+            gen._word_mark_slot_kinds(lst)
+            continue
         aval = gen._coerce_to_type(atype, 'int64_t', aval)
         gen._rt_void('mojo_list_append_int', [lst, f"{aval}"])
     return ('MojoList *', lst)
