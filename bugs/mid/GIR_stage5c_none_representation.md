@@ -463,6 +463,12 @@ added (the `test_type_string_ratchet.py` counts are unchanged).
 - `params/12_return_str_or_none.py` (`return parts[0]` / `text[-1]` beside
   `None`): OK — a subscript of a LOCAL container is now scalar evidence for
   the return slot.
+- `strings/13_str_format_positional.py` OK, `strings/17_str_repr_bool_none.py`
+  OK: `"{}".format(None)` / `format(True)`, `bool(None)`, `repr(None)` /
+  `'%r' % None`, and `None` selected by `and`/`or` are the shared box / the
+  right bool spelling. A local `x = None` followed by `not x`, `bool(x)`,
+  `x and 3`, `x or 7`, `True and x` is OK; the same at MODULE level is not
+  (module globals are excluded by the decision rule).
 - `classes/04_list_field_append.py`: its `None` lines are now correct; the
   remaining diff is the mixed int/str LIST repr (`['1', 'two', ...]`) and the
   `count_strings` that follows from it — a mixed-parameter value-kind gap

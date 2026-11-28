@@ -1680,13 +1680,15 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
         # name would lose the kind every later consumer dispatches on. Unlike
         # the generator cases the RHS itself is proof for THIS store, so the
         # name-level "every binding is tagged" walk is not needed.
-        _call_tagged = (gimple_ctypes.TypeLattice.is_word(vtype)
-                        and isinstance(node.value, gimple_ctypes.CallExpr)
-                        and (gen._word_bind_tagged(v)
-                             or (isinstance(node.value.func,
-                                            gimple_ctypes.IdentExpr)
-                                 and _as_str(node.value.func.name) in getattr(
-                                     gen, '_ret_may_hold_mixed', ()))))
+        _in_get_boxed = _as_str(v) in getattr(gen, '_dict_get_boxed_temps', ())
+        _call_tagged = (
+            gimple_ctypes.TypeLattice.is_word(vtype)
+            and isinstance(node.value, gimple_ctypes.CallExpr)
+            and not _in_get_boxed
+            and (gen._word_bind_tagged(v)
+                 or (isinstance(node.value.func, gimple_ctypes.IdentExpr)
+                     and _as_str(node.value.func.name)
+                     in getattr(gen, '_ret_may_hold_mixed', ()))))
         # A receive-only name (`x = yield`, every binding of it) keeps the
         # resume word's box too: `x = yield` after `next(it)` is the None box,
         # and the name must render it as None (`tagged_recv_name`).

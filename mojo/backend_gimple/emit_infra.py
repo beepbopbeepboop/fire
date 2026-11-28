@@ -5401,8 +5401,21 @@ def _pv_is_tagged_literal(node) -> bool:
 def _pv_collect_tagged(gen, bodies: list, structs: dict, defs: dict,
                        pnames: dict) -> dict:
     """The flat `{callee\\x1fparam: 1}` of parameters that receive a `None` or
-    bool LITERAL at any call site (see `_pv_is_tagged_literal`)."""
+    bool LITERAL at any call site (see `_pv_is_tagged_literal`).
+
+    An ANNOTATED parameter is skipped: its annotation is the representation
+    decision, and a bool-annotated slot is a real `_Bool`, not a word -- boxing
+    it turned an annotated `bool` parameter's `False` into the boxed-True path
+    (`gimple_bool_annotated_parameter`)."""
     out: dict = {}
+    _annot: dict = {}
+    for _k in defs:
+        _fn = defs[_k]
+        _s: set = set()
+        for _p in (getattr(_fn, 'params', None) or []):
+            if isinstance(_p, (tuple, list)) and len(_p) > 1 and _p[1] is not None:
+                _s.add(_as_str(_p[0]))
+        _annot[_k] = _s
     for entry in bodies:
         caller_name = _as_str(entry[0])
         caller_struct = entry[1]
@@ -5423,14 +5436,17 @@ def _pv_collect_tagged(gen, bodies: list, structs: dict, defs: dict,
                     spread = True
             if spread:
                 continue
+            _ann = _annot.get(callee) or set()
             for i in range(len(call.args)):
                 if i >= len(names):
                     break
+                if names[i] in _ann:
+                    continue
                 if _pv_is_tagged_literal(call.args[i]):
                     out[param_value_key(callee, names[i])] = 1
             for kw in (getattr(call, 'kwargs', None) or []):
                 kn = _as_str(kw[0])
-                if kn in names and _pv_is_tagged_literal(kw[1]):
+                if kn in names and kn not in _ann and _pv_is_tagged_literal(kw[1]):
                     out[param_value_key(callee, kn)] = 1
     return out
 
