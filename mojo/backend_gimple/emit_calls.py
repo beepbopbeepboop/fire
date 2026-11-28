@@ -5704,7 +5704,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # 2-argument form used to fall through to BUILTIN_VALUE_MAP's `mojo_zip`
     # with its arguments UNMATERIALIZED, so a generator argument was walked
     # as if it were a list header (a hard crash).
-    if (fname_raw == 'zip' and len(node.args) >= 2
+    if (fname_raw == 'zip' and len(node.args) >= 1
             and not gen._locally_binds_name('zip')):
         return _lower_builtin_zip_n(gen, node)
     # map(f, xs) / filter(f, xs) in VALUE position. Intercepted only when the
@@ -8184,6 +8184,21 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
     return 'MojoList *', t
 
 
+def _zip_elem_kind(gen, arg_node, arg_val: str):
+    """The one-byte slot kind a zip input yields, or None when unknown.
+
+    From the list's statically recorded element type (`_elem_types`), which
+    covers a list literal and a comprehension; a runtime row would be exact
+    too, but the per-slot kind the pair needs at index i is per ELEMENT, and a
+    uniform static element type is the shape every zip input in practice has.
+    None (unknown) keeps `mojo_zip`'s kind-less behaviour."""
+    _et = gen._elem_types.get(_as_str(arg_val))
+    if not _et:
+        return None
+    _b = gimple_ctypes.TypeLattice.slot_kind_byte(_as_str(_et))
+    return _b if _b in ('i', 'd', 'p', 's', 'b', 'l') else None
+
+
 def _lower_builtin_zip_n(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """zip(a, b, ...) as a value — chain as mojo_zip(mojo_zip(a, b), c, ...).
     Every argument is materialized to a MojoList first (see the loop body),
@@ -8199,6 +8214,25 @@ def _lower_builtin_zip_n(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             av = gen._materialize_as_list(at, av)
             at = 'MojoList *'
         arg_pairs.append((at, av))
+    # A ONE-input zip (`zip(names)`) yields one-slot tuples; the two-input
+    # chain below passed a 0 second operand and produced an empty list.
+    if len(node.args) == 1:
+        _k1 = _zip_elem_kind(gen, node.args[0], arg_pairs[0][1])
+        return 'void *', gen._call_expr('void *', 'mojo_zip1_kinds', [
+            arg_pairs[0], ('char', "'" + (_k1 or 'i') + "'")])
+    # A TWO-input zip whose element kinds are statically known builds each
+    # pair under its own per-slot kinds, so an integer 0 slot renders `0`
+    # rather than the generic walker's None (`containers/31_zip_range_negstep`).
+    # An unknown kind keeps `mojo_zip` (today's generic behaviour).
+    if len(node.args) == 2:
+        _ka = _zip_elem_kind(gen, node.args[0], arg_pairs[0][1])
+        _kb = _zip_elem_kind(gen, node.args[1], arg_pairs[1][1])
+        if _ka is not None or _kb is not None:
+            acc_v = gen._call_expr('void *', 'mojo_zip2_kinds', [
+                arg_pairs[0], arg_pairs[1],
+                ('char', "'" + (_ka or 'i') + "'"),
+                ('char', "'" + (_kb or 'i') + "'")])
+            return 'void *', acc_v
     # Fold left: mojo_zip(mojo_zip(a,b), c)
     acc_v = gen._call_expr('void *', 'mojo_zip', [arg_pairs[0], arg_pairs[1]])
     for ap in arg_pairs[2:]:

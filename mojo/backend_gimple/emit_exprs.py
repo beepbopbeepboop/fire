@@ -3940,9 +3940,17 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         # compiler found empty and took the NULL-env branch. The result is a
         # word that may be either, so it is typed as one and its truthiness
         # (and str()/==) ask the runtime.
+        # A C `int` is a word too: a literal `0 and "never"` lowered its left
+        # as plain `int`, so the cstr/word test missed, the join called the
+        # result `char *`, and the falsy left became `(char *)0` — printed
+        # `None` where CPython prints `0` (params/16_bool_and_or_chain).
+        _lword = (gimple_ctypes.TypeLattice.is_word(ltype)
+                  or gimple_ctypes.TypeLattice.is_c_int(ltype))
+        _rword = (gimple_ctypes.TypeLattice.is_word(_rq)
+                  or gimple_ctypes.TypeLattice.is_c_int(_rq))
         _mixed_word = (not _bool_merge
-                       and ((gimple_ctypes.TypeLattice.is_cstr(ltype) and gimple_ctypes.TypeLattice.is_word(_rq))
-                            or (gimple_ctypes.TypeLattice.is_word(ltype) and gimple_ctypes.TypeLattice.is_cstr(_rq))))
+                       and ((gimple_ctypes.TypeLattice.is_cstr(ltype) and _rword)
+                            or (_lword and gimple_ctypes.TypeLattice.is_cstr(_rq))))
         # A `_Bool` against a word of unknown kind (`gen.is_generator or
         # getattr(fn, 'is_async', False)`): the result is a word that holds
         # the bool OR the attribute, so it is one of unknown kind too. And a
@@ -4050,6 +4058,17 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             gen._copy(result, gen._call_expr('int64_t', 'mojo_box_none', []))
             gen._word_mark_boxed(result)
             gen._word_mark_tagged(result)
+        elif (gimple_ctypes.TypeLattice.is_word(res_type)
+              and gimple_exprtypes.is_python_bool_expr(gen, node.left)):
+            # The SELECTED left operand is a Python bool (`False and x`,
+            # `True or x`): a bare 0/1 word prints as 0/1 (`None or False`
+            # printed 0), so it is the bool box, the same representation a
+            # bool store takes. The other arm keeps the word it carries; the
+            # box makes the merge print/compare by kind.
+            gen._copy(result, gen._call_expr(
+                'int64_t', 'mojo_box_from_bool', [('int', gen._cast('int', lval))]))
+            gen._word_mark_boxed(result)
+            gen._word_mark_tagged(result)
         else:
             gen._safe_coerce_emit(ltype, res_type, lval, result)
         gen._goto(bb_merge)
@@ -4075,6 +4094,14 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         elif _rnone and gimple_ctypes.TypeLattice.is_word(res_type):
             # `x and None` / `falsy or None`: the right operand was selected.
             gen._copy(result, gen._call_expr('int64_t', 'mojo_box_none', []))
+            gen._word_mark_boxed(result)
+            gen._word_mark_tagged(result)
+        elif (gimple_ctypes.TypeLattice.is_word(res_type)
+              and gimple_exprtypes.is_python_bool_expr(gen, node.right)):
+            # The selected right operand is a Python bool (`None or False`):
+            # box it so print/str say False, not 0.
+            gen._copy(result, gen._call_expr(
+                'int64_t', 'mojo_box_from_bool', [('int', gen._cast('int', rval))]))
             gen._word_mark_boxed(result)
             gen._word_mark_tagged(result)
         else:
@@ -5109,6 +5136,10 @@ def _lbt_boxed_none_compare(gen, op: str, left_node, lt: str, lv: str, right_nod
     # identity test asks the box's kind, never the word.
     if gen._word_is_mixed_field(_other):
         _mixed_none = True
+    # A container-slot read (a kinded list's element) may be the shared None
+    # box; see `valueinfo.FLAG_MAYBE_NONE`. Only the None question asks the
+    # box -- the same word is a bare str pointer for every other reader.
+    _maybe_none = gen._word_is_maybe_none(_other)
     # NOTE: a merely-DYN word is deliberately NOT in this gate. A dyn word is
     # the union of two conventions: a container-slot read (whose None 5c
     # boxes, so a bare 0 there is the integer 0) and an ERASED POINTER word
@@ -5123,9 +5154,9 @@ def _lbt_boxed_none_compare(gen, op: str, left_node, lt: str, lv: str, right_nod
     # Only an int word: a `char *` name keeps its NULL-pointer test below.
     # A float box answers 0 here, which is the right answer for a float.
     if (gimple_ctypes.TypeLattice.is_int_word(_other_t)
-            and (gen._word_may_be_box(_other) or _mixed_none)
+            and (gen._word_may_be_box(_other) or _mixed_none or _maybe_none)
             and (not _ident or gen._word_is_tagged(_other)
-                 or _for_tagged or _mixed_none)):
+                 or _for_tagged or _mixed_none or _maybe_none)):
         _is_none = gen._call_expr('int', 'mojo_word_is_none', [('int64_t', _other)])
         _cmp = '!= 0' if op in ('==', 'is') else '== 0'
         _t = gen._new_temp('_Bool')
@@ -5452,6 +5483,18 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             gen._free_fresh_container(rv, 'MojoList *')
         return 'MojoList *', t
 
+    def _concat_result_kinds(_t, _a, _b):
+        # The runtime concat lays the two operands' per-slot rows end to end
+        # (fire_runtime.c), so the result describes its own slots. Say so
+        # statically too: without the mark a later `res.append(x)` took the
+        # plain int/str append and left the new slot undescribed, and
+        # `nums = nums + [3]; nums.append([])` printed the nested list's
+        # ADDRESS (`containers/07`). `_RuntimeKinded` makes the repr/readers
+        # ask the value's own row.
+        if gen._word_has_slot_kinds(_a) or gen._word_has_slot_kinds(_b):
+            gen._word_mark_slot_kinds(_t)
+            gen._struct_slot_kinds[_t] = ginf._RuntimeKinded(['int', 'str'])
+
     # MojoList + MojoList → mojo_list_concat
     if op == '+' and gimple_ctypes.TypeLattice.is_list(lt) and gimple_ctypes.TypeLattice.is_list(rt):
         # `mojo_list_concat` copies both operands into a new list, so an operand
@@ -5462,6 +5505,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         t = gen._rt_call('MojoList *', 'mojo_list_concat', [f"{lv}", f"{rv}"])
         if lv in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[lv]
+        _concat_result_kinds(t, lv, rv)
         if _free_l:
             gen._free_fresh_container(lv, 'MojoList *')
         if _free_r:
@@ -5478,6 +5522,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         t = gen._rt_call('MojoList *', 'mojo_list_concat', [f"{lv}", f"{rcast}"])
         if lv in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[lv]
+        _concat_result_kinds(t, lv, rcast)
         return 'MojoList *', t
 
     # MojoList * + <pointer-ish> → mojo_list_concat after casting the RHS to
@@ -5494,6 +5539,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         t = gen._rt_call('MojoList *', 'mojo_list_concat', [f"{lv}", f"{rcast}"])
         if lv in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[lv]
+        _concat_result_kinds(t, lv, rcast)
         return 'MojoList *', t
 
     # <opaque int64_t> + MojoList * → mojo_list_concat. The MIRROR of the

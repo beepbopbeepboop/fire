@@ -1097,3 +1097,66 @@ CRASH 14, ERROR 2, GCC 2, REFUSED 0 (identical WRONG/CRASH lists to the
 pre-pass run). `compile_stdlib.py -j 8`: 610 passed, 0 failed (0 expected, 0
 unexpected). `test_gimple_runner.py`: **688 passed, 0 failed**. The owner's
 `make bootstrap` remains the acceptance.
+
+## Status 2026-11-28 (the container-slot None group: corpus OK 163 -> 172)
+
+The `--out` first-difference scan over the 288-program corpus still had nine
+programs whose first differing line mentioned `None`. Seven are fixed here
+(plus `containers/02_list_index_neg`, which the same changes fixed), with no
+program moving the other way:
+
+- **An INT `.append(x)` records its slot kind.** The append lowering's plain
+  int arm now calls `mojo_list_append_kinded(..., 'i', prior)` (the runtime's
+  amortised private kinds buffer). Without a row the generic walker renders a
+  zero word as `None`, so a nested `row = []; row.append(r * 10 + c)` printed
+  `[[None, 1, ...]]` (`containers/06_nested_lists`, `funcs/32`).
+- **A container/string append extends an EXISTING runtime row and makes the
+  list `_RuntimeKinded`**, even when no static row was recorded (`nums = [1,
+  2]; nums += [3]; nums.append([])` printed the nested list's ADDRESS —
+  `containers/07_list_append_extend`). The list `+`/concat arms mark their
+  result the same way (the runtime concat lays the two rows end to end).
+- **`extend("ab")`** lowers through `mojo_str_chars` instead of handing a
+  `char *` to `mojo_list_extend` (a SIGSEGV), and `x.extend(x)` appends a copy
+  in the runtime instead of walking the growing list (`containers/07`).
+- **A local bound to a STRING and a SCALAR is rule 2** (the boxed word):
+  `_infer_local_var_types`' conflict rule now treats a cstring beside any
+  int/float word as "no single C type", and both scalar-binding classifiers
+  (`_mixed_scalar_binding_kind`, `_param_value_binding_kind`) classify an
+  arithmetic `BinaryOp` of integer words as `int`. `attempt("-0")` returned a
+  `char *` slot and the int 0 store became NULL (`flow/14`).
+- **`and`/`or` with an `int` beside a `str`**: a C `int` counts as a WORD in
+  `_mixed_word` (the join used to pick `char *` and coerce the falsy left to
+  `(char *)0` → `0 and "never"` printed None), and a selected Python-bool
+  operand is boxed (`None or False` printed 0, not False) (`params/16`).
+- **zip pairs carry their inputs' kinds.** New `mojo_zip2_kinds` (two-input)
+  and `mojo_zip1_kinds` (the one-input `zip(a)` the old 2-arg chain made
+  EMPTY) build each pair/tuple under the element kinds; `('b', 0)` renders 0
+  (`containers/31_zip_range_negstep`).
+- **A comprehension target over a kinded list is TAGGED as well as boxed**,
+  so `is None` asks the box (`mojo_word_is_none`): `[m for m in mixed if m is
+  None]` kept the 0 and False slots too (`flow/27`).
+- The shared runtime also carries the other lane's committed `all`/`any`
+  truthiness fix (`containers/35_any_all_lists`).
+
+**Measured** on the shared tree: corpus 288 programs — OK **172**, WRONG 99,
+CRASH 13, ERROR 2, GCC 2 (was OK 163 / WRONG 107 / CRASH 14 at this round's
+start; no new WRONG or CRASH). `compile_stdlib.py -j 8`: 610 passed, 0
+failed. `test_gimple_runner.py`: **688 passed, 0 failed**. Runtime census +2
+(`mojo_zip1_kinds`, `mojo_zip2_kinds`); header 899 → 901, box 550 → 552,
+total 1009 → 1011, `--fix` refreshed the quoted figures.
+
+**Still open, measured** (the remaining first-diff `None` programs):
+- `containers/20_dict_of_lists`: a `for k, v in <list of tuples>` target
+  reads the pair's slots through `mojo_list_get_int` from a static first-tuple
+  sample, so a `None` slot (`("b", None)`) arrives as the raw 0; the pair's
+  own runtime kinds row is not consulted. Also the dict-of-lists repr of the
+  `['']` group spells the empty string's address.
+- `params/26_kwargs_sorted_items`: `sorted(kwargs.items())` pairs lose the
+  VALUE's kind (`x None`/`y False` print 0), and `describe(**extra, o=[])`
+  merges only the `**` dict (len 2, not 3).
+- `containers/26_set_add_discard`: `sorted(s, key=str)` over a set holding
+  `0` and `None` gets duplicate keys — the set's element read hands both as
+  the raw 0.
+- `classes/21_str_and_repr` is a repr-QUOTING diff (`Point('a', None)`), not
+  the None representation.
+The owner's `make bootstrap` remains the acceptance.

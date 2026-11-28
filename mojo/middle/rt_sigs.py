@@ -1056,6 +1056,8 @@ RT_SIGS: dict[str, list[str]] = {
     'mojo_word_subscript': ['int64_t', 'int64_t', 'int64_t'],
     'mojo_write': ['int64_t', 'void *', 'char *', 'int64_t'],
     'mojo_zip': ['void *', 'void *', 'void *'],
+    'mojo_zip2_kinds': ['void *', 'void *', 'void *', 'char', 'char'],
+    'mojo_zip1_kinds': ['void *', 'void *', 'char'],
     'mojo_zlib_adler32': ['int64_t', 'int64_t', 'char *', 'int64_t'],
     'mojo_zlib_compress': ['void *', 'char *', 'int64_t', 'int64_t'],
     'mojo_zlib_crc32': ['int64_t', 'int64_t', 'char *', 'int64_t'],

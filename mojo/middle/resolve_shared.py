@@ -2278,7 +2278,21 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
             if ((gimple_ctypes.TypeLattice.is_set(_iks) or gimple_ctypes.TypeLattice.is_dict(_iks) or gimple_ctypes.TypeLattice.is_list(_iks))
                     or gimple_exprtypes._is_known_struct_ptr_ctype(_iks, _known_structs)):
                 _kinds.add(_iks)
-        if not _kinds:
+        # A STRING beside a scalar is the same "no single C type" situation
+        # as a container beside a scalar (stage 5c rule 2): the join prefers
+        # the pointer (`char *`), so `result = "bad"` then `result = n * 2`
+        # declared `char *` and the int 0 store became a NULL pointer —
+        # `print(attempt("-0"))` said None where CPython says 0
+        # (flow/14_try_else_finally). A str is a non-NULL reference, so the
+        # other side is a real word; box it like the container/scalar mix.
+        _has_str = False
+        for _ik in _as_list(inferred[vname]):
+            _iks = _as_str(_ik)
+            if (gimple_ctypes.TypeLattice.is_cstr(_iks)
+                    or gimple_ctypes.TypeLattice.is_str(_iks)):
+                _has_str = True
+                break
+        if not _kinds and not _has_str:
             continue
         # A container kind and a real SCALAR is the same "no single C type"
         # situation as two container kinds, and leaving it to the
@@ -2317,7 +2331,33 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
         _int_conflict = (
             _as_str(vname) in confident_scalars
             and any(gimple_ctypes.TypeLattice.is_int(t) for t in _non_kind))
-        if len(_kinds) > 1 or _float_conflict or _int_conflict:
+        # A provable STRING and a provable int/float binding: the box is the
+        # only representation that holds both (stage 5c rule 2). The evidence
+        # is per BINDING NODE, not the joined ctypes list: `int64_t` there is
+        # also the unknown fallback, and `out = out + p` over strings
+        # quick-types `int64_t` -- trusting that declared the string
+        # accumulator boxed and allocated a box per iteration (the 100k-char
+        # concat memory test). `_boxed_local_binding_kinds` is the same
+        # per-binding classifier the return-slot rule uses, so the two agree.
+        _str_word_conflict = False
+        if _has_str:
+            try:
+                import mojo.middle.infra_infer as _ii
+                _bk = _ii._boxed_local_binding_kinds(gen, func.body)
+                _ks = _as_list(_bk.get(_as_str(vname)))
+                _has_int = False
+                _has_flt = False
+                for _kk in _ks:
+                    _kk = _as_str(_kk)
+                    if _kk == 'int':
+                        _has_int = True
+                    elif _kk == 'float':
+                        _has_flt = True
+                _str_word_conflict = _has_int or _has_flt
+            except Exception:
+                _str_word_conflict = False
+        if (len(_kinds) > 1 or _float_conflict or _int_conflict
+                or _str_word_conflict):
             conflicting.add(_as_str(vname))
     gen._multi_kind_locals[_as_str(getattr(func, 'name', ''))] = conflicting
     # The unpack targets, per function, for the container-vs-scalar contract:

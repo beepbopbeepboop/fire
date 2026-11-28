@@ -17659,6 +17659,42 @@ double mojo_sum_double(void *args) {
  * instead of failing loudly. Pairs box each slot with append_int, the same
  * convention mojo_dict_items uses for its [key, value] pairs, so the
  * existing tuple-unpack accessors read them unchanged. */
+/* `zip(a, b)` with the two inputs' ELEMENT KINDS known statically. The pair is
+ * a tuple whose per-slot kinds are exactly (ka, kb), so `('b', 0)` renders the
+ * 0 as an integer instead of the generic walker's None-for-a-zero-word
+ * (`containers/31_zip_range_negstep`). `mojo_zip` stays the kind-less entry
+ * point (an unknown element kind keeps today's generic behaviour). */
+/* `zip(a)` with the input's element kind known: one-slot tuples, each under
+ * that kind (`list(zip(names))` -> `[('a',), ...]`). */
+void *mojo_zip1_kinds(void *a, char ka) {
+    MojoList *la = (MojoList *)a;
+    MojoList *out = mojo_list_new();
+    if (!la) return out;
+    for (int64_t i = 0; i < la->len; i++) {
+        MojoList *pair = mojo_list_new();
+        mojo_list_append_kinded(pair, mojo_list_get_int(la, i), ka, ka);
+        mojo_mark_as_tuple(pair);
+        mojo_list_append_int(out, (int64_t)(intptr_t)pair);
+    }
+    return out;
+}
+
+void *mojo_zip2_kinds(void *a, void *b, char ka, char kb) {
+    MojoList *la = (MojoList *)a;
+    MojoList *lb = (MojoList *)b;
+    MojoList *out = mojo_list_new();
+    if (!la || !lb) return out;
+    int64_t n = la->len < lb->len ? la->len : lb->len;
+    for (int64_t i = 0; i < n; i++) {
+        MojoList *pair = mojo_list_new();
+        mojo_list_append_kinded(pair, mojo_list_get_int(la, i), ka, ka);
+        mojo_list_append_kinded(pair, mojo_list_get_int(lb, i), kb, kb);
+        mojo_mark_as_tuple(pair);
+        mojo_list_append_int(out, (int64_t)(intptr_t)pair);
+    }
+    return out;
+}
+
 void *mojo_zip(void *a, void *b) {
     MojoList *la = (MojoList *)a;
     MojoList *lb = (MojoList *)b;

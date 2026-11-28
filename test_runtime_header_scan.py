@@ -750,7 +750,16 @@ def test_every_declaration_is_seen():
     # 460 -> 461, box stays 548; total 1008 -> 1009. `--fix` wrote the quoted
     # figures (FORMAL.md, formal/build.py, formal/model/builtins.py) from this
     # scan.
-    for header, want in (('fire_runtime.h', 899),   # --fix writes the live figure
+    # 899 -> 901 (2026-11-28, zip pair kinds): TWO names, both box-shaped by
+    # the live rule (the receiver is a `void *` the callee walks):
+    #   +1 `mojo_zip2_kinds` (`void *`, `void *`, `char`, `char` in) — `zip(a,b)`
+    #      builds each pair under the two inputs' element kinds, so an integer
+    #      0 slot renders `0`, not the generic walker's None;
+    #   +1 `mojo_zip1_kinds` (`void *`, `char` in) — the one-input `zip(a)`
+    #      one-slot tuples the generic 2-arg chain silently made empty.
+    # Box 550 -> 552, word stays 461; total 1009 -> 1011. `--fix` wrote the
+    # quoted figures from this scan.
+    for header, want in (('fire_runtime.h', 901),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already

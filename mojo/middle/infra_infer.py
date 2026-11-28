@@ -1896,6 +1896,63 @@ def _param_ctype_binding_kind(ctype) -> str | None:
     return None
 
 
+# The arithmetic operators whose result is a SCALAR when both operands are
+# (Python's `+ - * / // % ** & | ^ << >>`; `/` is true division and always a
+# float). ONE definition: `emit_infra`'s scalar-binding classifier and
+# `_param_value_binding_kind` below both ask it.
+SCALAR_ARITH_OPS = frozenset({
+    '+', '-', '*', '/', '//', '%', '**', '&', '|', '^', '<<', '>>',
+})
+
+
+def arith_expr_kind(gen, value) -> str | None:
+    """'int' / 'float' for an arithmetic `BinaryOp` whose operands are
+    integer/float words, else None.
+
+    `_quick_type` answers '' for `n * 2` when `n` is a call result or a
+    parameter, so such a binding contributed NO kind: a local also bound to
+    a string read as str-only, was declared `char *`, and the int 0 store
+    became NULL (`flow/14_try_else_finally` printed None for 0). A `*` on a
+    string operand is repetition, not arithmetic, so a string operand keeps
+    the answer None (the newline/string cases are not mis-typed)."""
+    if not isinstance(value, gimple_ctypes.BinaryOp):
+        return None
+    _op = _as_str(value.op)
+    if _op == '/':
+        return 'float'
+    if _op not in SCALAR_ARITH_OPS:
+        return None
+    def _tq(_v) -> str:
+        try:
+            return _as_str(gen._quick_type(_v))
+        except Exception:
+            return ''
+    def _intish(_v) -> bool:
+        if isinstance(_v, gimple_ctypes.IntLiteral):
+            return True
+        _t = _tq(_v)
+        return bool(_t) and (gimple_ctypes.TypeLattice.is_int_word(_t)
+                             or gimple_ctypes.TypeLattice.is_c_int(_t)
+                             or gimple_ctypes.TypeLattice.is_bool(_t))
+    def _provable(_v) -> bool:
+        # A literal, or a C `int`/`bool` -- never the int64_t FALLBACK.
+        # `s = 0.0; s = s + x` is a double sum whose operands both quick-type
+        # as int64_t at this pass, and trusting that boxed a double local
+        # (the float printed as its box's address, and the string-concat test
+        # allocated a box per iteration). Requiring ONE provable operand
+        # keeps `n * 2` (a call result times a literal) an int, which is the
+        # shape `flow/14` needs.
+        if isinstance(_v, gimple_ctypes.IntLiteral):
+            return True
+        _t = _tq(_v)
+        return bool(_t) and (gimple_ctypes.TypeLattice.is_c_int(_t)
+                             or gimple_ctypes.TypeLattice.is_bool(_t))
+    if _intish(value.left) and _intish(value.right) \
+            and (_provable(value.left) or _provable(value.right)):
+        return 'int'
+    return None
+
+
 def _param_value_binding_kind(gen, value) -> str | None:
     """The value kind a BINDING's RHS provably produces, or None.
 
@@ -1927,6 +1984,9 @@ def _param_value_binding_kind(gen, value) -> str | None:
         return 'dict'
     if isinstance(value, gimple_ctypes.SetExpr):
         return 'set'
+    _ak = arith_expr_kind(gen, value)
+    if _ak is not None:
+        return _ak
     if isinstance(value, gimple_ctypes.CallExpr) \
             and isinstance(value.func, gimple_ctypes.IdentExpr):
         # Same constructor rule `_rebound_to_other_container` uses: the

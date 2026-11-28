@@ -2319,6 +2319,11 @@ void *mojo_range(int64_t start, int64_t stop);
 void *mojo_range3(int64_t start, int64_t stop, int64_t step);
 void *mojo_enumerate(void *iterable);
 void *mojo_zip(void *a, void *b);
+/* `zip(a,b)` with the two inputs' element kinds known statically (the pair's
+   per-slot kinds are exactly ka/kb). */
+void *mojo_zip2_kinds(void *a, void *b, char ka, char kb);
+/* `zip(a)`: one-slot tuples under element kind ka. */
+void *mojo_zip1_kinds(void *a, char ka);
 void *mojo_map(void *func, void *iterable);
 void *mojo_filter(void *func, void *iterable);
 void *mojo_make_list(void);

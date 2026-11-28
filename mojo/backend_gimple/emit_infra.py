@@ -4874,6 +4874,17 @@ def _mixed_scalar_binding_kind(gen, value, dict_val_types) -> str | None:
         if _dv is not None:
             t = _dv
     t = _as_str(t)
+    # An ARITHMETIC expression of integer words is an int even when
+    # `_quick_type` cannot name it (it answers '' for `n * 2`): a local whose
+    # other binding is a string was then seen as str-only and declared
+    # `char *`, and the `n * 2` 0 store became NULL — the
+    # `flow/14_try_else_finally` `None`-for-0. Checked BEFORE the `not t`
+    # early return, and against each operand's own quick type (a parameter or
+    # a call result is an integer word; a string operand is not, which keeps
+    # `"ab" * 3` out).
+    _ak = arith_expr_kind(gen, value)
+    if _ak is not None:
+        return 'double' if _ak == 'float' else 'int'
     if not t:
         return None
     if gimple_ctypes.TypeLattice.is_cstr(t):
@@ -5166,9 +5177,7 @@ _PV_SCALAR_BUILTINS = frozenset({
 })
 # The arithmetic operators whose two proven-scalar operands are a scalar; `/`
 # is always a scalar (Python's true division answers a float).
-_PV_SCALAR_BINOPS = frozenset({
-    '+', '-', '*', '/', '//', '%', '**', '&', '|', '^', '<<', '>>',
-})
+_PV_SCALAR_BINOPS = SCALAR_ARITH_OPS   # one definition: mojo.middle.infra_infer
 
 
 def param_value_key(func_name, param_name) -> str:
@@ -8711,6 +8720,15 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
         # and a comprehension over it keeps each element's kind.
         elem64 = gen._rt_call('int64_t', 'mojo_list_get_boxed', [_iv, idx64])
         gen._word_mark_boxed(_tgt)
+        # ...and the NARROW "may be the None box" fact: an `is None` on the
+        # target must ask the box (`mojo_word_is_none`), and boxed-but-untagged
+        # fell back to the word compare, so `[m for m in mixed if m is None]`
+        # kept the 0 and False slots too (`flow/27`). Deliberately NOT
+        # `_word_mark_tagged`: a str slot's read is the bare `char *`, and a
+        # tagged mark made print/f-string spell it via `mojo_repr_boxed`,
+        # which prints a heap string's ADDRESS (the three star-unpack/genexp
+        # runner tests caught this).
+        gen._word_mark_maybe_none(_tgt)
         build.assign(gen, f'{_tgt}', f'(int64_t) {elem64}')
     elif gimple_ctypes.TypeLattice.is_double(suf):
         gen._rt_into(_tgt, 'mojo_list_get_double', [_iv, idx64])

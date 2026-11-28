@@ -7226,7 +7226,17 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                 _row_kind = ''
                 if gimple_ctypes.TypeLattice.ends_in_star(_ptr_elem):
                     _row_kind = gimple_ctypes.TypeLattice.slot_kind_byte(_ptr_elem)
-                if gen._word_has_slot_kinds(ov) and _row_kind not in ('', 'i'):
+                if _row_kind not in ('', 'i'):
+                    # A container/str element makes the list heterogeneous
+                    # even when no static kinds row was recorded yet: a list
+                    # built by `nums = [1, 2]; nums += [3]` then
+                    # `nums.append([])` has a RUNTIME row ('iii') the static
+                    # mark never saw, and the appended slot must extend it or
+                    # the repr printed the nested list's address
+                    # (containers/07). `append_kinded` creates/extends the
+                    # row, and the two marks make the repr ask the value's
+                    # own row (`_RuntimeKinded`) instead of the typed int
+                    # walker.
                     _prior = gimple_ctypes.TypeLattice.slot_kind_byte(
                         gen._elem_types.get(ov) or 'int64_t')
                     gen._emit_call('void', '', 'mojo_list_append_kinded',
@@ -7234,11 +7244,32 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                                     ('int64_t', gen._coerce_to_type(_ptr_elem, 'int64_t', av)),
                                     ('char', "'" + _row_kind + "'"),
                                     ('char', "'" + _prior + "'")])
+                    gen._word_mark_slot_kinds(ov)
+                    gen._struct_slot_kinds[ov] = ginf._RuntimeKinded(['int', 'str'])
+                    ginf.note_field_slot_kinds(gen, ov)
                 else:
                     if (gimple_ctypes.TypeLattice.is_c_int(at) or gimple_ctypes.TypeLattice.is_bool(at)):
                         av = gen._coerce_to_type(at, 'int64_t', av)
                         at = 'int64_t'
-                    gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
+                    # Stage 5c: an INT element records its slot kind too. An
+                    # unkinded list is rendered by the generic walker, which
+                    # answers `None` for a zero word (it cannot tell an int 0
+                    # from a boxed None), so `row = []; row.append(0)` inside
+                    # `grid.append(row)` printed `[[None, 1, ...]]`. The row is
+                    # the runtime's private amortised kinds buffer
+                    # (`_list_word_push`), and `prior` describes the slots an
+                    # existing row does not (an int list's are 'i').
+                    if gimple_ctypes.TypeLattice.is_int_word(at):
+                        _prior_i = gimple_ctypes.TypeLattice.slot_kind_byte(
+                            gen._elem_types.get(ov) or 'int64_t')
+                        gen._emit_call('void', '', 'mojo_list_append_kinded',
+                                       [('MojoList *', ov), ('int64_t', av),
+                                        ('char', "'i'"),
+                                        ('char', "'" + _prior_i + "'")])
+                        gen._word_mark_slot_kinds(ov)
+                        ginf.note_field_slot_kinds(gen, ov)
+                    else:
+                        gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
             # A CALLABLE appended to a list, so a later `lst[0](...)` can
             # dispatch. The list literal records through the same helper (see
             # `_lower_list_literal`), and this is the `append` half: without
@@ -7293,6 +7324,18 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
         # that is a fresh container (`l.extend([10, 20])`, `l.extend(s.split())`)
         # is dead once it returns.
         _ext_fresh = gimple_ctypes.TypeLattice.is_list(at) and gen._is_fresh_container_operand(args[0], av)
+        if gimple_ctypes.TypeLattice.is_cstr(at):
+            # `list.extend("ab")` appends the string's CHARACTERS (each a
+            # one-character string). `mojo_list_extend` is declared to take a
+            # `MojoList *`, so passing the `char *` straight through read a
+            # list header out of the string and SIGSEGV'd
+            # (`containers/07_list_append_extend`). `mojo_str_chars` is the
+            # runtime's own "iterate this string" answer, already used by the
+            # `[*s]` spread for the same reason.
+            _ext_chars = gen._new_temp('MojoList *')
+            gen._emit_call('MojoList *', _ext_chars, 'mojo_str_chars', [('char *', av)])
+            at, av = 'MojoList *', _ext_chars
+            _ext_fresh = True
         gen._emit_call('void', '', 'mojo_list_extend', [('MojoList *', ov), (at, av)])
         if _ext_fresh:
             gen._free_fresh_container(av, 'MojoList *')

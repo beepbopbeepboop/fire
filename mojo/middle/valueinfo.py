@@ -67,6 +67,12 @@ FLAG_MIXED_FIELD = 16
 # keeps its integer C type; only the SPELLING differs (`print`/`str` must say
 # `None` for 0). `carry` moves it — every copy of the value is the same word.
 FLAG_REFS_NONE = 32
+# A word read from a KINDED CONTAINER SLOT (a comprehension/for target over a
+# list that describes its own slots): the value may be the shared None box.
+# Narrower than Tagged: only the `is None`/`== None` question may ask the box
+# (`mojo_word_is_none`); the word is NOT a box for print/stringify/arithmetic
+# (a container's str slot yields its bare char *). `carry` moves it.
+FLAG_MAYBE_NONE = 64
 
 
 class ValueInfo:
@@ -230,6 +236,8 @@ class WordFacts:
             _d.flags = _d.flags | FLAG_BOXED_CONTAINER
         if (_s.flags & FLAG_REFS_NONE) != 0:
             _d.flags = _d.flags | FLAG_REFS_NONE
+        if (_s.flags & FLAG_MAYBE_NONE) != 0:
+            _d.flags = _d.flags | FLAG_MAYBE_NONE
 
     # ── save / restore across a nested body ──────────────────────────────
     def snapshot(self) -> dict:
@@ -350,6 +358,14 @@ class WordFacts:
     def is_refs_none(self, name: str) -> bool:
         _rec = self._info(name, False)
         return _rec is not None and (_rec.flags & FLAG_REFS_NONE) != 0
+
+    def mark_maybe_none(self, name: str) -> None:
+        _rec = self._info(name, True)
+        _rec.flags = _rec.flags | FLAG_MAYBE_NONE
+
+    def is_maybe_none(self, name: str) -> bool:
+        _rec = self._info(name, False)
+        return _rec is not None and (_rec.flags & FLAG_MAYBE_NONE) != 0
 
     def mark_tagged(self, name: str) -> None:
         _rec = self._info(name, True)

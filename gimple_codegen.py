@@ -4195,6 +4195,8 @@ class GimpleGen:
         'serialize':             ('void',        []),
         'mojo_enumerate':        ('MojoList *', ['void *']),
         'mojo_zip':              ('void *',     ['void *', 'void *']),
+        'mojo_zip2_kinds':       ('void *',     ['void *', 'void *', 'char', 'char']),
+        'mojo_zip1_kinds':       ('void *',     ['void *', 'char']),
         'mojo_list_all':         ('int',        ['MojoList *']),
         'mojo_list_any':         ('int',        ['MojoList *']),
         'mojo_list_copy':        ('MojoList *', ['MojoList *']),
@@ -6301,6 +6303,10 @@ class GimpleGen:
         self._words.mark_refs_none(name)
     def _word_is_refs_none(self, name: str) -> bool:
         return self._words.is_refs_none(name)
+    def _word_mark_maybe_none(self, name: str) -> None:
+        self._words.mark_maybe_none(name)
+    def _word_is_maybe_none(self, name: str) -> bool:
+        return self._words.is_maybe_none(name)
     def _word_mark_tagged(self, name: str) -> None:
         self._words.mark_tagged(name)
     def _word_mark_dyn(self, name: str) -> None:
