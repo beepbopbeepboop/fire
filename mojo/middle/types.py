@@ -29,6 +29,21 @@ import mlir
 import regex_compile
 from generated_dispatch import _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT, _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS, _STMT_DISPATCH, _EXPR_DISPATCH
 import mojo.ir.types as gir_types
+
+
+def _as_type(t):
+    """A `Type` passes through; everything else is a C-type spelling.
+
+    Stage 4's bridge: predicates accept either form, so a table already
+    migrated to `Type` stops round-tripping through `.name` while the rest
+    of the backend still passes strings. Text goes through `spelled()`, so
+    no predicate's answer changes for a string input.
+    """
+    if isinstance(t, gir_types.Type):
+        return t
+    return gir_types.spelled(t)
+
+
 import mojo.ir.build as _ir_build
 import mojo.middle.simd_width as _simd_width
 import mojo.middle.float8_dtype as _float8_dtype
@@ -142,34 +157,39 @@ class TypeLattice:
         # `join(t1=NULL, ...)`.
         if not t:
             return False
-        return gir_types.spelled(t).is_ranked_float()
+        return _as_type(t).is_ranked_float()
 
     @classmethod
     def is_signed(cls, t: str) -> bool:
         if not t:
             return False
-        return gir_types.spelled(t).is_ranked_signed()
+        return _as_type(t).is_ranked_signed()
 
     @classmethod
     def is_unsigned(cls, t: str) -> bool:
         if not t:
             return False
-        return gir_types.spelled(t).is_ranked_unsigned()
+        return _as_type(t).is_ranked_unsigned()
 
     @classmethod
     def is_int(cls, t: str) -> bool:
         if not t:
             return False
-        return gir_types.spelled(t).is_ranked_int()
+        return _as_type(t).is_ranked_int()
 
     @classmethod
     def is_numeric(cls, t: str) -> bool:
         return cls.is_float(t) or cls.is_int(t)
 
     @classmethod
-    def is_pointer(cls, t: str) -> bool:
+    def is_pointer(cls, t) -> bool:
         if not t:
             return False
+        if isinstance(t, gir_types.Type):
+            return t.is_pointer()
+        # Keep the structural test on raw text: `spelled()` normalises
+        # `char*` to `char *` and answers OPAQUE, which would change this
+        # predicate's answer for a spelling it used to accept.
         return '*' in t
 
     @classmethod
@@ -179,7 +199,7 @@ class TypeLattice:
         type IS without touching its callers."""
         if not t:
             return False
-        return gir_types.spelled(t).is_cstr()
+        return _as_type(t).is_cstr()
 
     @classmethod
     def is_str(cls, t: str) -> bool:
@@ -189,7 +209,7 @@ class TypeLattice:
         "either string" asks both."""
         if not t:
             return False
-        return gir_types.spelled(t).is_mojo_str()
+        return _as_type(t).is_mojo_str()
 
     @classmethod
     def is_span(cls, t: str) -> bool:
@@ -198,15 +218,17 @@ class TypeLattice:
         Mojo type elsewhere (`emit_resolve`'s span proof)."""
         if not t:
             return False
-        return gir_types.spelled(t).is_mojo_span()
+        return _as_type(t).is_mojo_span()
 
     @classmethod
-    def ends_in_star(cls, t: str) -> bool:
+    def ends_in_star(cls, t) -> bool:
         """`t` is spelled as a pointer to something (`... *`): a struct, list,
         string or other handle. Narrower than `is_pointer`, which also accepts
         function-pointer spellings that merely contain a `*`."""
         if not t:
             return False
+        if isinstance(t, gir_types.Type):
+            return t.ends_in_star()
         return t.endswith(' *')
 
     @classmethod
@@ -214,28 +236,28 @@ class TypeLattice:
         """`t` is the C spelling of a list/tuple value (`MojoList *`)."""
         if not t:
             return False
-        return gir_types.spelled(t).is_mojo_list()
+        return _as_type(t).is_mojo_list()
 
     @classmethod
     def is_dict(cls, t: str) -> bool:
         """`t` is the C spelling of a dict value (`MojoDict *`)."""
         if not t:
             return False
-        return gir_types.spelled(t).is_mojo_dict()
+        return _as_type(t).is_mojo_dict()
 
     @classmethod
     def is_set(cls, t: str) -> bool:
         """`t` is the C spelling of a set value (`MojoSet *`)."""
         if not t:
             return False
-        return gir_types.spelled(t).is_mojo_set()
+        return _as_type(t).is_mojo_set()
 
     @classmethod
     def is_bytes(cls, t: str) -> bool:
         """`t` is the C spelling of a bytes value (`MojoBytes *`)."""
         if not t:
             return False
-        return gir_types.spelled(t).is_mojo_bytes()
+        return _as_type(t).is_mojo_bytes()
 
     # Tuple-membership predicates (doc/GIR.md stage 4). Each one answers
     # exactly what the tuple test it replaces answered, `None` included where
@@ -246,7 +268,7 @@ class TypeLattice:
         `t in ('int', 'int64_t', '_Bool')`."""
         if not t:
             return False
-        ty = gir_types.spelled(t)
+        ty = _as_type(t)
         return ty.is_int_word() or ty.is_c_bool()
 
     @classmethod
@@ -261,7 +283,7 @@ class TypeLattice:
         Python's int, float, bool and str."""
         if not t:
             return False
-        ty = gir_types.spelled(t)
+        ty = _as_type(t)
         return ty.is_word() or ty.is_double() or ty.is_c_bool() or ty.is_cstr()
 
     @classmethod
@@ -270,7 +292,7 @@ class TypeLattice:
         `t in ('int64_t', 'char *')`."""
         if not t:
             return False
-        ty = gir_types.spelled(t)
+        ty = _as_type(t)
         return ty.is_word() or ty.is_cstr()
 
     @classmethod
@@ -279,7 +301,7 @@ class TypeLattice:
         `t in (None, 'int', 'int64_t')`: also True for a missing type."""
         if t is None:
             return True
-        return gir_types.spelled(t).is_int_word()
+        return _as_type(t).is_int_word()
 
     @classmethod
     def is_word_or_none(cls, t: str) -> bool:
@@ -287,7 +309,7 @@ class TypeLattice:
         `t in (None, 'int64_t')`: also True for a missing type."""
         if t is None:
             return True
-        return gir_types.spelled(t).is_word()
+        return _as_type(t).is_word()
 
     @classmethod
     def is_word_or_bytes(cls, t: str) -> bool:
@@ -295,7 +317,7 @@ class TypeLattice:
         `t in ('int64_t', 'MojoBytes *')`."""
         if not t:
             return False
-        ty = gir_types.spelled(t)
+        ty = _as_type(t)
         return ty.is_word() or ty.is_mojo_bytes()
 
     @classmethod
@@ -304,7 +326,7 @@ class TypeLattice:
         `t in ('int64_t', 'MojoList *')`."""
         if not t:
             return False
-        ty = gir_types.spelled(t)
+        ty = _as_type(t)
         return ty.is_word() or ty.is_mojo_list()
 
     # The UNSOLVED marker (doc/GIR.md stage 4 tail). `''` and `'unknown'` are
@@ -390,7 +412,7 @@ class TypeLattice:
         `int` or `int64_t`, the pair the lowering tests with `in ('int', 'int64_t')`."""
         if not t:
             return False
-        return gir_types.spelled(t).is_int_word()
+        return _as_type(t).is_int_word()
 
     @classmethod
     def is_word(cls, t: str) -> bool:
@@ -398,7 +420,7 @@ class TypeLattice:
         the test (stage 4, doc/GIR.md)."""
         if not t:
             return False
-        return gir_types.spelled(t).is_word()
+        return _as_type(t).is_word()
 
     @classmethod
     def is_uword(cls, t: str) -> bool:
@@ -407,7 +429,7 @@ class TypeLattice:
         unsigned (the bswap/bit-length paths and the list/bytes repeat counts)."""
         if not t:
             return False
-        return gir_types.spelled(t).is_uword()
+        return _as_type(t).is_uword()
 
     # The handle and pointer spellings the backend names directly. Each is a
     # plain equality (like `is_c_int`), so it answers EXACTLY its own spelling:
@@ -536,7 +558,7 @@ class TypeLattice:
         needs widening before it is appended, cast or compared as an int."""
         if not t:
             return False
-        return gir_types.spelled(t).is_char()
+        return _as_type(t).is_char()
 
     @classmethod
     def is_u8(cls, t: str) -> bool:
@@ -545,7 +567,7 @@ class TypeLattice:
         byte the indexing paths produce."""
         if not t:
             return False
-        return gir_types.spelled(t).is_u8()
+        return _as_type(t).is_u8()
 
     # The remaining single C integer spellings (doc/GIR.md stage 4, the exact
     # rewrites). Each one is a plain equality, so it answers exactly its own
@@ -603,7 +625,7 @@ class TypeLattice:
         integer width."""
         if not t:
             return False
-        return gir_types.spelled(t).is_c_long()
+        return _as_type(t).is_c_long()
 
     @classmethod
     def is_void(cls, t: str) -> bool:
@@ -611,7 +633,7 @@ class TypeLattice:
         untyped pointer (`void *`) or a missing/unsolved type."""
         if not t:
             return False
-        return gir_types.spelled(t).is_void()
+        return _as_type(t).is_void()
 
     @classmethod
     def is_voidp(cls, t: str) -> bool:
@@ -619,14 +641,14 @@ class TypeLattice:
         of an opaque handle whose real type the body cannot name."""
         if not t:
             return False
-        return gir_types.spelled(t).is_void_ptr()
+        return _as_type(t).is_void_ptr()
 
     @classmethod
     def is_double(cls, t: str) -> bool:
         """`t` is exactly `double` (not `float`; see `is_float` for both)."""
         if not t:
             return False
-        return gir_types.spelled(t).is_double()
+        return _as_type(t).is_double()
 
     @classmethod
     def is_c_float(cls, t: str) -> bool:
@@ -639,7 +661,7 @@ class TypeLattice:
     def is_bool(cls, t: str) -> bool:
         if not t:
             return False
-        return gir_types.spelled(t).is_c_bool()
+        return _as_type(t).is_c_bool()
 
     @classmethod
     def is_cpp_bool(cls, t: str) -> bool:
@@ -651,7 +673,7 @@ class TypeLattice:
         not this: `_TYPE_MAP` lowers that one to `int`."""
         if not t:
             return False
-        return gir_types.spelled(t).is_cpp_bool()
+        return _as_type(t).is_cpp_bool()
 
     @classmethod
     def is_cpp_int_scalar(cls, t: str) -> bool:
