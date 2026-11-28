@@ -3952,9 +3952,25 @@ def _infer_return_type_with_locals(gen, body: list, func_def=None) -> str:
     _pb_names, _pb_dbl = _body_pybox_locals(gen, body)
     gen._pybox_vars = (set() if _saved_pb is None else set(_saved_pb)) | _pb_names
     gen._pybox_double_vars = (set() if _saved_pd is None else set(_saved_pd)) | _pb_dbl
+    # The UNANNOTATED parameters of the function whose return type is being
+    # inferred (`_return_arm_is_boxed_local` reads them). They must be THIS
+    # function's, not whatever `_cur_untyped_params` held from the function being
+    # emitted when the question came up: the definition's inference and a call
+    # site's earlier estimate then asked it about different functions, got
+    # different return types for one function, and the self-hosted closure's own
+    # `builtin_method` was `int64_t` at its definition and `char *` at its callers
+    # (gcc: "invalid conversion in gimple call"). Same window as the tables above.
+    _saved_up = gen._cur_untyped_params
+    _up: set = set()
+    if func_def is not None:
+        for _fp in (func_def.params or []):
+            if len(_fp) > 1 and _fp[1] is None and not _as_str(_fp[0]).startswith('*'):
+                _up.add(_as_str(_fp[0]))
+    gen._cur_untyped_params = _up
     try:
         return _infer_return_type_core(gen, body)
     finally:
+        gen._cur_untyped_params = _saved_up
         gen.var_types = _saved
         gen._scan_scratch_top = _scratch_mark_ml
         gen._dict_val_types = _saved_dv
