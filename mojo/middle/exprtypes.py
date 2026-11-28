@@ -2065,8 +2065,15 @@ def dict_value_kind(gen, node):
     # A CONTAINER value kind (`{'a': [1]}`, `{'a': {'n': 1}}`) is its own
     # answer: the dict stores the pointer and a `.get`/`d[k]` read must know
     # the reader (len/subscript/repr), not treat it as an int64 word.
+    #
+    # BYTES is deliberately NOT here. `_ldm_get`'s container arm covers
+    # list/dict/set only, so a bytes domain would take the boxed/word read and
+    # print the pointer (measured: `d = {"a": b"xy"}; print(d.get("a"))`
+    # spelled the address in both the old int64_t domain and a
+    # `MojoBytes *` one). A bytes-valued dict needs its own accessor pairing
+    # first; convert this to a container kind in the same change.
     if _vt and (TypeLattice.is_list(_vt) or TypeLattice.is_dict(_vt)
-                or TypeLattice.is_set(_vt) or TypeLattice.is_bytes(_vt)):
+                or TypeLattice.is_set(_vt)):
         return _vt
     if _vt and TypeLattice.ends_in_star(_vt) and gen.struct_field_types.get(_vt[:-2].strip()):
         return _vt
