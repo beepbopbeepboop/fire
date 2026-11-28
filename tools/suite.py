@@ -1966,6 +1966,11 @@ test('sys-maxsize-value',
      [PY, 'test_sys_maxsize_value.py'], mem='small',
      desc='`sys.maxsize` read as a value compiles (the self-hosted compiler '
           'died on startup in comptime.py\'s module-level _HOST_IS_32BIT)')
+test('selfhost-class-tables-literal',
+     [PY, 'test_selfhost_class_tables_literal.py'], mem='tiny',
+     desc='GimpleGen\'s class-level signature tables are all-literal: one computed entry '
+          'empties the whole table in the compiled compiler (_KNOWN_SIGS: bin/hex/oct '
+          'lost their char * return type)')
 test('tagged-select-no-none',
      [PY, 'test_tagged_select_no_none.py'], mem='tiny',
      desc='_tagged_cmp_select/_tagged_arith_select answer "does not apply" with a '
@@ -5239,7 +5244,7 @@ BUCKETS = {
               # one (bug doc deleted with the fix, 2026-11-21).
               'selfhost-struct-layout-map', 'selfhost-sig-types-declared',
               'dotted-module-global-accessor', 'importer-param-forwarder', 'imported-default-padding',
-              'tagged-select-no-none',
+              'tagged-select-no-none', 'selfhost-class-tables-literal',
               'sys-maxsize-value', 'uncompiled-marker-alias',
               'presence-helpers-annotated', 'runtime-function-not-prefix',
               'method-none-default-boxed', 'tagged-param-forwarded',

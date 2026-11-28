@@ -144,7 +144,10 @@ class Resolver:
     def __init__(self, path=None, gcc=None, flags=()):
         self.path = list(path) if path is not None else default_mojo_path()
         self.gcc = gcc or find_gcc()
-        self.flags = tuple(flags)
+        # `if flags`: the compiled call pads the `()` default with the NULL word, and
+        # `tuple(NULL)` raised "object is not iterable" -- import resolution died
+        # on its first use. An empty or missing `flags` is `()` either way.
+        self.flags = tuple(flags) if flags else ()
         self._modules = {}     # fqname -> ModuleEntry  (the sys.modules analog)
 
     def resolve(self, name: str) -> ModuleEntry:

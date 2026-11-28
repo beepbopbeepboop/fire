@@ -16,7 +16,7 @@ was found (doc/GIR.md, "Selfhost closure"). Typical use:
     # an AttributeError: break where it is raised
     lldb ... -o 'breakpoint set -n mojo_raise_attribute_error' ...
 
-`SELFHOST_PROBE_DEBUG=1` on `build` adds -g1 so `bt` in lldb shows `file.py:line`.
+`SELFHOST_PROBE_DEBUG=1` on `build` keeps the debug info (dsymutil) so lldb shows `file.py:line` and locals.
 `build` takes about 15 minutes and 10 GB; `probe` takes seconds per file. ALWAYS run under tools/memcap.py
 (above), and ONE build or probe at a time: a reboot on 2026-11-27 followed several builds and a
 probe run going at once.
@@ -44,13 +44,11 @@ def build(out_dir: str) -> int:
     import tempfile
     import test_selfhost as T
     if os.environ.get('SELFHOST_PROBE_DEBUG'):
-        # `-g1`: lldb then maps a crash frame to the compiler's own .py line (the
-        # `#line` directives), which names the `for`/call a bare address cannot.
-        import functools
+        # The build's own defaults are `-O0 -g2`, which is what lldb needs to show
+        # LOCALS (`frame variable`) as well as `file.py:line` through the `#line`
+        # directives; `-g1 -O1` had only the line tables ("variable not available").
         sys.path.insert(0, ROOT)
         import fire
-        fire.build_executable = functools.partial(
-            fire.build_executable, debug_flag='-g1', opt_flag='-O1')
         # macOS keeps DWARF in the .o files, which `build_executable` deletes after
         # linking; `dsymutil` right after the link folds it into `<exe>.dSYM`.
         _real_run = fire.subprocess.run

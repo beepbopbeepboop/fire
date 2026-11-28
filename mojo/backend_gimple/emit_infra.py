@@ -10647,7 +10647,7 @@ def _text_after_last(s: str, sep: str) -> str:
         return s
     return s[i + 1:]
 
-def _dedup_variadic_externs(parts: list) -> str:
+def _dedup_variadic_externs(parts: list[str]) -> str:
     """Join the preamble, dropping a variadic `extern T name (...);` import
     declaration when a CONCRETE prototype for the same function is also present
     (e.g. an elaborated instantiation forward-declares `get_defined_int (void)`
@@ -10975,11 +10975,12 @@ def _dedup_variadic_externs(parts: list) -> str:
     # same reasoning rejected it on 2026-09-26.
     concrete = set()
     variadic_by_part = []
-    for _p0 in parts:
-        p: str = _as_str(_p0)
-        # Presence test, not `.get(p)` + `is None`: a miss is the boxed None word on
-        # the self-hosted path and was taken for a cached entry. `p` is a typed
-        # str so the key is the string, never the raw pointer word.
+    for p in parts:
+        # `parts: list[str]` (the signature) makes `p` a `char *` read straight off
+        # the list slot. An untyped `list` read each element as a BOXED word and
+        # `_as_str(box)` keyed the cache by the box, never the text (KeyError, NULL
+        # key, on the first program: `result = None`, "module generation failed").
+        # Presence test, not `.get(p)` + `is None`: a miss is the boxed None word.
         if p not in _DEDUP_EXTERN_PARTS_CACHE:
             _DEDUP_EXTERN_PARTS_CACHE[p] = _parse_part(p)
         entry = _DEDUP_EXTERN_PARTS_CACHE[p]

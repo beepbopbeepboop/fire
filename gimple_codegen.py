@@ -3690,7 +3690,13 @@ class GimpleGen:
         'mojo_type_add_base':  ('void', ['int64_t', 'int64_t']),
         'mojo_type_add_bases_from_list': ('void', ['int64_t', 'MojoList *']),
         'mojo_classobj_tag':   ('int64_t', ['int64_t']),
-        'mojo_rtobj_method_call': ('int64_t', ['int64_t', 'char *'] + ['int64_t'] * 8),
+        # Spelled out, not `['int64_t', 'char *'] + ['int64_t'] * 8`: the self-hosted
+        # class-attribute emitter fills this table only when EVERY value is a literal
+        # `(str, [str, ...])` pair, and that one computed list left all 624 entries
+        # out of the compiled compiler (`bin`/`hex`/`oct` and every runtime builtin
+        # then took the `int64_t` default). `test_known_sigs_literal.py` pins it.
+        'mojo_rtobj_method_call': ('int64_t', ['int64_t', 'char *', 'int64_t', 'int64_t', 'int64_t',
+                                               'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_isinstance_rtclass': ('int', ['int64_t', 'int64_t']),
         'mojo_isinstance_type': ('int', ['int64_t']),
         'mojo_is_classword':   ('int', ['int64_t']),
