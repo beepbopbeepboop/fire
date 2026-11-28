@@ -3977,9 +3977,17 @@ int64_t mojo_list_count_int(MojoList *l, int64_t v)
 
 int64_t mojo_list_count_str(MojoList *l, char *v)
 {
+    /* Same per-slot rule as mojo_list_contains_str: a described list may
+     * hold ints/None/bools beside strings, and strcmp'ing an integer slot as
+     * a char * is a wild read (containers/05 and /09 died here). */
+    const char *kinds = l ? mojo_list_get_kinds(l) : NULL;
     int64_t n = 0;
     for (int64_t i = 0; i < l->len; i++) {
         char *s = (char *)(uintptr_t)l->data[i];
+        if (kinds) {
+            char _k = mojo_list_slot_kind(l, i);
+            if (v == NULL ? _k != 'n' : _k != 'p') continue;
+        }
         if (v == NULL) { if (s == NULL) n++; }
         else if (s && strcmp(s, v) == 0) n++;
     }
@@ -14958,8 +14966,11 @@ int64_t MojoList_index(MojoList *l, int v) {
 }
 int64_t mojo_list_index_str(MojoList *l, const char *v) {
     if (!l) return -1;
+    const char *kinds = mojo_list_get_kinds(l);
     for (int64_t i = 0; i < l->len; i++) {
         char *s = (char *)l->data[i];
+        /* A kind-mixed list's int/None slots are not strings. */
+        if (kinds && mojo_list_slot_kind(l, i) != 'p') continue;
         if (s && strcmp(s, v) == 0) return i;
     }
     return -1;
