@@ -5978,9 +5978,49 @@ _COND_ARITH_DEFAULT = [
               "loop-cond-flag"),
 ]
 
+#: Signed EXIT tests (`b.le`/`b.lt`) close under the bounded contract's
+#: `hlt : x19.toNat < 2^63`.  Without it the statement is FALSE (a sign-bit-set
+#: counter satisfies `x19 ≤ 0` yet is not zero), which is why the old default
+#: ended in a `sorry`; with it the signed test reduces to `x19 = 0`.  Keyed by
+#: condition code because `b.le` and `b.lt` are different `sKey` comparisons.
+_SIGNED_EXIT_GUARDED_ARITH = {
+    13: [  # le signed: `sKey x19 ≤ sKey 0`
+        "have h0 : (UInt64.ofNat 0 : UInt64) = 0 := rfl",
+        "rw [h0]",
+        "simp",
+        "change sKey s.x19 ≤ sKey 0 ↔ s.x19 = 0",
+        "rw [sKey_le_sKey_zero_iff]",
+        "constructor",
+        "· rintro (h0 | hge)",
+        "  · exact h0",
+        "  · exfalso",
+        "    rw [UInt64.le_iff_toNat_le] at hge",
+        "    have h64 : (0x8000000000000000 : UInt64).toNat = 9223372036854775808 := by decide",
+        "    rw [h64] at hge",
+        "    omega",
+        "· intro h0; exact Or.inl h0",
+    ],
+    11: [  # lt signed: `sKey x19 < sKey 1`
+        "have h0 : (UInt64.ofNat 0 : UInt64) = 0 := rfl",
+        "rw [h0]",
+        "simp",
+        "change sKey s.x19 < sKey 1 ↔ s.x19 = 0",
+        "rw [sKey_lt_sKey_one_iff]",
+        "constructor",
+        "· rintro (h0 | hge)",
+        "  · exact h0",
+        "  · exfalso",
+        "    rw [UInt64.le_iff_toNat_le] at hge",
+        "    have h64 : (0x8000000000000000 : UInt64).toNat = 9223372036854775808 := by decide",
+        "    rw [h64] at hge",
+        "    omega",
+        "· intro h0; exact Or.inl h0",
+    ],
+}
+
 
 def _cond_flag_lines(defs: str, words: dict, cbz_pc: int, cc: str, mc: int, *,
-                     qsym: str, qstate: str, rhs: str):
+                     qsym: str, qstate: str, rhs: str, guarded: bool = False):
     """Tactic lines closing a loop's `cond_flag` obligation.
 
     The obligation is `<q> <block state> = true ↔ <exit condition>`, where `<q>`
@@ -6010,12 +6050,15 @@ def _cond_flag_lines(defs: str, words: dict, cbz_pc: int, cc: str, mc: int, *,
         raise ValueError(
             f"no flag lemma for raw condition code {field}; add it to "
             f"`_COND_LEMMA` and to ProofLib rather than guessing")
+    _arith = _COND_ARITH.get(field, _COND_ARITH_DEFAULT)
+    if guarded and field in _SIGNED_EXIT_GUARDED_ARITH:
+        _arith = _SIGNED_EXIT_GUARDED_ARITH[field]
     return [
         f"unfold {qsym}",
         f"simp only [{defs}, arm64_reg, arm64_set_reg]",
         f"try rw [mem_read_push_low s.mem s.sp]",
         f"rw [{lemma}]",
-        *_COND_ARITH.get(field, _COND_ARITH_DEFAULT),
+        *_arith,
     ]
 
 
@@ -8119,7 +8162,9 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
          f"    mem_read_u64 {bbody}.mem ({bbody}.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc}",
          None),
         (f"{name}_loop_cond_flag",
-         f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
+         f"(s : Arm64State) (hpc : s.pc = {cbz_start})"
+         + (" (hlt : s.x19.toNat < 9223372036854775808)"
+            if trapped else "") + " :\n"
          f"    {_qsym} ({cqt} s) = true ↔ s.x19 = 0",
          None),
         (f"{name}_loop_cond_x19",
@@ -8220,7 +8265,7 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
                              + [f"{cc}_qT{k}" for k in range(mc)])
             for _l in _cond_flag_lines(_defs, words, cbz_pc, cc, mc,
                                        qsym=_qsym, qstate=cqt,
-                                       rhs="s.x19 = 0"):
+                                       rhs="s.x19 = 0", guarded=True):
                 A(f"  {_l}")
         elif hname == f"{name}_loop_body_dec":
             _defs = ", ".join([f"{qb}_qS{k}" for k in range(mb0)]
@@ -8244,9 +8289,10 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
         A(f"theorem {name}_cd_ex_pc (X : Arm64State) (p : Nat) :")
         A(f"    ({eqt} {{ X with pc := p }}).x0 = ({eqt} X).x0 := by rfl")
         A(f"theorem {name}_cd_hdone (s : Arm64State) (hs : s.pc = {cbz_start})")
+        A(f"    (hlt : s.x19.toNat < 9223372036854775808)")
         A(f"    (hq : {_qsym} ({{ {cqt} s with pc := {cbz_pc} }}) = true) :")
         A(f"    ({eqt} ({{ {{ {cqt} s with pc := {cbz_pc} }} with pc := {cbz_taken} }} : Arm64State)).x0 = mojo s.x19 := by")
-        A(f"  have h := {name}_loop_exit_x0 ({cqt} s) (({name}_loop_cond_flag s hs).mp hq)")
+        A(f"  have h := {name}_loop_exit_x0 ({cqt} s) (({name}_loop_cond_flag s hs hlt).mp hq)")
         A(f"  have hx : arm64_reg 19 ({cqt} s) = arm64_reg 19 s := {name}_loop_cond_x19 s hs")
         A(f"  have hx' : ({cqt} s).x19 = s.x19 := hx")
         A(f"  rw [hx'] at h")
@@ -8279,8 +8325,8 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
         A(f"    {cc}_runs")
         A(f"    (fun st hs => {cc}_mid {exit_pc} st hs (by simp))")
         A(f"    (by intro s hs; rfl)")
-        A(f"    (by intro s hs hx0; exact ({name}_loop_cond_flag s hs).mpr hx0)")
-        A(f"    (by intro s hs hq hx0; exact absurd (({name}_loop_cond_flag s hs).mpr hx0) hq)")
+        A(f"    (by intro s hs hx0; exact ({name}_loop_cond_flag s hs (by rw [hx0]; decide)).mpr hx0)")
+        A(f"    (by intro s hs hq hx0; exact absurd (({name}_loop_cond_flag s hs (by rw [hx0]; decide)).mpr hx0) hq)")
         A(f"    {name}_loop_cond_x19")
         A(f"    (by intro s hs hne hlt' hP; exact {name}_cd_body_run s hs hne hlt')")
         A(f"    (by intro s hs hne hlt' hP; exact {name}_cd_body_mid {exit_pc} s hs hne hlt' (by decide))")
