@@ -229,3 +229,28 @@ over the whole chain. Next experiment: give `simp` a SMALL memory by abstracting
 the stack frame as named slots (`mem_write_u64`'s base as a variable `m0` with the
 read-after-write facts for the frame slots proved once), so layers rewrite over
 `m0` plus a handful of writes instead of a growing lambda chain.
+
+### Experiment 2026-11-27 (b): straight-line `layer` script, `-M 24000` — a SINGLE layer already fails
+
+The `repeat'` loop was replaced by a straight-line script (one `layer (simp only
+[wp_k]; try simp …)` per block in chain order, `try (apply And.intro;
+rotate_left)` after each; `swap` is Mathlib, use `rotate_left`). On the 4-`if`
+program with the ceiling lifted (`-M 24000`, 14.6 GB, 364 s) the failures are
+`(kernel) deep recursion detected` on the aux theorems of the FIRST layers
+(lines 11074, 11076: blocks 0 and the first diamond), plus one `maxRecDepth` at a
+later line. With `-M 6144` the same layers report `excessive memory` instead.
+Both readings say the same thing: the cost is inside ONE layer's `simp` proof
+(the prologue / first diamond), not in how many layers there are, so splitting
+the chain further cannot fix it. The prologue stores `b1..b4 = 0`, so layer 0's
+term already carries a ~15-write `mem_write_u64` chain and `simp (disch :=
+decide)` proves one address inequality per link per read; `two`/3 `if`s fit,
+4 do not.
+
+Next, in order (each a 2-minute Lean run on `ifs4` with only layer 0 kept and the
+rest `sorry`): (1) bisect which lemma in the layer-0 simp set makes the term deep
+by dropping `mem_read_after_write_u64_ne`/`…_two_writes_same`/the `arm64_ite_*`
+group; (2) replace `disch := decide` by a discharger that proves the address
+inequality by `omega` on the toNat arithmetic (shallow proof) and check kernel
+depth; (3) if the chain itself is the problem, abstract the prologue's stores as
+named slots so layer 0 normalizes `mem_write_u64` over a variable base. Do not
+retry more splitting or bigger `-M`.
