@@ -15194,6 +15194,29 @@ def _gmp_collect_boxed_return_names(self, all_functions: list,
                 _has_none = True
                 _has_scalar = True
                 continue
+            # A return arm that IS a box-holding slot (a mixed field read,
+            # `return self.s`) already carries the scalar-and-None
+            # representation: the field's own decision is the return slot's
+            # evidence, and no literal `None` arm is needed for the caller to
+            # render/compare by kind (`x = c.get(); x is None`).
+            _arm_mixed = (_rbn_ein.value_class_of(self, _v, key, owner, 0)
+                          == 'mixed')
+            # `value_class_of` answers `unknown` for a field whose only
+            # non-`None` store comes from an unobserved parameter
+            # (`def __init__(self, v=None): self.v = v` + `set(3)`), while the
+            # field's own decision (`mixed_field_read`, which counts a `= None`
+            # default as None evidence) is `mixed`. The field IS the return
+            # slot's representation, so ask the same authority the read uses.
+            if (not _arm_mixed and owner
+                    and isinstance(_v, MemberExpr)
+                    and isinstance(_v.obj, IdentExpr)
+                    and _as_str(_v.obj.name) == 'self'):
+                _arm_mixed = _rbn_ein.mixed_field_read(
+                    self, _as_str(owner), _as_str(_v.member))
+            if _arm_mixed:
+                _has_none = True
+                _has_scalar = True
+                continue
             if _arm_is_scalar(_v, key, owner, body):
                 _has_scalar = True
         # Python's fall-off-the-end is `return None`: a proven scalar arm plus

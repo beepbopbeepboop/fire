@@ -492,6 +492,8 @@ added (the `test_type_string_ratchet.py` counts are unchanged).
   (`fire.py run`) path handles a literal and a parameter store in two modules
   correctly (measured with `/tmp/xmod`), but the per-file path cannot link the
   sibling in the test harness, so the limitation is unmeasured there.
+  MEASURED 2026-11-27 with a two-unit link+run fixture; see the last Status
+  entry for the three findings and the implementation guide.
 - Owner runs `make bootstrap` as the acceptance check.
 
 ## Status 2026-11-27 (pool re-measurement: the None group is down to four)
@@ -631,9 +633,10 @@ site; `classes/12_linked_list_nodes` — now OK; `params/31_varargs_sum` — now
 OK). `flow/02` and `flow/34` (`None -> []`) are OK.
 
 **Still open.**
-- A CONTAINER value domain's `.get` (`dd.get("a")["n"]`) returns the container
-  type but its readers lose the inner value metadata (`object is not
-  subscriptable`), and the hit prints as its address. A separate slice.
+- ~~A CONTAINER value domain's `.get` (`dd.get("a")["n"]`) returns the
+  container type but its readers lose the inner value metadata (`object is
+  not subscriptable`), and the hit prints as its address. A separate slice.~~
+  CLOSED 2026-11-27 (commit `be9844ab3`; see the last Status entry).
 - Cross-module per-file (`do_imports=False`) mixed fields: unmeasured (the
   inline `fire.py run` path handles a literal and a parameter store in two
   modules correctly); the test harness cannot link a sibling import in the
@@ -660,3 +663,201 @@ temp before the integer answer (`a[0] * 2` beside a tagged word emitted
 `int64_t * int`, a GIMPLE type mismatch), and `mojo_list_get_boxed` raises
 IndexError for an out-of-range index like the checked accessors (`lambda *a:
 a[0]` on an empty pack).
+
+## Status 2026-11-27 (container value-domain `.get` closed; cross-module per-file measured)
+
+### Container value domain (commits `be9844ab3`, `ca4591884`) — closed
+
+`dict_value_kind` (`mojo/middle/exprtypes.py`) answers a container-valued
+expression (`{'a': {'n': 1}}`, `{'a': [1, 2]}`, `{'a': {3}}`) with its own
+pointer type instead of `None`, so `_dict_val_of` reports the domain and
+`_ldm_get`'s container arm returns the container ctype with the dict's
+`_dict_val_types` / `_dict_nested_val_types` carried onto the result temp.
+`dd.get("a")["n"]` is a dict subscript again (it raised `object is not
+subscriptable` as an int word) and the hit prints the container, not its
+address. The generated `_mojo_repr_dict` / `_mojo_repr_set` /
+`_mojo_repr_list` render a **NULL** container as `None` (a real empty
+container is non-NULL and still prints `{}` / `set()` / `[]`), which is what
+makes `.get(k)`'s miss print `None`.
+
+Pinned as `tools/pydiff_corpus/containers/41_dict_get_container_values.py`
+(OK under `pydiff`): dict/list/set value domains × hit / miss / `is None` /
+`print` / `len` / subscript. `test_pydiff_ratchet.py` 139/0, the type and
+runtime ratchets 0, runtime header scan 84/84.
+
+Residual, measured and NOT a regression: a BYTES value domain is still
+unreadable through `.get` (`d = {"a": b"xy"}; print(d.get("a"))` spells the
+pointer, and `len(d.get("a"))` is its address length). It did so before this
+change too (its old domain was the `int64_t` default); `_ldm_get`'s container
+arm has no bytes reader, so `dict_value_kind` deliberately does not claim
+bytes as a container and the `exprtypes` comment says what to implement
+first.
+
+### Cross-module per-file (`do_imports=False`) mixed fields — measured
+
+The inline path (`fire.py run`, one TU) is fully correct on the same fixture
+(`None / True / True / 1 / 2 / 9 / None`, exactly CPython). The per-file path
+(both modules through `build_stdlib_dylib.compile_module_to_c`, `gcc
+-fgimple`, linked with `runtime/fire_runtime.c`, run) was measured with a
+`helper.py` defining `class Box` (`self.v` set to `None` and to a scalar) and
+a `main.py` importing and using it. Three independent findings:
+
+**(a) Scalar evidence that lives only in the importer is invisible to the
+definer.** With `__init__: self.v = None` and `set(self, x): self.v = x`, and
+the only scalar argument at `b.set(5)` inside `main`, the defining unit emits
+`self->v = 0LL` (not `mojo_box_none()`) — `mixed_field_names` sees no scalar
+store, because `collect_param_value_obs` collects call sites from its own
+module only. Run: `print(b.get())` → `0` (CPython `None`). This is the
+doc's known limitation, now measured end-to-end: the missing piece is
+**call-site evidence across modules**, not the per-struct decision alone.
+
+**(b) When the definer's mixed decision holds, the box crosses correctly.**
+With the scalar store also inside `helper` (`bump()` stores `1`), the definer
+emits `mojo_box_none()` and the per-file run prints `None`, `1`, and
+computes `y + 1 == 2` exactly as CPython. What is still wrong is only the
+call-site fact about the returned word: `x is None` and `x == None` print
+`False` (CPython `True`), because the import call result is an untagged
+`int64_t` and the identity/equality arm falls back to the word compare
+(`_t11 == 0`). A box-holding word is printed correctly because the print
+helper (`mojo_cstr_or_int_str` → `_box_spelled_by_kind`) already asks the
+runtime.
+
+**(c) Direct field access on an imported class is unsupported in general.**
+`b.v` (and `b.n` on a plain `self.n = 0` class) raises the runtime
+`AttributeError: v` — the importer's stub is `typedef struct Box { int64_t
+__mojo_type_id; int _dummy; }`. That is a per-file class-shape limitation,
+not a mixed-field or `None` one, and it is why the reachable cross-module
+`None` case is a method return, not a field read.
+
+### Design and implementation guide for the remaining cross-module scheme
+
+Two halves, independent; (b) is reachable now, (a) needs a build-order
+decision.
+
+**H1 — an imported method's returned word is "nothing says what the callee
+returns" (fixes (b)).**
+
+1. Mark the symbol. The imported-method extern loop
+   (`mojo/backend_gimple/module_gen.py`, the `for s in
+   self._imported_typedef_structs:` block, ~17436, which already computes
+   `ret_type` and emits the `#ifndef _MOJO_STUB_…` extern) records
+   `ret_type`/`param_ctypes`. When `ret_type` is a word (`int64_t`/`int`),
+   add the bare and qualified symbols to a new set, e.g.
+   `self._unknown_ret_word_syms` (initialize beside
+   `self._struct_method_signatures` in `gen_module_impl`).
+2. Mark the call result. `mojo/backend_gimple/emit_infra.py::_emit_call`
+   (the emitter the imported call really goes through — measured; `fname` is
+   the qualified `helper_Box_get` and it is NOT in `imported_symbols`) marks
+   `result_var` `_word_mark_dyn` when `fname` is in that set and `ret_type`
+   is a word. Precedent and wording: the indirect-call arm in
+   `mojo/backend_gimple/emit_calls.py` (~10885) already does exactly
+   `gen._word_mark_dyn(raw_t)  # nothing says what the callee returns`.
+3. Read it. `mojo/backend_gimple/emit_exprs.py::_lbt_boxed_none_compare`
+   (~5064) must accept a **dyn** word in both conjuncts (today it requires
+   `_word_may_be_box` plus, for `is`, `_word_is_tagged`/`_for_tagged`/
+   `_mixed_none`). The read stays `mojo_word_is_none(v)`, which is a
+   registered-pointer test (`_pr_has`, `fire_runtime.c` ~1911) and answers 0
+   for any non-box, so it never dereferences an arbitrary word and a bare
+   int 0 answers `False` — the DECISION's "Never `x == None` as `x == 0`".
+   `_lbt_proven_int_is_none` still runs first, so a proven int keeps the
+   constant fold.
+4. Soundness boundary. Do NOT mark with `_word_mark_mixed_field`: that flag
+   asserts "int or None, never a float box" and is read by
+   `_kind_arith_operand` (~4651), so an imported method that returns a
+   float box would lose its arithmetic kind-select. `dyn` is the honest
+   marker for a word whose contents the TU cannot see.
+5. Tests: a per-file linked+run fixture built the
+   `test_codegen_imported_global_unannotated_scalar.py` way (two
+   `compile_module_to_c` units, `gcc -fgimple`, link `runtime/fire_runtime.c`,
+   run, compare CPython) for the (b) fixture; `test_gimple_runner.py`'s
+   `gimple_none_*` and `test_gimple_generator_runner.py`'s
+   `run_tagged_none_identity_tests`; the corpus.
+
+**H2 — publish the field decision and the call-site evidence (fixes (a)).**
+
+1. Record: per class, `field -> (ctype, value_class)`; per method,
+   `ret_value_class` ('refs' | 'scalar' | 'mixed' | 'unknown'). The
+   `module_loader.py` export dict already carries `c_return_type` /
+   `c_parameters` / `signature` per function; a `fields` entry belongs beside
+   them, and the importer's stub (`typedef struct Box { int64_t
+   __mojo_type_id; int _dummy; }`) is where (c) would be fixed at the same
+   time.
+2. Evidence direction: the definer needs the importers' call-site kinds.
+   Options, in order of preference:
+   (i) a per-module summary artifact published next to the object — the
+   channel exists (`build_stdlib_dylib.compile_module_to_c_cached` publishes
+   a JSON sidecar via `cas`; `_read_csyms` already reads one), so the
+   definer's compile can read importers' summaries when they exist and stay
+   rule 3 when they do not;
+   (ii) a whole-closure pre-pass (what the inline path gets for free);
+   (iii) broaden the definer's rule so "None + unannotated parameter store"
+   is mixed without evidence — REJECTED: that is precisely the
+   `classes/12`/`13` regression the DECISION's rule 1 exists to prevent.
+3. Ordering: H2 changes per-file build order (definer before importer for
+   evidence, or a summary pass). Land H1 first; it needs no ordering and
+   closes the reachable (b) symptom.
+
+Not reachable from the corpus: every corpus program is single-file with
+inline imports, so the per-file scheme is a documented limitation, not a
+5c corpus item. The 5c acceptance remains the in-module corpus parity plus
+the owner's `make bootstrap`.
+
+## Status 2026-11-27 (the last `None -> 0` corpus row: stores, defaults, returns, list concat)
+
+The corpus first-difference group `want=None / got=0` is now **empty**
+(measured over `pydiff --out`'s per-program reports). Four code fixes, each
+one a slot whose `None` was flattened back to the null word:
+
+**1. A BOX-HOLDING PARAMETER stored into a mixed field keeps the box.**
+`classes/02_mixed_field_types`' `__init__` receives `None`, and
+`self.extra = extra` stored the *unboxed* word: the body-side read of a
+mixed-field parameter is `mojo_box_word(param)` (the body's ordinary uses
+want the plain word), and `_safe_coerce_emit`'s "boxed word into a pointer
+slot" arm unwrapped it again. The store now takes the raw parameter word
+(`build.copy`, deliberately not `gen._copy`, whose `carry_value_info` would
+copy the box fact onto the temp and re-trigger the unwrap) when the target
+field is mixed and the value is in `boxed_param_names`.
+
+**2. A `= None` parameter default is None evidence for the field decision.**
+`mixed_field_names` counted only a literal `None` store, so
+`def __init__(self, s=None): self.s = s` beside `def set(self, s): self.s = s`
+with `set(5)` at a call site stayed non-mixed (bit `2` only) and the boxed
+`None` printed `0`. `collect_param_value_obs` now builds
+`_pv_param_default_none` (`<callee>\x1f<param>` for an UNANNOTATED parameter
+whose default is None, from `param_default_is_none`), and the store loop ORs
+the None bit for it — the DECISION's "padded defaults included".
+
+**3. A return arm that is a MIXED field read makes the return slot tagged.**
+`_gmp_collect_boxed_return_names` required an explicit `None` arm, so
+`def get(self): return self.v` was an untagged word: `x = c.get(); x is None`
+/ `x == None` compared `x == 0` at the caller (`print` was already right
+because the word printer asks the runtime). An arm whose `value_class_of` is
+`'mixed'` — or, when that answers `'unknown'` (a field whose only non-None
+store is an unobserved parameter), whose field `mixed_field_read` says mixed
+— now supplies both the None and the scalar evidence.
+
+**4. `mojo_list_concat` keeps the per-slot kinds row.** A kinds row is one
+byte per slot (`mojo_list_slot_kind` reads `k[i]`), so the result's row is
+the two rows laid end to end; the old rule only propagated for equal-length,
+equal-row operands plus `kinds + []`. `walk(left) + [node.key]` over a
+multi-node subtree therefore recorded nothing, and the generic walker
+answered `None` for the integer `0` (`classes/13_binary_tree_inorder` printed
+`[-2, None, ...]`). The row is built with `'i'` (the reader's own default)
+in any position the source row does not cover. `_provably_int_word` also
+accepts a non-mixed integer FIELD read, so `[node.key]` records an `'i'`
+row at all.
+
+**Measured.** The three reduced fixtures (`__init__(self, s=None)` + a
+scalar setter; the same with a string; the direct-field-read variant) are OK
+under `pydiff`. `classes/02`'s remaining diff is `type(r.tags).__name__` →
+`<type>` (a `type().__name__` gap, not `None`); `classes/13` is OK;
+`classes/21`'s remaining diff is the default object repr. `classes/03`,
+`04`, `38`, `41`, `12`, `funcs/05`, `params/31`, `35`, `flow/02`, `34` and
+the container `.get` program stay OK. `test_pydiff_ratchet.py` 139/0; the
+type, mixed-field and runtime-header ratchets 0/0 (84/84).
+
+**Final tree tallies.** `compile_stdlib.py -j4`: 610 passed, 0 failed (0
+expected, 0 unexpected). Corpus (287 programs): OK **160**, WRONG 105,
+CRASH 15, ERROR 2, GCC 2, REFUSED 3 — versus OK 159/WRONG 106 before these
+four fixes, and only `classes/13` flipped (no WRONG/CRASH moved the other
+way). `test_gimple_runner.py`: 688 passed, 0 failed.

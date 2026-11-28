@@ -2608,9 +2608,33 @@ def _gen_stmt_AssignStmt(gen, node: gimple_ctypes.AssignStmt) -> None:
             # Stage 5c: a literal `None` stored into a MIXED field (a scalar
             # beside `None`) is the shared None box, so a later read tells it
             # from the integer 0. Every other store is the bare word.
-            if (ginf.is_none_literal_node(node.value)
+            _mixed_target = ginf.mixed_field_read(gen, struct_name, node.target.member)
+            # …and a BOX-HOLDING PARAMETER (`self.extra = extra`, where
+            # `extra` was classified by the field's own mixed decision) is
+            # already the box: the call site boxed its argument by kind, and
+            # `_lower_IdentExpr` unboxed it only for the body's ordinary
+            # reads. Storing that unboxed word here dropped the None box back
+            # to `0` (`classes/02_mixed_field_types`: the constructor gets
+            # `None`, the field read printed `0`). The raw parameter word IS
+            # the box.
+            if (_mixed_target
+                    and isinstance(node.value, gimple_ctypes.IdentExpr)
+                    and _as_str(node.value.name) in ginf.boxed_param_names(gen)):
+                # A plain copy, NOT `_to_int64`: that helper's job is to take
+                # a box apart for an integer consumer (`mojo_box_int`), which
+                # is what flattened this store back to 0. The fresh temp is
+                # also unmarked, so `_safe_coerce_emit`'s "boxed word into a
+                # pointer slot" arm does not `mojo_box_word` it either.
+                _raw_box = gen._new_temp('int64_t')
+                # `build.copy`, not `gen._copy`: the latter carries the
+                # source's box fact onto the temp (`carry_value_info`), and
+                # then `_safe_coerce_emit`'s pointer arm unboxes it right
+                # back. This statement is the box moving into its slot.
+                build.copy(gen, _raw_box, _as_str(node.value.name))
+                v, vtype = _raw_box, 'int64_t'
+            elif (ginf.is_none_literal_node(node.value)
                     and gimple_ctypes.TypeLattice.is_word(field_type)
-                    and ginf.mixed_field_read(gen, struct_name, node.target.member)):
+                    and _mixed_target):
                 v, vtype = ginf.box_word_value(gen, node.value, vtype, v)
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
             gimple_ctypes.presence_set_emit(gen, gen._struct_name_owner.get(struct_name), node.target.member, ov, op)

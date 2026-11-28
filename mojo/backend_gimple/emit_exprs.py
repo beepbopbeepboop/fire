@@ -8521,6 +8521,19 @@ def _provably_int_word(gen, el, ev: str) -> bool:
     if (isinstance(el, UnaryOp) and _as_str(el.op) == '-'
             and isinstance(el.operand, IntLiteral)):
         return True
+    if (isinstance(el, MemberExpr) and not gen._word_is_mixed_field(ev)):
+        # A FIELD read whose declared ctype is an integer word is a real
+        # integer in THIS module unless the read is one of the box-holding
+        # mixed slots, which `_lower_MemberExpr` marks (`_word_is_mixed_field`,
+        # excluded above). Without this, `[node.key]` recorded no kinds row at
+        # all (the element is a MemberExpr, not an IdentExpr the word tracker
+        # knows), so the generic walker described the integer `0` as `None` --
+        # `classes/13_binary_tree_inorder` printed `[-2, None, ...]`.
+        # An IMPORTED struct is left unproven: its defining module made the
+        # mixed decision and this TU cannot see it.
+        _ft = gen._resolve_member_expr_type(el)
+        if isinstance(_ft, str) and gimple_ctypes.TypeLattice.is_int_word(_ft):
+            return True
     return gen._word_is_int_word(ev)
 
 

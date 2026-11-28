@@ -4376,23 +4376,31 @@ MojoList *mojo_list_concat(MojoList *a, MojoList *b)
      * container type, so the result has to be marked like every other
      * derivation of one. */
     if (mojo_is_tuple(a) || mojo_is_tuple(b)) mojo_mark_as_tuple(r);
-    /* `t + t` and `t + []` are described by the source kinds, repeated to
-     * cover the result's slots; anything else (two lists whose kinds differ)
-     * has ONE slot array and no single correct answer, so nothing is
-     * recorded rather than something wrong. The repeated string is a fresh
-     * allocation because the source's is shared with every copy of it. */
+    /* A kinds row is ONE BYTE PER SLOT (`mojo_list_slot_kind` reads `k[i]`),
+     * so the result's row is exactly the two source rows laid end to end —
+     * whatever their kinds and lengths. The old rule only propagated for
+     * equal-length, equal-row operands (plus `kinds + []`), so
+     * `walk(left) + [node.key]` over a multi-node subtree recorded nothing
+     * and the generic walker rendered an integer `0` as `None`
+     * (`classes/13_binary_tree_inorder` printed `[-2, None, ...]` for
+     * `[-2, 0, ...]`). A missing tail byte reads as `'i'` there, so a short
+     * row is padded with `'i'` the same way. The buffer belongs to the
+     * result (a fresh allocation): the sources' rows are shared with every
+     * copy of them. */
     {
         const char *ka = mojo_list_get_kinds(a);
         const char *kb = mojo_list_get_kinds(b);
         int64_t na = a->len, nb = b->len;
-        if (ka && nb == 0) {
-            mojo_list_set_kinds(r, ka);
-        } else if (ka && kb && na == nb && strcmp(ka, kb) == 0) {
+        if ((ka || kb) && na + nb > 0) {
             char *kk = (char *)malloc((size_t)(na + nb) + 1);
-            memcpy(kk, ka, (size_t)na);
-            memcpy(kk + na, kb, (size_t)nb);
-            kk[na + nb] = '\0';
-            mojo_list_set_kinds(r, kk);
+            if (kk) {
+                size_t _la = ka ? strlen(ka) : 0, _lb = kb ? strlen(kb) : 0;
+                memset(kk, 'i', (size_t)(na + nb));
+                if (ka) memcpy(kk, ka, _la < (size_t)na ? _la : (size_t)na);
+                if (kb) memcpy(kk + na, kb, _lb < (size_t)nb ? _lb : (size_t)nb);
+                kk[na + nb] = '\0';
+                mojo_list_set_kinds(r, kk);
+            }
         }
     }
     /* The element repr propagates on the same terms as the kinds string

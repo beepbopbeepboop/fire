@@ -5718,6 +5718,32 @@ def collect_param_value_obs(gen, all_functions: list, all_structs: list,
         allnames[k] = set(pnames[k])
     gen._pv_structs = structs
     gen._pv_param_names = allnames
+    # Parameters whose declared default is the literal `None`: a
+    # `self.<f> = <param>` store can put None INTO the field even though the
+    # method body contains no `None` literal (the DECISION's "padded defaults
+    # included"). Keyed `<callee>\x1f<param>` like `_param_value_obs`; read by
+    # `mixed_field_names`' None bit. Only an UNANNOTATED parameter: an
+    # annotated slot keeps its annotation (and its own None spelling).
+    _def_none: dict = {}
+    for _k in pnames:
+        _d = defs.get(_k)
+        if _d is None:
+            continue
+        for _pn in pnames[_k]:
+            try:
+                _has_ann = any(_as_str(_p[0]) == _as_str(_pn)
+                               and len(_p) > 1 and _p[1] is not None
+                               for _p in (getattr(_d, 'params', None) or []))
+            except Exception:
+                _has_ann = True
+            if _has_ann:
+                continue
+            try:
+                if param_default_is_none(_d, _as_str(_pn)):
+                    _def_none[_as_str(_k) + '\x1f' + _as_str(_pn)] = 1
+            except Exception:
+                pass
+    gen._pv_param_default_none = _def_none
     _pv_own: set = set()
     for n in (own_struct_names or []):
         _pv_own.add(_as_str(n))
@@ -5835,6 +5861,19 @@ def mixed_field_names(struct, gen=None) -> frozenset:
                 # dispatch by kind or a `list.append`/`print` of the field
                 # stores the box's address as an integer.
                 _bit = 4
+            # A `= None` default is None evidence too: the DECISION counts a
+            # padded default, and `self.<f> = <param>` can put None into the
+            # field without any `None` literal in the method body. Without
+            # this bit a field whose scalar store lives in one method and
+            # whose None arrives only as a sibling method's default
+            # (`def __init__(self, s=None): self.s = s` + `set(5)`) stayed
+            # non-mixed and the boxed None printed as `0`.
+            if (isinstance(found[i][1], gimple_ctypes.IdentExpr)
+                    and gen is not None):
+                _dn = _as_dict(getattr(gen, '_pv_param_default_none', None) or {})
+                if (_as_str(ckey) + '\x1f'
+                        + _as_str(found[i][1].name)) in _dn:
+                    _bit = _bit | 1
             # A store of a TAGGED parameter (one the call sites box a
             # None/bool literal for) makes the field box-holding too: the
             # field can receive the None box even though no literal `None` is
