@@ -5426,6 +5426,15 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return _lower_next_iter_cursor(
             gen, node, itc.cursor_for(gen, gen._cname(node.args[0].name)),
             node.args)
+    # `next(<bare list>)`: map/filter materialize to a list but Python still
+    # treats the binding as a single-pass iterator. Bind its cursor on first
+    # use, so a later `list(it)` consumes the tail, not the whole list again.
+    if (fname_raw == 'next' and 1 <= len(node.args) <= 2
+            and isinstance(node.args[0], gimple_ctypes.IdentExpr)
+            and not gen._locally_binds_name('next')):
+        _bare = _bind_bare_list_cursor(gen, gen._cname(node.args[0].name))
+        if _bare is not None:
+            return _lower_next_iter_cursor(gen, node, _bare, node.args)
     if fname_raw == 'next' and len(node.args) == 1:
         at, av = gen.lower_expr(node.args[0])
         at = gen._get_actual_type(at, av)
@@ -7083,6 +7092,57 @@ def _lower_builtin_issubclass(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
         cmp_t = _issubclass_one(gen, node.args[0], type_arg)
         gen._cast_into(t, '_Bool', _as_str(cmp_t))
     return '_Bool', t
+
+
+def _bind_bare_list_cursor(gen, name):
+    """Bind a resumable cursor for a bare `MojoList *` local, lazily.
+
+    `map(f, xs)` and `filter(f, xs)` materialize to a list (see
+    `_lower_builtin_map`), so `it = map(...)` is a LIST local that Python
+    still treats as a single-pass iterator. `next(it)` used to refuse: the
+    cursor registry only knew cursors bound by `it = iter(<list>)`. Bind one
+    on first `next()` here, so the following `list(it)` reads what is LEFT.
+    A non-list name is left alone -- the other next() arms decide it.
+    """
+    _cname = gen._cname(name)
+    _rec = itc.cursor_for(gen, _cname)
+    if _rec is not None:
+        return _rec
+    _at = gen._get_actual_type(gen.var_types.get(name, 'int64_t'), _cname)
+    if not gimple_ctypes.TypeLattice.is_list(_at):
+        return None
+    _cur = gen._new_temp('int64_t')
+    gen._cast_into(_cur, 'int64_t', '0')
+    _full = gen._call_expr('int64_t', 'mojo_list_len', [('MojoList *', _cname)])
+    _elem = gen._elem_of(_cname) or 'int64_t'
+    _rec = {'kind': 'list', 'src': _cname, 'cursor': _cur, 'full': _full,
+            'elem': _elem, 'vct': itc.slot_ctype(_elem)}
+    gen._list_iter_cursor[_cname] = _rec
+    return _rec
+
+
+def _materialize_cursor_remaining(gen, rec) -> tuple[str, str]:
+    """`list(it)` where `it` has a live cursor: the UNCONSUMED tail only."""
+    _res = gen._rt_call('MojoList *', 'mojo_list_new', [])
+    _cur = rec['cursor']
+    _n = gen._new_val('int64_t', rec['full'])
+    _bc = gen._new_bb(); _bb = gen._new_bb(); _bd = gen._new_bb()
+    gen._goto(_bc)
+    gen._emit_label(_bc)
+    gen._cond_goto(gen._cmp(_cur, '<', _n), _bb, _bd)
+    gen._emit_label(_bb)
+    _vct, _val = itc.read_at(gen, rec, _cur)
+    if gimple_ctypes.TypeLattice.is_cstr(_vct):
+        gen._rt_void('mojo_list_append_str', [_res, _val])
+    elif gimple_ctypes.TypeLattice.is_double(_vct):
+        gen._rt_void('mojo_list_append_double', [_res, _val])
+    else:
+        gen._rt_void('mojo_list_append_int', [_res, gen._to_int64(_vct, _val)])
+    gen._copy(_cur, gen._inc_val(_cur))
+    gen._goto(_bc)
+    gen._emit_label(_bd)
+    gen._elem_types[_res] = rec.get('elem') or 'int64_t'
+    return 'MojoList *', _res
 
 
 def _lower_next_iter_cursor(gen, node, rec, args) -> tuple[str, str]:
@@ -8830,6 +8890,12 @@ def _lower_builtin_list(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `list(z)`-ed fine. Consume it with the same materializer print()
     # uses. The module-global read-back arrives boxed — resolve the
     # actual type first (mirrors _lower_builtin_len's identical handling).
+    if (_kind == 'list' and len(node.args) == 1
+            and isinstance(node.args[0], gimple_ctypes.IdentExpr)
+            and not gen._locally_binds_name('list')):
+        _cur_rec = itc.cursor_for(gen, gen._cname(node.args[0].name))
+        if _cur_rec is not None:
+            return _materialize_cursor_remaining(gen, _cur_rec)
     if _kind == 'list' and len(node.args) == 1:
         _lat, _lav = gen.lower_expr(node.args[0])
         _refuse_namedtuple_tuple_use(gen, _lat, 'calling list on')
