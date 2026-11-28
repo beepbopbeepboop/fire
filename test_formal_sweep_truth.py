@@ -417,10 +417,12 @@ class TestLeanOutput(unittest.TestCase):
         """
         import inspect
         src = inspect.getsource(L.library_census)
-        self.assertIn("os.path.abspath(lib_dir)", src,
+        # `lean_path` is the one composer of every LEAN_PATH, and it
+        # absolutizes each entry; the site must go through it.
+        self.assertIn("lean_path(lib_dir, td)", src,
                       "the LEAN_PATH handed to the measurement must be "
-                      "absolute")
-        self.assertIn("os.pathsep.join((td, os.path.abspath(lib_dir)))", src)
+                      "composed by lean_path, which makes it absolute")
+        self.assertIn("os.path.abspath(p)", inspect.getsource(L.lean_path))
 
     def test_the_verdict_itself_is_run_with_an_absolute_library_path(self):
         """The SAME property, at the site that decides `ok`, and it was wrong.
@@ -450,10 +452,15 @@ class TestLeanOutput(unittest.TestCase):
         """
         import inspect
         src = inspect.getsource(L._run_lean)
-        self.assertIn("os.path.abspath(lib_dir)", src,
+        self.assertIn("lean_path(", src,
                       "the LEAN_PATH handed to the proof check must be "
-                      "absolute, exactly as `library_census`'s is")
-        self.assertIn("formal-proof-verdict-v5", L._VERDICT_VERSION.decode(),
+                      "composed by lean_path (absolute), exactly as "
+                      "`library_census`'s is")
+        self.assertIn("os.path.abspath(p)", inspect.getsource(L.lean_path))
+        import re as _re
+        _vm = _re.search(r"formal-proof-verdict-v(\d+)",
+                         L._VERDICT_VERSION.decode())
+        self.assertTrue(_vm and int(_vm.group(1)) >= 5,
                       "the published false verdicts were keyed on inputs that "
                       "cannot tell a found library from an unfound one, so they "
                       "replay; bump the verdict version rather than flushing a "
