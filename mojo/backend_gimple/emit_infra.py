@@ -9625,6 +9625,17 @@ def _tag_mixed_list_call_args(gen, callee: str, arg_pairs: list) -> None:
             continue
         _et = _as_str(gen._elem_types.get(_as_str(_av)))
         _kind = {'char *': 'p', 'double': 'd'}.get(_et)
+        # A value that already carries a PER-SLOT kinds row (a heterogeneous
+        # literal, or a list copied from one) must never be flattened to one
+        # uniform kind: `has(items, needle)` in containers/11 was called with
+        # `mojo_list_set_kinds_uniform(items, 'p')` before every call, which
+        # turned a mixed `ipnbip` list into an all-str list and made
+        # `mojo_list_contains_str` strcmp integer slots -- a SIGSEGV. The
+        # uniform annotation is a guess from the PARAMETER's type; a recorded
+        # row is fact and wins.
+        if (gen._word_has_slot_kinds(_as_str(_av))
+                or gen._word_has_slot_kinds(_av)):
+            continue
         if _kind:
             gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
                            [('MojoList *', _as_str(_av)), ('char', "'" + _kind + "'")])

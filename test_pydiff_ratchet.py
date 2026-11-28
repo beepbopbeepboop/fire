@@ -32,6 +32,7 @@ NO_CRASH = [
     'params/10_none_or_value_arg.py',
     'funcs/30_dispatch_dict_by_string.py',
     'params/40_dispatch_table_of_defs.py',
+    'containers/11_in_list_needles.py',
 ]
 
 
