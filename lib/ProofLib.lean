@@ -1175,6 +1175,21 @@ theorem sKey_ge_sKey_one_iff (q : UInt64) :
   unfold sKey
   bv_decide
 
+/-- The signed `≤ 0` exit test (`b.le`) is `q = 0` OR `q` negative.  The
+    bounded loop contract supplies `q.toNat < 2^63`, which removes the second
+    disjunct, and that is what makes the countdown exit lemma stateable. -/
+theorem sKey_le_sKey_zero_iff (q : UInt64) :
+    sKey q ≤ sKey 0 ↔ (q = 0 ∨ 0x8000000000000000 ≤ q) := by
+  unfold sKey
+  bv_decide
+
+/-- The signed `< 1` exit test (`b.lt`), the `while n >= 1` form of the same
+    "counter reached zero" condition. -/
+theorem sKey_lt_sKey_one_iff (q : UInt64) :
+    sKey q < sKey 1 ↔ (q = 0 ∨ 0x8000000000000000 ≤ q) := by
+  unfold sKey
+  bv_decide
+
 mutual
 
 /-- Source semantics: evaluate expressions with a call handler for recursion.
@@ -5190,7 +5205,7 @@ theorem while_dec_exit_contract_lt
       ∀ u, u < me → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
     (hexPc : ∀ st, st.pc = exitBpc → P st → (ex st).pc = exit)
     (hexX0 : ∀ st, st.pc = exitBpc → st.x19 = 0 → (ex st).x0 = done st.x19)
-    (hcondDone : ∀ st, st.pc = checkPc → q (cond st) = true →
+    (hcondDone : ∀ st, st.pc = checkPc → st.x19.toNat < B → q (cond st) = true →
       (ex { cond st with pc := exitBpc } : Arm64State).x0 = done st.x19)
     (hmojo : ∀ (a : UInt64), a ≠ 0 → a.toNat < B → done (a - 1) = done a)
     (hcbzExit : cbzPc ≠ exit) (hExitBpc : exitBpc ≠ cbzPc) (hBodyPc : bodyPc ≠ cbzPc) :
@@ -5235,7 +5250,7 @@ theorem while_dec_exit_contract_lt
       have hexpc : (ex { cond st with pc := exitBpc }).pc = exit := hexPc _ (by rfl) hPe
       rw [arm64_go_exit_hit _ code exit (fuel - mc - 1 - me) (by omega) hexpc]
       exact ⟨ex { cond st with pc := exitBpc }, rfl,
-        hcondDone st hpc (hcondZero st hpc hx19_0)⟩
+        hcondDone st hpc (by omega) (hcondZero st hpc hx19_0)⟩
     | succ k ih =>
       intro hkB st hpc hk hPst fuel hfuel
       rw [Nat.mul_succ] at hfuel
@@ -5269,7 +5284,7 @@ theorem while_dec_exit_contract_lt
         rw [hglue3]
         have hexpc : (ex { cond st with pc := exitBpc }).pc = exit := hexPc _ (by rfl) hPe
         rw [arm64_go_exit_hit _ code exit (fuel - mc - 1 - me) (by omega) hexpc]
-        exact ⟨ex { cond st with pc := exitBpc }, rfl, hcondDone st hpc hq⟩
+        exact ⟨ex { cond st with pc := exitBpc }, rfl, hcondDone st hpc (by omega) hq⟩
       · have hflag : q (cond st) = false := by
           cases hb : q (cond st)
           · rfl
