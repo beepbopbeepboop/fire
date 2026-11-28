@@ -269,7 +269,7 @@ theorem optionalOrElse_absent (x d n : Nat) (h : x = n) : optionalOrElse x d n =
     present, and this target has no representation for "absent" to trap on. -/
 theorem optionalPayloadIsTheWord (x : Nat) : x = x := rfl
 
-theorem sub_add (m n : Nat) (h : n ≤ m) : n + (m - n) = m := by omega
+theorem nat_sub_add_of_le (m n : Nat) (h : n ≤ m) : n + (m - n) = m := by omega
 
 /-- Collapse a pushed byte-window term to a single compound window decide. -/
 theorem winfix (v i k : Nat) :
@@ -279,7 +279,7 @@ theorem winfix (v i k : Nat) :
   · have t1 : decide (i ≥ k) = true := decide_eq_true hc.1
     have t2 : decide (i - k < 8) = true := decide_eq_true (by omega)
     have t3 : decide (k ≤ i ∧ i < k + 8) = true := decide_eq_true hc
-    rw [t1, t2, t3, sub_add i k hc.1]
+    rw [t1, t2, t3, nat_sub_add_of_le i k hc.1]
     try simp
   · rcases Nat.lt_or_ge i k with hl | hg
     · have e1 : decide (i ≥ k) = false := decide_eq_false (by omega)
