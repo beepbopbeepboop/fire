@@ -7350,7 +7350,8 @@ def _gmp_struct_params_from_observations(self, _STRUCT_FALLBACKS: list[str], _fn
             continue
         ann: dict = {}
         for _an_pn, _an_pt in (fn.params or []):
-            ann[_as_str(_an_pn)] = _an_pt
+            if _an_pt is not None:   # presence only; see the note at `_gmp_scalar_params_from_observations`
+                ann[_as_str(_an_pn)] = True
         # A METHOD RECEIVER, a direct argument to a struct CONSTRUCTOR call,
         # or an argument FORWARDED to another function in this body.
         # Receiver: not rooted at a subscript/slice of the param, which is a
@@ -7448,7 +7449,7 @@ def _gmp_struct_params_from_observations(self, _STRUCT_FALLBACKS: list[str], _fn
                 continue
             if _st[:-2] not in self.struct_field_types:
                 continue
-            if ann.get(pname) is not None:
+            if pname in ann:
                 continue                         # respect explicit annotation
             cur = self._inferred_param_types.get(callee, {}).get(pname)
             if cur is not None and cur not in _STRUCT_FALLBACKS:
@@ -9216,7 +9217,8 @@ def _gmp_ctor_init_param_fields(self, stmts: list, _ctor_init_methods: dict, _ct
                 continue
             _ann = {}
             for _ap in (_init.params or []):
-                _ann[_as_str(_ap[0])] = _ap[1]
+                if _ap[1] is not None:
+                    _ann[_as_str(_ap[0])] = True
             for _pname in _ctor_init_params[_cs_name2]:
                 _okey2 = _cs_name2 + '::' + _pname
                 _kind = _obs_kind.get(_okey2, '')
@@ -9225,7 +9227,7 @@ def _gmp_ctor_init_param_fields(self, stmts: list, _ctor_init_methods: dict, _ct
                     continue                    # none, or not unanimous
                 if _obs_conflict.get(_okey2) or _obs_container_conflict.get(_okey2):
                     continue                    # mixed char*/double evidence
-                if _ann.get(_pname) is not None:
+                if _pname in _ann:
                     continue                    # respect explicit annotation
                 # FLAT composite key "<struct>::<param>": a nested
                 # `dict[str, dict[str, str]]` is unreliable here because
@@ -12829,7 +12831,8 @@ def _gmp_forward_struct_params(self, _STRUCT_FALLBACKS: list[str], _caller_bodie
                     continue
                 _fann: dict = {}
                 for _fp, _fpt in (_ffn.params or []):
-                    _fann[_as_str(_fp)] = _fpt
+                    if _fpt is not None:
+                        _fann[_as_str(_fp)] = True
                 _fdflt = getattr(_ffn, 'param_defaults', {}) or {}
                 for _fi, _fa in enumerate(_fc.args):
                     if _fi >= len(_fpns):
@@ -12843,7 +12846,7 @@ def _gmp_forward_struct_params(self, _STRUCT_FALLBACKS: list[str], _caller_bodie
                             and _fst[:-2] in self.struct_field_types):
                         continue
                     _fq = _as_str(_fpns[_fi])
-                    if _fann.get(_fq) is not None:
+                    if _fq in _fann:
                         continue            # respect explicit annotation
                     if _fq in _fdflt:
                         continue            # respect default-value inference
@@ -12884,7 +12887,8 @@ def _gmp_scalar_params_from_observations(self, _fn_by_name: dict, _scalar_obs: d
             continue
         ann: dict = {}
         for _an_pn, _an_pt in (fn.params or []):
-            ann[_as_str(_an_pn)] = _an_pt
+            if _an_pt is not None:   # presence only; see the note at `_gmp_scalar_params_from_observations`
+                ann[_as_str(_an_pn)] = True
         for pname in sorted(pmap):
             types = pmap[pname]
             _has_dbl = 'double' in types
@@ -12903,7 +12907,7 @@ def _gmp_scalar_params_from_observations(self, _fn_by_name: dict, _scalar_obs: d
                 # already typed by real evidence, not by the int64_t
                 # default, so they never need the discriminator. Only a slot
                 # actually left at `int64_t` is recorded.
-                if _has_cs and ann.get(pname) is None:
+                if _has_cs and pname not in ann:
                     self._int64_may_hold_str.setdefault(callee, set()).add(pname)
                 # The float twin: a double was observed beside an integer, so
                 # the slot holds a float at one site and an int at another.
@@ -12911,10 +12915,10 @@ def _gmp_scalar_params_from_observations(self, _fn_by_name: dict, _scalar_obs: d
                 # because those rows own the slot, and a box would hand the
                 # string or list a MojoBox where it expects its own pointer.
                 if (_has_dbl and len(types) > 1 and not _has_cs
-                        and 'void *' not in types and ann.get(pname) is None):
+                        and 'void *' not in types and pname not in ann):
                     self._int64_may_hold_float.setdefault(callee, set()).add(pname)
                 continue                         # not unanimous double / char *
-            if ann.get(pname) is not None:
+            if pname in ann:
                 continue                         # respect explicit annotation
             cur = self._inferred_param_types.get(callee, {}).get(pname)
             # A `MojoList *` guess (the parameter is sliced / indexed and nothing else
@@ -17642,7 +17646,8 @@ def gen_module_impl(self, stmts: list):
             # would miss every entry inserted under a corrupted-hash key.
             ann = {}
             for _ap, _at in (meth.params or []):
-                ann[_ap] = _at
+                if _at is not None:
+                    ann[_ap] = True
             defaults = getattr(meth, 'param_defaults', {}) or {}
             _msps = _as_str(_msobs_params[_msg]).split('\x1f')
             for _mspi in range(1, len(_msps)):
@@ -17653,7 +17658,7 @@ def gen_module_impl(self, stmts: list):
                 if _msbits != 1 and _msbits != 2:
                     continue                 # not unanimous double / char *
                 types_is_double = (_msbits == 1)
-                if ann.get(pname) is not None:
+                if pname in ann:
                     continue                 # respect explicit annotation
                 if pname in defaults:
                     continue                 # respect default-value inference
@@ -19640,7 +19645,8 @@ def gen_module_impl(self, stmts: list):
                 continue
             _ann = {}
             for _ap2 in (_init.params or []):
-                _ann[_as_str(_ap2[0])] = _ap2[1]
+                if _ap2[1] is not None:
+                    _ann[_as_str(_ap2[0])] = True
             _init_defaults = getattr(_init, 'param_defaults', {}) or {}
             for pname in _ctor_init_params[_csn]:
                 _skey2 = _csn + '::' + pname
@@ -19695,7 +19701,7 @@ def gen_module_impl(self, stmts: list):
                             s.name: s for s in all_functions if isinstance(s, StructDef)}
                     continue                    # mixed evidence: keep int64_t
                 _resolved_type = _st2
-                if _ann.get(pname) is not None:
+                if pname in _ann:
                     continue                    # respect explicit annotation
                 if pname in _init_defaults:
                     continue                    # respect default-value inference
