@@ -11538,7 +11538,11 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A(f"{IND}all_goals done")
         else:
             _cfg_leaf(A, IND, "walk-terminal",
-                      "all_goals (first | done | sorry)")
+                      "all_goals (first | done | "
+                      "(intro hltn; exact eq_zero_of_not_sKey_gt_zero_of_toNat_lt _ "
+                      "(by assumption) hltn) | "
+                      "(intro hltn; exact eq_zero_of_not_sKey_ge_one_of_toNat_lt _ "
+                      "(by assumption) hltn) | sorry)")
 
     def emit_block(bi: int, state: str, fuel_n: int, depth: int, path: set,
                    ctx: dict = None):

@@ -1190,6 +1190,35 @@ theorem sKey_lt_sKey_one_iff (q : UInt64) :
   unfold sKey
   bv_decide
 
+/-- The loop-exit consequence the value-flow walk needs: if the signed test
+    `q > 0` is FALSE and `q` fits the bounded contract's positive range, then
+    the counter is zero.  This is the `walk-terminal` leaf's residual goal for
+    a signed `while n > 0` exit path, where the loop body was never run. -/
+theorem eq_zero_of_not_sKey_gt_zero_of_toNat_lt (q : UInt64)
+    (h : ¬ (sKey q > sKey 0)) (hlt : q.toNat < 9223372036854775808) : q = 0 := by
+  by_cases hq : q = 0
+  · exact hq
+  · exfalso
+    apply h
+    rw [sKey_gt_sKey_zero_iff]
+    exact ⟨hq, by
+      rw [UInt64.lt_iff_toNat_lt]
+      simpa [show (0x8000000000000000 : UInt64).toNat = 9223372036854775808 from by decide]
+        using hlt⟩
+
+/-- The `n >= 1` spelling of `eq_zero_of_not_sKey_gt_zero_of_toNat_lt`. -/
+theorem eq_zero_of_not_sKey_ge_one_of_toNat_lt (q : UInt64)
+    (h : ¬ (sKey q ≥ sKey 1)) (hlt : q.toNat < 9223372036854775808) : q = 0 := by
+  by_cases hq : q = 0
+  · exact hq
+  · exfalso
+    apply h
+    rw [sKey_ge_sKey_one_iff]
+    exact ⟨hq, by
+      rw [UInt64.lt_iff_toNat_lt]
+      simpa [show (0x8000000000000000 : UInt64).toNat = 9223372036854775808 from by decide]
+        using hlt⟩
+
 mutual
 
 /-- Source semantics: evaluate expressions with a call handler for recursion.
