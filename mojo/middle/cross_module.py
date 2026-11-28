@@ -45,7 +45,9 @@ def snapshot() -> dict:
     """A JSON-able copy for a worker process (no sets, no live objects)."""
     return {
         'kinds': {k: {p: list(v) for p, v in d.items()} for k, d in CALL_KINDS.items()},
-        'sigs': {m: {k: {'ret': s.get('ret'), 'params': list(s.get('params') or [])}
+        'sigs': {m: {k: {'ret': s.get('ret'),
+                         'params': list(s.get('params') or []),
+                         'ret_class': s.get('ret_class')}
                      for k, s in d.items()} for m, d in SIGNATURES.items()},
     }
 
@@ -281,3 +283,178 @@ def scan_module_calls(src: str, module_name: str, publish: bool = True) -> list:
     if publish:
         publish_call_kinds(entries)
     return entries
+
+
+# ── provisional signatures: the parent-side half of a parallel build ────────
+
+def _store_class(node, stmts, params, key) -> str:
+    """The value class of one `self.<f> = <value>` store: 'none' | 'refs' |
+    'scalar' | 'unknown'. `params` is the method's parameter list (self
+    included); `key` the callee's qualified registry key (for an
+    importer-published argument kind)."""
+    import mojo.middle.types as N
+    if node is None:
+        return 'unknown'
+    if isinstance(node, N.NoneLiteral) or (
+            isinstance(node, N.IdentExpr) and _name(node.name) == 'None'):
+        return 'none'
+    if isinstance(node, (N.IntLiteral, N.FloatLiteral, N.BoolLiteral)):
+        return 'scalar'
+    if isinstance(node, N.StringLiteral):
+        return 'refs'          # str or bytes: a pointer either way
+    if isinstance(node, (N.ListExpr, N.DictExpr, N.SetExpr, N.TupleExpr)):
+        return 'refs'
+    if isinstance(node, N.IdentExpr):
+        # A parameter stored into a field: the call sites' kinds are the
+        # evidence (the pre-pass published them for THIS module's callees).
+        nm = _name(node.name)
+        pos = -1
+        seen_self = False
+        for p in (params or []):
+            try:
+                pn = _name(p[0])
+            except Exception:
+                continue
+            if pn in ('self', 'cls') and not seen_self:
+                seen_self = True
+                continue
+            if pn.startswith('*'):
+                continue
+            pos += 1
+            if pn == nm:
+                break
+            if pos >= 64:
+                break
+        if pos < 0:
+            return 'unknown'
+        kinds = call_kinds(key).get('#%d' % pos) or call_kinds(key).get(nm) or []
+        if not kinds:
+            return 'unknown'
+        if any(k in ('p', 'w') for k in kinds):
+            return 'refs'
+        if any(k in ('i', 'b', 'd') for k in kinds):
+            return 'scalar'
+    return 'unknown'
+
+
+def _field_classes(stmts, module_name: str) -> dict:
+    """{(struct, field): 'refs'|'mixed'|'unknown'} from the module's stores.
+
+    'refs' means the field holds `None` AND references and no scalar (stage
+    5c rule 1: its bare 0 IS None). 'mixed' is a scalar beside a reference
+    (the box). A field with no informative store is 'unknown' and is not
+    published."""
+    import mojo.middle.types as N
+    import mojo.middle.exprtypes as _ex
+    bits: dict = {}   # key -> int (1 none, 2 refs, 4 scalar)
+    for s in stmts or []:
+        if not isinstance(s, N.StructDef):
+            continue
+        sname = _name(s.name)
+        for m in (s.methods or []):
+            if not isinstance(m, N.FunctionDef):
+                continue
+            key = module_name + '.' + sname + '.' + _name(m.name)
+            for n in _ex._walk_ast(m.body or []):
+                if not (isinstance(n, N.AssignStmt)
+                        and isinstance(n.target, N.MemberExpr)
+                        and isinstance(n.target.obj, N.IdentExpr)
+                        and _name(n.target.obj.name) == 'self'):
+                    continue
+                fname = _name(n.target.member)
+                cls = _store_class(n.value, stmts, m.params, key)
+                b = 0
+                if cls == 'none':
+                    b = 1
+                elif cls == 'refs':
+                    b = 2
+                elif cls == 'scalar':
+                    b = 4
+                if b:
+                    k = sname + '\x1f' + fname
+                    bits[k] = bits.get(k, 0) | b
+    out: dict = {}
+    for k in bits:
+        b = bits[k]
+        sname, fname = k.split('\x1f', 1)
+        if (b & 2) and (b & 4):
+            out[(sname, fname)] = 'mixed'
+        elif (b & 1) and (b & 2):
+            out[(sname, fname)] = 'refs'
+        elif (b & 2) and not (b & 1):
+            # References only, no `None` store: the bare 0 is not a None
+            # spelling here (nothing says the slot can hold None), so it is
+            # not the rule-1 shape this pass publishes.
+            out[(sname, fname)] = 'unknown'
+        else:
+            out[(sname, fname)] = 'unknown'
+    return out
+
+
+def _return_class(stmts, module_name: str, classes: dict, owner, fn) -> str:
+    """'refs' / 'mixed' / '' for one function/method's return slot."""
+    import mojo.middle.types as N
+    import mojo.middle.exprtypes as _ex
+    out = ''
+    for n in _ex._walk_ast(getattr(fn, 'body', None) or []):
+        if not isinstance(n, N.ReturnStmt):
+            continue
+        v = getattr(n, 'value', None)
+        if v is None:
+            continue
+        if (owner and isinstance(v, N.MemberExpr)
+                and isinstance(v.obj, N.IdentExpr)
+                and _name(v.obj.name) == 'self'):
+            cls = classes.get((owner, _name(v.member)))
+            if cls == 'refs':
+                return 'refs'
+            if cls == 'mixed':
+                out = 'mixed'
+        elif isinstance(v, N.MemberExpr):
+            # A field of another object is not this module's decision.
+            continue
+        elif isinstance(v, N.NoneLiteral):
+            continue
+    return out
+
+
+def publish_source_signatures(sources) -> None:
+    """Publish a PROVISIONAL `ret_class` per method/function of each source.
+
+    The parent of a multi-process build cannot see a worker's compiled
+    signatures. This pass gives it the one fact an importer needs and cannot
+    re-derive from the text scan: `ret_class='refs'` (a return arm reads a
+    refs-only field). The C `ret`/`params` are deliberately NOT published
+    here — the importer's text scan already has them, and a provisional C
+    type that disagreed with the definition would be an ABI claim, while
+    `ret_class` only changes the caller's spelling. `sources` is
+    `[(path, src)]`; failures are silent (the module's real compile reports
+    them)."""
+    for path, src in sources or ():
+        mod = _module_name_for(path)
+        try:
+            from fire_compiler import Parser, py_tokenize
+            import mojo.middle.types as N
+            stmts = Parser(py_tokenize(src)).parse_module()
+        except Exception:
+            continue
+        try:
+            classes = _field_classes(stmts, mod)
+            sigs: dict = {}
+            for s in stmts or []:
+                if isinstance(s, N.StructDef):
+                    sname = _name(s.name)
+                    for m in (s.methods or []):
+                        if not isinstance(m, N.FunctionDef):
+                            continue
+                        cls = _return_class(stmts, mod, classes, sname, m)
+                        if cls:
+                            sigs[sname + '.' + _name(m.name)] = {'ret_class': cls}
+                elif isinstance(s, N.FunctionDef):
+                    cls = _return_class(stmts, mod, classes, None, s)
+                    if cls:
+                        sigs[_name(s.name)] = {'ret_class': cls}
+            if sigs:
+                publish_signatures(mod, sigs)
+        except Exception:
+            continue

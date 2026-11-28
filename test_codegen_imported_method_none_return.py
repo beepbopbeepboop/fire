@@ -28,6 +28,7 @@ Run: python3 tools/memslot.py --gb 8 --label imported-method-none -- \
          python3 test_codegen_imported_method_none_return.py
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -143,20 +144,49 @@ def _run_case(name: str, helper_src: str, main_src: str, want: str) -> None:
         assert _cpython_stdout(td, main_path) == want, f'[{name}] fixture'
 
         # H2's pre-pass: publish BOTH modules' calls to the other's callees
-        # before either compiles (the whole-closure evidence pass), exactly as
+        # before either compiles (the whole-closure evidence pass), plus the
+        # parent-side PROVISIONAL signatures `ret_class=refs` — exactly what
         # `build_stdlib_dylib.build` does in the parent process.
         cross_module.reset()
         cross_module.scan_module_calls(helper_src, 'helper')
         cross_module.scan_module_calls(main_src, 'main')
+        cross_module.publish_source_signatures(
+            [(helper_path, helper_src), (main_path, main_src)])
+        snap_path = os.path.join(td, 'evidence.json')
+        with open(snap_path, 'w') as f:
+            json.dump(cross_module.snapshot(), f)
 
         objs = []
         for module, src, path in (('helper', helper_src, helper_path),
                                   ('main', main_src, main_path)):
-            # H2: the definer's first compile publishes its signatures, and
-            # the importer (compiled second) consumes them. Opt-in so a
-            # many-independent-modules process cannot leak between units.
-            c_text = compile_module_to_c(src, path, module,
-                                         publish_signatures=True)
+            if module == 'main':
+                # The IMPORTER is compiled in a FRESH process seeded only
+                # from the parent's snapshot — the multi-process build's
+                # shape. If this path did not carry `ret_class=refs`, the
+                # importer would print the unset value as `0` and the case
+                # below would fail.
+                c_file = os.path.join(td, module + '.gen.c')
+                r = subprocess.run(
+                    [sys.executable, os.path.abspath(__file__),
+                     '--compile-seeded', path, module, snap_path, c_file],
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+                assert r.returncode == 0, (
+                    f'[{name}] seeded importer compile failed:\n{r.stderr[:2000]}')
+                with open(c_file) as f:
+                    c_text = f.read()
+                if 'refs_only' in name:
+                    # The structural half of the proof: the fresh process
+                    # used the refs-only spelling, which only the parent's
+                    # published `ret_class` can have told it.
+                    assert 'mojo_word_str_or_none' in c_text, (
+                        f'[{name}] the seeded importer never used the '
+                        f'refs-only spelling:\n{c_text[:2000]}')
+            else:
+                # The definer compiles in the parent with the evidence
+                # registry filled; it publishes its own signatures too, but
+                # the child above cannot see them (that is the point).
+                c_text = compile_module_to_c(src, path, module,
+                                             publish_signatures=True)
             assert c_text.strip(), f'[{name}] compile_module_to_c({module}) empty'
             c_file = os.path.join(td, module + '.gen.c')
             with open(c_file, 'w') as f:
@@ -191,7 +221,24 @@ def test_imported_method_none_return():
         _run_case(name, helper_src, main_src, want)
 
 
+def _compile_seeded(path: str, module: str, snap_path: str, out_c: str) -> int:
+    """Child-process half of the parallel-build proof: seed the registry from
+    the parent's snapshot in a FRESH process (as a ProcessPoolExecutor worker
+    does) and compile one module."""
+    import json
+    import mojo.middle.cross_module as cross_module
+    cross_module.reset()
+    with open(snap_path) as f:
+        cross_module.seed(json.load(f))
+    c_text = compile_module_to_c(open(path).read(), path, module)
+    with open(out_c, 'w') as f:
+        f.write(c_text)
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == '--compile-seeded':
+        return _compile_seeded(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
     test_imported_method_none_return()
     print(f'PASS: an imported method\'s boxed None return keeps `is None` / '
           f'`== None` in the per-file compile ({len(CASES)} programs linked '

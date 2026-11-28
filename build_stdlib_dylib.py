@@ -1705,12 +1705,23 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         try:
             import mojo.middle.cross_module as _xm_build
             _xm_build.reset()
+            _xsrcs: list = []
             for _xpath in modules:
                 try:
-                    _xm_build.scan_module_calls(open(_xpath).read(),
-                                                _module_name_for(_xpath))
+                    _xsrc = open(_xpath).read()
                 except Exception:
                     continue
+                _xm_build.scan_module_calls(_xsrc, _module_name_for(_xpath))
+                _xsrcs.append((_xpath, _xsrc))
+            # The parallel build's importer half: a worker cannot see a
+            # sibling worker's compiled signatures, so the parent publishes
+            # the one fact the text scan cannot re-derive — a method whose
+            # return arm is a REFS-ONLY field (`ret_class: refs`), which is
+            # what makes the importer spell the bare 0 as None. The C
+            # ret/params stay the importer's own text scan (a provisional C
+            # type here would be an ABI claim; `ret_class` only changes a
+            # spelling).
+            _xm_build.publish_source_signatures(_xsrcs)
             cross_snapshot = _xm_build.snapshot()
         except Exception:
             cross_snapshot = None
