@@ -954,3 +954,10 @@ repairs:
 Measured on the ported tree: corpus 287 programs unchanged (OK 160 / WRONG
 105 / CRASH 15 / ERROR 2 / GCC 2 / REFUSED 3; identical WRONG and CRASH
 lists), `compile_stdlib.py -j4` 610 passed / 0 failed.
+
+**Closing checks on the committed ported tree** (`95ff443c8` + the
+census refresh `f88dc70a0`): `test_gimple_runner.py` **688 passed, 0 failed**;
+`test_pydiff_ratchet.py` 139/0; mixed-field 0; type ratchets 0; runtime
+header scan 84/84 (its FORMAL.md quote was refreshed 868 -> 869 after the
+other lane's runtime change). The owner's `make bootstrap` remains the
+acceptance check for the compiled path this port touches.
