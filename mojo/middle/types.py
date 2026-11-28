@@ -793,7 +793,25 @@ class TypeLattice:
         a class-attribute dict's VALUE is a word of unknown kind in the
         self-hosted compiler, and the f-string printed the name's address
         (`MOJO_KIND_4321104256`)."""
-        name: str = _as_str(cls.SLOT_KIND_CONST[b])
+        # An explicit chain, not `cls.SLOT_KIND_CONST[b]`: a class-attribute dict
+        # literal is not populated in the compiled compiler (the lookup raised
+        # `KeyError: i` on the first `list.sort()`/`reverse()` it lowered).
+        # `SLOT_KIND_CONST` above stays the documented table; the two agree.
+        name: str = ''
+        if b == 'i':
+            name = 'INT'
+        elif b == 'd':
+            name = 'DOUBLE'
+        elif b == 's':
+            name = 'BYTES'
+        elif b == 'p':
+            name = 'STR'
+        elif b == 'l':
+            name = 'LIST'
+        elif b == 'n':
+            name = 'NONE'
+        else:
+            raise KeyError(b)
         return 'MOJO_KIND_' + name
 
     @classmethod

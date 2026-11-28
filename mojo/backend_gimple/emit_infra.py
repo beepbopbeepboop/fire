@@ -10975,11 +10975,14 @@ def _dedup_variadic_externs(parts: list) -> str:
     # same reasoning rejected it on 2026-09-26.
     concrete = set()
     variadic_by_part = []
-    for p in parts:
-        entry = _DEDUP_EXTERN_PARTS_CACHE.get(p)
-        if entry is None:
-            entry = _parse_part(p)
-            _DEDUP_EXTERN_PARTS_CACHE[p] = entry
+    for _p0 in parts:
+        p: str = _as_str(_p0)
+        # Presence test, not `.get(p)` + `is None`: a miss is the boxed None word on
+        # the self-hosted path and was taken for a cached entry. `p` is a typed
+        # str so the key is the string, never the raw pointer word.
+        if p not in _DEDUP_EXTERN_PARTS_CACHE:
+            _DEDUP_EXTERN_PARTS_CACHE[p] = _parse_part(p)
+        entry = _DEDUP_EXTERN_PARTS_CACHE[p]
         # Index, then `_as_list`: a cached `(concrete, variadic)` pair unpacked
         # by `a, b = entry` boxes both slots on the self-hosted path, and
         # `for name in part_concrete` was then "'for' loop over unsupported

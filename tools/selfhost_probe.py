@@ -7,8 +7,9 @@ diffs each `.ci` against `python3 fire.py --dump-full` of the same file, which i
 how every startup crash and every wrong-output defect of the self-hosted compiler
 was found (doc/GIR.md, "Selfhost closure"). Typical use:
 
-    python3 tools/memcap.py --limit-gb 24 -- python3 tools/selfhost_probe.py build /tmp/shb
-    python3 tools/selfhost_probe.py probe /tmp/shb prog1.mojo prog2.mojo
+    python3 tools/selfhost_probe.py build <dir>
+    python3 tools/selfhost_probe.py probe <dir> prog1.mojo prog2.mojo
+    python3 tools/selfhost_probe.py probe <dir> corpus pydiff:40    # the durable sets, below
     # a crash: ASLR matters, lldb must run with it ON
     lldb -b -o 'settings set target.disable-aslr false' \
          -o 'run --dump-full prog.mojo' -o 'bt 12' /tmp/shb/mojo_selfhost
@@ -16,7 +17,16 @@ was found (doc/GIR.md, "Selfhost closure"). Typical use:
     lldb ... -o 'breakpoint set -n mojo_raise_attribute_error' ...
 
 `SELFHOST_PROBE_DEBUG=1` on `build` adds -g1 so `bt` in lldb shows `file.py:line`.
-`build` takes about 15 minutes and 10 GB; `probe` takes seconds per file.
+`build` takes about 15 minutes and 10 GB; `probe` takes seconds per file. Run ONE build or probe
+at a time (a reboot on 2026-11-27 followed several builds and a probe run at once).
+
+Every run of the built binary is bounded: a wall-clock limit and a resident-set limit, and a child
+that passes either is stopped with a plain SIGTERM (this tool's own child, nobody else's) and
+reported as TIMEOUT / RSS-LIMIT. A compiler bug that loops while allocating must not be able to
+take the machine with it.
+
+Program sets: `corpus` is tools/selfhost_programs/*.mojo (small programs, one defect class each);
+`pydiff:N` is the first N programs of tools/pydiff_ok.txt.
 """
 import difflib
 import os
@@ -71,7 +81,68 @@ def build(out_dir: str) -> int:
     return 0
 
 
+MAX_SECONDS = 120
+MAX_RSS_GB = 12
+
+
+def _rss_gb(pid: int) -> float:
+    r = subprocess.run(['ps', '-o', 'rss=', '-p', str(pid)], capture_output=True, text=True)
+    try:
+        return int(r.stdout.strip()) / (1024.0 * 1024.0)
+    except ValueError:
+        return 0.0
+
+
+def run_bounded(cmd: list, cwd: str) -> tuple:
+    """`(returncode, stderr, note)` for one run of `cmd`, stopped with SIGTERM if it passes
+    MAX_SECONDS of wall clock or MAX_RSS_GB of resident memory (polled every 0.1 s). Output goes
+    to files, not pipes, so a chatty child cannot block on a full pipe while it is being watched."""
+    import tempfile
+    import time
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(cmd, cwd=cwd, stdout=out, stderr=err)
+        start = time.time()
+        note = ''
+        while p.poll() is None:
+            if time.time() - start > MAX_SECONDS:
+                note = 'TIMEOUT'
+            elif _rss_gb(p.pid) > MAX_RSS_GB:
+                note = 'RSS-LIMIT'
+            if note:
+                p.terminate()
+                try:
+                    p.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
+                break
+            time.sleep(0.1)
+        err.seek(0)
+        return p.returncode if p.returncode is not None else -1, err.read().decode('utf8', 'replace'), note
+
+
+def expand(files: list) -> list:
+    """`corpus` and `pydiff:N` stand for the durable program sets (see the module docstring)."""
+    out: list = []
+    for f in files:
+        if f == 'corpus':
+            d = os.path.join(HERE, 'selfhost_programs')
+            out += [os.path.join(d, n) for n in sorted(os.listdir(d)) if n.endswith('.mojo')]
+        elif f.startswith('pydiff:'):
+            names = [ln.strip() for ln in open(os.path.join(HERE, 'pydiff_ok.txt'))
+                     if ln.strip() and not ln.startswith('#')]
+            import tempfile
+            stage = tempfile.mkdtemp(prefix='pydiff_probe_')
+            for n in names[:int(f.split(':')[1])]:
+                dst = os.path.join(stage, n.replace('/', '_')[:-3] + '.mojo')
+                shutil.copy(os.path.join(HERE, 'pydiff_corpus', n), dst)
+                out.append(dst)
+        else:
+            out.append(f)
+    return out
+
+
 def probe(out_dir: str, files: list) -> int:
+    files = expand(files)
     exe = os.path.join(out_dir, 'mojo_selfhost')
     work = os.path.join(out_dir, 'probe')
     os.makedirs(work, exist_ok=True)
@@ -86,7 +157,7 @@ def probe(out_dir: str, files: list) -> int:
         ref = open(ref_path, encoding='utf8', errors='replace').read() if os.path.exists(ref_path) else ''
         if os.path.exists(ref_path):
             os.replace(ref_path, os.path.join(work, name + '.ref'))
-        r = subprocess.run([exe, '--dump-full', src], cwd=work, capture_output=True, text=True)
+        rc, stderr, note = run_bounded([exe, '--dump-full', src], work)
         got_b = open(ref_path, 'rb').read() if os.path.exists(ref_path) else b''
         try:
             got_b.decode()
@@ -96,14 +167,15 @@ def probe(out_dir: str, files: list) -> int:
         got = got_b.decode('utf8', errors='replace')
         diff = list(difflib.unified_diff(ref.split('\n'), got.split('\n'), 'ref', 'self',
                                          lineterm='', n=0))
-        verdict = 'identical' if not diff and r.returncode == 0 else 'DIFFERENT'
+        verdict = 'identical' if not diff and rc == 0 else 'DIFFERENT'
         if verdict != 'identical' or utf8 != 'utf8-ok':
             bad += 1
-        print('%-28s rc=%-4d %s %s (%d diff lines)' % (name, r.returncode, utf8, verdict, len(diff)))
+        print('%-28s rc=%-4d %s %s (%d diff lines)%s' % (name, rc, utf8, verdict, len(diff),
+                                                   ' ' + note if note else ''))
         if diff and '-v' in sys.argv:
             print('\n'.join(diff[:60]))
-        if r.returncode != 0:
-            print('   stderr:', r.stderr.strip()[:200])
+        if rc != 0:
+            print('   stderr:', stderr.strip()[:200])
     return 1 if bad else 0
 
 

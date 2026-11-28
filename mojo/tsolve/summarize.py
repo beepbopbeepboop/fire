@@ -1453,14 +1453,16 @@ class _Summarizer:
 
     def _lambda(self, scope: _Scope, e) -> Term:
         child = _Scope(scope.mod, scope.cls, scope.cs, scope.fn, scope)
-        _lparams: list = N._as_list(e.params)
-        for _li in range(len(_lparams)):
-            pair: list = N._as_list(_lparams[_li])
-            var = self.prog.new_var(N._as_str(pair[0]))
+        # Positional tuple unpack, the shape every other compiled consumer of
+        # `LambdaExpr.params` uses (see fire_compiler.LambdaExpr): indexing a
+        # pair read the tuple as a list and crashed on the first lambda.
+        lam: N.LambdaExpr = e
+        for pname, pdefault in lam.params:
+            var = self.prog.new_var(N._as_str(pname))
             self.prog.pin(var, sty.DYN)
-            child.locals[N._as_str(pair[0])] = _Binding('var', '', var, '', '')
-            if pair[1] is not None:
-                self._term(scope, pair[1])
+            child.locals[N._as_str(pname)] = _Binding('var', '', var, '', '')
+            if pdefault is not None:
+                self._term(scope, pdefault)
         self._term(child, e.body)
         return const_term(sty.FUNC)
 

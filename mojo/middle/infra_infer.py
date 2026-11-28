@@ -9,7 +9,7 @@ from __future__ import annotations
 from __future__ import annotations
 import dataclasses
 import re
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_dict, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node, _as_funcdef_node, _sms_key
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_dict, _as_list, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node, _as_funcdef_node, _sms_key
 import regex_compile
 import mlir
 import ownership_destruct
@@ -2146,12 +2146,19 @@ def param_tagged_defaults(func, names) -> dict:
     declared default. `emit_infra._box_param_call_args` boxes an OMITTED
     argument's padded default by this node, so the pad is the same box a
     passed value of that kind would be."""
-    _defs = getattr(func, 'param_defaults', None) or {}
+    # Typed views and a presence test: `getattr(...) or {}` is an untyped word
+    # on the self-hosted path, `.get(...)` of a miss is the boxed None (truthy,
+    # `is not None`), and the untyped `for _pn in names` read list slots as
+    # strings: the compiled compiler died here on the first program with a
+    # defaulted parameter.
+    _defs: dict = _as_dict(getattr(func, 'param_defaults', None) or {})
     out: dict = {}
-    for _pn in (names or ()):
-        _d = _defs.get(_as_str(_pn).lstrip('*'))
-        if _d is not None:
-            out[_as_str(_pn)] = _d
+    _nl: list = list(names or [])
+    for _ni in range(len(_nl)):
+        _pn = _as_str(_nl[_ni])
+        _pk = _pn.lstrip('*')
+        if _pk in _defs:
+            out[_pn] = _defs[_pk]
     return out
 
 
@@ -2184,14 +2191,22 @@ def param_default_none_names(gen, func, func_key: str = None) -> set:
     out: set = set()
     _fname = _as_str(getattr(func, 'name', ''))
     _key = _as_str(func_key) if func_key is not None else _fname
-    _ann = {_as_str(_p[0]): (_p[1] if isinstance(_p, (tuple, list)) and len(_p) > 1 else None)
-            for _p in (getattr(func, 'params', None) or [])
-            if isinstance(_p, (tuple, list))}
+    # Typed views, explicit loops, presence tests (see `param_tagged_defaults`):
+    # the comprehension, the `.get(_key) or ()` and `_pn in _calls` on the boxed
+    # None were `mojo_list_contains_str` on a non-list in the compiled compiler.
+    _ann_has: dict = {}      # parameter name -> True when it carries an annotation
+    _plist: list = _as_list(getattr(func, 'params', None) or [])
+    for _pi in range(len(_plist)):
+        _p: list = _as_list(_plist[_pi])
+        _ann_has[_as_str(_p[0])] = len(_p) > 1 and _p[1] is not None
     _coro_fn = bool(getattr(func, 'is_generator', False)
                     or getattr(func, 'is_async', False))
-    _calls = (getattr(gen, '_callsite_tagged_params', None) or {}).get(_key) or ()
-    for _pn in _ann:
-        if _ann[_pn] is not None or _as_str(_pn).startswith('*'):
+    _cst: dict = _as_dict(getattr(gen, '_callsite_tagged_params', None) or {})
+    _calls: set = set()
+    if _key in _cst:
+        _calls = _as_set(_cst[_key])
+    for _pn in _ann_has:
+        if _ann_has[_pn] or _as_str(_pn).startswith('*'):
             continue
         _none = param_default_is_none(func, _pn)
         if not _none:
