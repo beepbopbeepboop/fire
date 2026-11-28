@@ -9496,7 +9496,14 @@ def _ast_child_nodes(value, out: list) -> None:
     Appends to a caller-supplied list rather than yielding, because this file
     is in the subset the self-hosted compiler lowers and that subset has no
     generators (see CLAUDE.md / test_selfhost.py)."""
-    if value is None or isinstance(value, (str, bytes, int, float)):
+    # `not value` as well as `is None`: a field a node does not have comes back
+    # from the compiled `getattr(n, name, None)` as the NULL word, which is not
+    # the boxed `None` the identity test knows. It was pushed as a node, its 50
+    # field reads each answered NULL again and pushed 50 more, and the stack
+    # grew exponentially until the machine ran out of memory (any lambda: the
+    # `key=` of `sorted`/`.sort()`). Every falsy value is a leaf or an empty
+    # container with nothing to append, so nothing a Python run pushes is lost.
+    if value is None or not value or isinstance(value, (str, bytes, int, float)):
         return
     if isinstance(value, (list, tuple)):
         for _x in value:
