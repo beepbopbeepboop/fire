@@ -7652,6 +7652,7 @@ def _lower_str_format_call(gen, tmpl: str, arg_pairs: list, kwargs,
     as one argument, rendered as its repr by the reference and as its
     address by the self-hosted compiler."""
     lst = gen._rt_call('MojoList *', 'mojo_list_new', [])
+    kd = None   # created lazily by a `**d` spread, else once after the loop
     _nodes = arg_nodes or []
     for _ai in range(len(arg_pairs)):
         _fa = arg_pairs[_ai]
@@ -7666,9 +7667,24 @@ def _lower_str_format_call(gen, tmpl: str, arg_pairs: list, kwargs,
             gen._emit_call('void', '', 'mojo_format_words_extend',
                            [('MojoList *', lst), ('MojoList *', _src)])
             continue
+        # `**d` is a DICT SPREAD, not a positional argument: its entries are
+        # the format's named fields. Handing the dict over as one positional
+        # value rendered it as `{...}` (or its address), so
+        # `"{first} {last}".format(**d)` raised `KeyError: first` at run time.
+        if (isinstance(_an, gimple_ctypes.UnaryOp) and _an.op == '**'
+                and (gimple_ctypes.TypeLattice.is_dict(_fat)
+                     or gimple_ctypes.TypeLattice.is_word(_fat))):
+            if kd is None:
+                kd = gen._rt_call('MojoDict *', 'mojo_dict_new', [])
+            _dsrc = _fav
+            if not gimple_ctypes.TypeLattice.is_dict(_fat):
+                _dsrc = gen._coerce_to_type('int64_t', 'MojoDict *', _fav)
+            gen._rt_void('mojo_dict_update', [kd, _dsrc])
+            continue
         _w = _format_arg_word(gen, _fat, _fav)
         gen._rt_void('mojo_list_append_int', [lst, f"{_w}"])
-    kd = gen._rt_call('MojoDict *', 'mojo_dict_new', [])
+    if kd is None:
+        kd = gen._rt_call('MojoDict *', 'mojo_dict_new', [])
     for _kp in (kwargs or []):
         _kt, _kv = gen.lower_expr(_kp[1])
         _w = _format_arg_word(gen, _kt, _kv)
