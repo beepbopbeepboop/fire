@@ -111,3 +111,7 @@ abt*_*.pyi
 
 # Per-worker brief written by tools/control.py into each worktree; never tracked.
 TASK.md
+
+# Lake / Mathlib (fetched, never committed)
+.lake/
+lake-packages/

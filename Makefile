@@ -8,7 +8,7 @@
 # test is in, which driver runs it, which memory ceiling applies, and what it
 # depends on. `python3 tools/suite.py --dry-run <bucket>` prints the plan.
 
-.PHONY: run demo check gate native check-gimple check-runner check-gimple-runner \
+.PHONY: run demo mathlib check gate native check-gimple check-runner check-gimple-runner \
         check-modcache check-selfhost check-runtimediff check-linkmode \
         check-no-new-casts check-coro check-stdlib check-stdlib-interp \
         check-examples-parse \
@@ -178,6 +178,22 @@ endef
 # ── Dev targets ──────────────────────────────────────────────────────────────
 demo:
 	echo "3 + 42 + 0xFF" | python3 fire_compiler.py
+
+# Fetch and build Mathlib for the formal proofs (ONCE per checkout).
+#
+# `lake update` reads lakefile.toml, whose `rev` is Mathlib's `v4.32.2` tag —
+# the same Lean as lean-toolchain, which is why it loads.  Its post-update hook
+# then runs `cache get`: the prebuilt oleans come from ~/.cache/mathlib when it
+# has them (measured here: 8638 files, no download) and are only fetched over
+# the network on a cold cache.  Idempotent: a second run is a no-op.
+#
+# `.lake/` is gitignored (7.4 GB here, and it is a build artifact), so this
+# target is what a fresh clone runs before any proof that imports Mathlib or
+# uses `aesop`/`norm_num`.  `formal/lean.py::mathlib_lean_path` finds the
+# result automatically; nothing else needs configuring.
+mathlib:
+	lake update
+	lake exe cache get
 
 suite-help:
 	@$(SUITE) --list

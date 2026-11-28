@@ -759,15 +759,24 @@ def refines_section(func_name: str, prog_name: str, ref: Refines,
         f"  exact h1.trans (main_model_refines_spec n h)\n")
 
 
-def header_imports(needs_specs: bool) -> str:
-    """The generated file's import block, with `Specs` only when it is used.
+def header_imports(needs_specs: bool, needs_mathlib: bool = False) -> str:
+    """The generated file's import block, with `Specs`/Mathlib only when used.
 
     Conditional rather than unconditional so that the 45-odd examples with no
     `@refines(…)` annotation get a byte-identical header to the one they got
     before this existed — an import nothing uses is an import every one of them
     pays to resolve.
+
+    `needs_mathlib` is set for the decrement-while AST bridge
+    (`_gen_dec_while_block`), which emits `aesop` and `norm_num`; both live in
+    Mathlib/Aesop, not core Lean.  `Mathlib.Tactic` rather than `Mathlib` is
+    the tactic library alone and is what those two tactics need — importing the
+    whole of Mathlib for every countdown proof would pay for the library on
+    each one.
     """
     block = "import ProofLib\nimport ProofLibSteps\nimport work\nimport Refine\n"
     if needs_specs:
         block += "import Specs\n"
+    if needs_mathlib:
+        block += "import Mathlib.Tactic\nimport Aesop\n"
     return block

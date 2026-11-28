@@ -218,6 +218,66 @@ def find_lean(repo_root: str | None = None) -> str | None:
     return None
 
 
+def mathlib_lean_path(lib_dir: str) -> list:
+    """The Lake build dirs that make `import Mathlib` / `import Aesop` resolve.
+
+    This tree does not build its own proof library with Lake — `lib/*.olean`
+    are managed by `ensure_library` — but Mathlib is far too large to carry in
+    `lib/`, so it is fetched and built once by the Lake project in
+    `lakefile.toml` (`lake update` + `lake exe cache get`) into `.lake/`.
+    Every consumer that composes a `LEAN_PATH` appends this list, so the
+    presence of Mathlib is decided in ONE place instead of three.
+
+    The directories are `packages/<dep>/.lake/build/lib/lean` for Mathlib and
+    its transitively required packages (Aesop, Batteries, Qq, …).  Enumerated
+    from disk rather than hard-coded: the dependency set is Mathlib's, and a
+    literal list here would go stale the moment its manifest changes.  An
+    absent `.lake/` yields `[]`, which is exactly the pre-Mathlib search path —
+    so a tree that has not fetched it still checks the proofs it did before.
+
+    `lib_dir` is `<repo>/lib`; the repo root is its parent.  Taking the same
+    argument every caller already has is what keeps this from needing a second
+    spelling of "where the repo is".
+    """
+    root = os.path.dirname(os.path.abspath(lib_dir))
+    lake = os.path.join(root, ".lake")
+    out = []
+    packages = os.path.join(lake, "packages")
+    try:
+        names = sorted(os.listdir(packages))
+    except OSError:
+        names = []
+    for name in names:
+        d = os.path.join(packages, name, ".lake", "build", "lib", "lean")
+        if os.path.isdir(d):
+            out.append(d)
+    build = os.path.join(lake, "build", "lib", "lean")
+    if os.path.isdir(build):
+        out.append(build)
+    return out
+
+
+def lean_path(lib_dir: str, *before: str, after=()) -> str:
+    """`LEAN_PATH` = `before`, then `lib`, then Mathlib's build dirs, then `after`.
+
+    One composition function for the four sites that build a search path
+    (`_run_lean`, `print_axioms`, `library_census`, `ensure_library`), so a
+    future dependency like Mathlib cannot be added to three of them and missed
+    in the fourth — the failure that would be a proof checked against a
+    different import set than the census reports.
+
+    `before` is for the proof's OWN directory (it must come first so a sibling
+    module shadows the library, the property `_proof_search_digest` is about);
+    `after` is for an inherited `LEAN_PATH`, which is a fallback and must not
+    outrank the tree's own modules.
+    """
+    parts = [os.path.abspath(p) for p in before if p]
+    parts.append(os.path.abspath(lib_dir))
+    parts.extend(mathlib_lean_path(lib_dir))
+    parts.extend(os.path.abspath(p) for p in after if p)
+    return os.pathsep.join(parts)
+
+
 # ── The launcher: the ONE way this tree runs Lean ──────────────────────────
 #
 # The numbers and the measurements behind them are in this module's docstring;
@@ -1325,7 +1385,7 @@ def library_census(lean: str, lib_dir: str, timeout: int | None = None,
             # ProofLib from the CAS, then reported X86/work/Refine as
             # UNMEASURED — a third silent way for the census to shrink to
             # whatever happened to be cached.
-            env["LEAN_PATH"] = os.pathsep.join((td, os.path.abspath(lib_dir)))
+            env["LEAN_PATH"] = lean_path(lib_dir, td)
             for stem in todo:
                 src = os.path.join(td, stem + ".lean")
                 if not os.path.isfile(src):
@@ -1481,8 +1541,8 @@ def print_axioms(lean: str, lib_dir: str, imports, names,
         return (LeanRun(None, "", "", "lean not found (see ./lean-toolchain)",
                         0.0, 0.0, 0, 0), {})
     env = os.environ.copy()
-    env["LEAN_PATH"] = os.pathsep.join((os.path.abspath(lib_dir),
-                                        env.get("LEAN_PATH", "")))
+    env["LEAN_PATH"] = lean_path(
+        lib_dir, after=(env["LEAN_PATH"],) if env.get("LEAN_PATH") else ())
     with scratch_dir("print-axioms") as td:
         source = os.path.join(td, "axioms.lean")
         with open(source, "w", encoding="utf-8") as f:
@@ -1593,7 +1653,7 @@ def ensure_library(lean: str, lib_dir: str, timeout: int | None = None,
     else:
         build_cpu = cpu_s if cpu_s is not None else library_bounds()[1]
     env = os.environ.copy()
-    env["LEAN_PATH"] = lib_dir
+    env["LEAN_PATH"] = lean_path(lib_dir)
 
     def ensure_one(stem):
         source = os.path.join(lib_dir, stem + ".lean")
@@ -1831,7 +1891,7 @@ def lean_version(lean: str, timeout: float = 120.0) -> str:
 # replayed for another's. Keyed on the directory's CONTENTS
 # (`_proof_search_digest`) rather than on its path: see that function for why
 # hashing the path would be worse than the hole.
-_VERDICT_VERSION = b"formal-proof-verdict-v5"
+_VERDICT_VERSION = b"formal-proof-verdict-v6"
 # -1 in the `lib_sorries` field, distinct from 0: "not measured" and "measured,
 # no holes" are different facts and the report prints them differently.
 _LIB_UNMEASURED = -1
@@ -1907,6 +1967,16 @@ def proof_verdict_key(proof_path: str, lib_dir: str, lean: str,
     with open(proof_path, "rb") as f:
         parts.append(f.read())
     parts.append(_proof_search_digest(proof_path))
+    # Mathlib's build dirs are part of the search path now, so their presence
+    # or absence changes what `import Mathlib` / `import Aesop` resolves to.
+    # Keyed on the DIRECTORIES and not their contents: hashing Mathlib's
+    # several-GB of `.olean` on every verdict would cost more than the check.
+    # The v6 `_VERDICT_VERSION` bump is what retires the verdicts recorded
+    # before Mathlib existed — those are the "unknown tactic `aesop`" failures
+    # this change makes re-checkable, and a content-keyed CAS would otherwise
+    # replay them forever.
+    parts.append(("mathlib:" + os.pathsep.join(mathlib_lean_path(lib_dir)))
+                 .encode("utf-8", "replace"))
     return "proof/" + cas.hash_parts(*parts)
 
 
@@ -2308,8 +2378,8 @@ def _run_lean(proof_path: str, lib_dir: str, lean: str, wall_s: float,
     # `proof_verdict_key` could not see at all — is keyed on its CONTENTS by
     # `_proof_search_digest`. The absolute path below is the half that fixes the
     # run; the key is the half that stops the wrong answer from outliving it.
-    env["LEAN_PATH"] = os.pathsep.join(
-        (os.path.dirname(os.path.abspath(proof_path)), os.path.abspath(lib_dir)))
+    env["LEAN_PATH"] = lean_path(
+        lib_dir, os.path.dirname(os.path.abspath(proof_path)))
     mb = proof_memory_mb(proof_path) if mem_mb is None else mem_mb
     result = run_lean(lean, [os.path.basename(proof_path)], env=env,
                       wall_s=wall_s, cpu_s=cpu_s, mem_mb=mb,

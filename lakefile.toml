@@ -1,0 +1,18 @@
+# Lake project used ONLY to fetch and build Mathlib for the formal proofs.
+#
+# The project's own `lib/*.lean` are compiled by the tree's own
+# `formal/lean.py` (bare `lean` with an explicit LEAN_PATH), not by Lake, so
+# there is deliberately no `[[lean_lib]]` here.  This file exists so that
+# `lake update` / `lake exe cache get` can materialise Mathlib's oleans under
+# `.lake/packages/mathlib/.lake/build/lib/lean`, which `formal/lean.py` adds to
+# its search path when present.
+#
+# The rev is the `v4.32.2` tag, whose `lean-toolchain` is
+# `leanprover/lean4:v4.32.2` -- the same toolchain as this tree.  Do NOT float
+# it: a Mathlib rev built for a different Lean refuses to load.
+name = "fire"
+
+[[require]]
+name = "mathlib"
+git = "https://github.com/leanprover-community/mathlib4"
+rev = "905b95818eb32af7874a58b427f50c1711a5e96c"

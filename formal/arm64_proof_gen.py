@@ -16926,7 +16926,8 @@ def generate_arm64_proof(prog, code, info) -> str:
     _extern_imp = ("import Extern\n"
                    if (_needs_extern_import
                        or "subs_one_no_overflow" in str(universal_section)) else "")
-    return f"""{SPECS.header_imports(bool(refines))}
+    return f"""{SPECS.header_imports(bool(refines), needs_mathlib=(
+        fn is not None and _dec_while_pattern(fn) is not None))}
 {_extern_imp}set_option maxRecDepth 100000
 set_option maxHeartbeats 20000000
 set_option linter.unusedSimpArgs false
